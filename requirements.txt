@@ -1,0 +1,2 @@
+# 运行时无额外第三方依赖，复用 AstrBot 运行时自带的依赖（httpx / sqlmodel / pyyaml 等）。
+# 本文件仅用于兼容不支持 uv 的部署环境（pip install -r requirements.txt）。

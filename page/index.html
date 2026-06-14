@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>成本控制</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>成本控制</h1>
+        <p class="subtitle">页面构建中（Page under construction，阶段 0）</p>
+        <div id="bridge-status" class="bridge-status">
+            <!--
+                AstrBot WebUI 会通过 iframe 承载本页，并自动注入官方 plugin_page_bridge.js SDK。
+                前端可通过该 SDK 与后端 Web API 通信。
+                阶段 4 实现：检测 bridge SDK 是否就绪并显示状态。
+            -->
+            <span id="bridge-text">正在检测 bridge SDK...</span>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
