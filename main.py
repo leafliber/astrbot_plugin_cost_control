@@ -58,24 +58,46 @@ class Main(
         self.config = config or {}
 
     async def initialize(self) -> None:
-        """插件加载时初始化：建立独立 sqlite 补充表。
+        """插件加载时初始化：建立独立 sqlite 补充表 + 注册 CronJob。
 
-        失败仅记录日志，不阻断插件加载（降级：补充采集暂不可写，主统计仍可用）。
+        任一步失败仅记录日志，不阻断插件加载（降级：相应能力不可用，其余正常）。
         """
         try:
             await self.init_store()
         except Exception as e:
             logger.warning("[cost_control] 初始化存储失败: %s", e)
+        try:
+            await self.register_cron()
+        except Exception as e:
+            logger.warning("[cost_control] CronJob 注册失败: %s", e)
 
     @filter.on_llm_request(priority=100000)
-    async def on_llm_request_head(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        """LLM 请求前（最高优先级）：快照初始上下文 token。
+    async def on_llm_request_head(self, event: AstrMessageEvent, req: ProviderRequest):
+        """LLM 请求前（最高优先级）：阶段 2 预算硬拦截；阶段 3 上下文快照。
 
-        阶段 3 实现：在请求被其他插件修改前，记录 system / tools / history
-        的初始 token 数，供后续注入差归因使用。
+        预算超限时调 ``event.stop_event()`` 中止后续 LLM 调用，并返回提示。
+        ``fallback_provider`` 策略暂降级为拦截（切换 provider 机制待阶段 3）。
+        异常一律降级放行，绝不阻断主流程。
         """
+        try:
+            umo = str(getattr(event, "unified_msg_origin", None) or "")
+            model = getattr(req, "model", None) or None
+            result = await self.check_budget(umo, model)
+            if result.get("exceeded"):
+                policy = result.get("policy") or {}
+                action = policy.get("action", "stop_llm")
+                msg = (
+                    f"⏸ 已超出预算（{result.get('dim')}）："
+                    f"用 {result.get('used')} / 限 {result.get('limit')} token"
+                )
+                if action != "stop_llm":
+                    msg += "\n（fallback 策略暂未启用，已拦截）"
+                event.stop_event()
+                yield event.plain_result(msg)
+                return
+        except Exception as e:
+            logger.warning("[cost_control] 预算检查失败: %s", e)
         # TODO 阶段3：快照初始上下文 token
-        ...
 
     @filter.on_llm_request(priority=-100000)
     async def on_llm_request_tail(self, event: AstrMessageEvent, req: ProviderRequest) -> None:

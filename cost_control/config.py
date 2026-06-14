@@ -111,6 +111,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "cooldown_seconds": 300,
         "daily_report_time": "09:00",
+        "daily_report_to": [],
     },
     "prompt_optimizer": {
         "enabled": True,

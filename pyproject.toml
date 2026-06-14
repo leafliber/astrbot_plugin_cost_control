@@ -3,7 +3,9 @@ name = "astrbot-plugin-cost-control"
 version = "0.1.0"
 description = "细粒度 token 监控、超预算提醒、缓存破坏诊断、提示词优化与全数据可视化的 AstrBot 插件"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "astrbot>=4.25.5",
+]
 
 [dependency-groups]
 dev = [

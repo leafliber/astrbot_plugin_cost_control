@@ -188,6 +188,18 @@
         "hint": "格式 HH:MM，留空则不推送日报",
         "type": "string",
         "default": "09:00"
+      },
+      {
+        "description": "每日报告推送目标会话列表",
+        "hint": "UMO 列表（unified_msg_origin），日报会逐个推送给这些会话；为空则不主动推送",
+        "type": "list",
+        "default": [],
+        "items": {
+          "description": "目标会话 UMO",
+          "hint": "形如 aiocqhttp:GroupMessage:123456",
+          "type": "string",
+          "default": ""
+        }
       }
     ]
   },

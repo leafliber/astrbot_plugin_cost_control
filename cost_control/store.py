@@ -99,7 +99,7 @@ class StoreMixin:
             await conn.run_sync(
                 lambda sync_conn: SQLModel.metadata.create_all(
                     sync_conn,
-                    tables=[CostSupplement.__table__],
+                    tables=[CostSupplement.__table__],  # type: ignore[attr-defined]
                     checkfirst=True,
                 )
             )
@@ -173,7 +173,7 @@ class StoreMixin:
             maker = await self._ensure_session_maker()
             async with maker() as session:
                 result = await session.execute(
-                    delete(CostSupplement).where(CostSupplement.created_at < before)
+                    delete(CostSupplement).where(CostSupplement.created_at < before)  # type: ignore[arg-type]
                 )
                 await session.commit()
                 return int(result.rowcount or 0)

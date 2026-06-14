@@ -147,3 +147,67 @@ class UsageQueryMixin:
                 return list(result.scalars().all())
         except Exception:
             return []
+
+    async def query_usage_grouped(
+        self,
+        *,
+        by: str = "model",
+        umo: str | None = None,
+        provider: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """按 ``by`` 分组聚合 token 用量（供成本核算按模型 / provider 拆分）。
+
+        Args:
+            by: ``"model"``（按 ``provider_model``）或 ``"provider"``（按 ``provider_id``）。
+            umo: 会话标识，None 表示不限。
+            provider: Provider ID，None 表示不限。
+            start: 窗口起始（含）。
+            end: 窗口结束（含）。
+
+        Returns:
+            ``[{"key": str, "token_input_other": int, "token_input_cached": int,
+            "token_output": int, "count": int}, ...]``，``key`` 为分组值
+            （模型名或 provider id）。失败返回空列表。
+        """
+        from astrbot.core.db.po import ProviderStat
+        from sqlmodel import func, select
+
+        try:
+            db = self.context.get_db()
+            group_col = (
+                ProviderStat.provider_id if by == "provider" else ProviderStat.provider_model
+            )
+            stmt = select(  # type: ignore[call-overload]
+                group_col,
+                func.sum(ProviderStat.token_input_other),
+                func.sum(ProviderStat.token_input_cached),
+                func.sum(ProviderStat.token_output),
+                func.count(),
+            ).group_by(group_col)
+            if umo:
+                stmt = stmt.where(ProviderStat.umo == umo)
+            if provider:
+                stmt = stmt.where(ProviderStat.provider_id == provider)
+            if start:
+                stmt = stmt.where(ProviderStat.created_at >= start)
+            if end:
+                stmt = stmt.where(ProviderStat.created_at <= end)
+            async with db.get_db() as session:
+                result = await session.execute(stmt)
+                rows = result.all()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                out.append(
+                    {
+                        "key": str(r[0] or ""),
+                        "token_input_other": int(r[1] or 0),
+                        "token_input_cached": int(r[2] or 0),
+                        "token_output": int(r[3] or 0),
+                        "count": int(r[4] or 0),
+                    }
+                )
+            return out
+        except Exception:
+            return []
