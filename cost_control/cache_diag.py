@@ -2,32 +2,238 @@
 
 识别四类导致 prompt cache 失效的原因，并在命中率低于阈值时触发告警：
 
-1. **上下文重置**：会话上下文被意外清空，导致历史缓存全部失效。
-2. **system prompt 变更**：多轮间 system prompt 内容变化，前缀不匹配。
-3. **工具定义变更**：tools 集合在多轮间变化，破坏缓存键。
-4. **上下文顺序漂移**：消息顺序变化导致前缀不匹配。
+1. **上下文重置**（``context_reset``）：本轮历史长度远小于上一轮，历史缓存全失效。
+2. **system prompt 变更**（``system_prompt_change``）：多轮间 system prompt 内容变化，前缀不匹配。
+3. **工具定义变更**（``tools_change``）：``func_tool`` 集合在多轮间变化，破坏缓存键。
+4. **上下文顺序漂移**（``order_drift``）：消息顺序变化导致前缀不匹配。
+
+源码约束（已核对）：``Conversation`` 仅持久化 ``history`` 字符串，**无
+``system_prompt`` / ``tools`` / ``contexts`` 字段**。故本 Mixin 自行在内存
+``_last_ctx[umo]`` 缓存上一轮上下文签名（system_prompt / func_tool / 各 message
+content 的确定性 hash + 历史长度），用于跨轮对比。重启丢失可接受（诊断是实时的）。
+
+命中率口径：``cache_read / (cache_read + input_other + cache_creation)``。
+Anthropic 的 ``cache_creation`` 在 ``raw_completion`` 不可得（源未设置），
+``supplement`` 已降级为 None，此时分母退化为 ``cache_read + input_other``。
+
+可测性设计：``hit_rate`` 与 ``diagnose_changes`` 抽成模块级纯函数，不依赖
+astrbot，可单测。
 
 阶段 3 实现。
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
+
+from astrbot.api.provider import ProviderRequest
+
+from .config import get_config
+
+
+def _hash_text(s: Any) -> str:
+    """对文本取确定性短 hash（md5 前 8 位），用于跨轮对比（纯函数）。"""
+    try:
+        return hashlib.md5(str(s).encode("utf-8", errors="ignore")).hexdigest()[:8]
+    except Exception:
+        return ""
+
+
+def hit_rate(
+    cache_read: int | None,
+    input_other: int | None,
+    cache_creation: int | None,
+) -> float:
+    """计算缓存命中率百分比（纯函数）。
+
+    口径：``cache_read / (cache_read + input_other + cache_creation) * 100``。
+    输入全为 None 或分母为 0 时返回 -1（表示「无数据」，不计入告警）。
+    """
+    cr = int(cache_read or 0)
+    io = int(input_other or 0)
+    cc = int(cache_creation or 0)
+    denom = cr + io + cc
+    if denom <= 0:
+        return -1.0
+    return cr * 100.0 / denom
+
+
+def diagnose_changes(
+    current: dict[str, Any],
+    last: dict[str, Any],
+    flags: dict[str, bool],
+) -> list[dict[str, Any]]:
+    """对比当前与上一轮上下文签名，返回四类破坏事件（纯函数）。
+
+    Args:
+        current: 当前轮签名（``_context_signature`` 产出）。
+        last: 上一轮签名（同结构）。
+        flags: 各类检测开关，键 ``detect_context_reset`` /
+            ``detect_system_prompt_change`` / ``detect_tools_change`` /
+            ``detect_order_drift``，缺省视为 True。
+
+    Returns:
+        事件列表，每项 ``{"type", "severity", "detail"}``；无问题返回空。
+    """
+    events: list[dict[str, Any]] = []
+
+    def on(name: str) -> bool:
+        return bool(flags.get(name, True))
+
+    if on("detect_context_reset"):
+        cur_len = int(current.get("history_len", 0) or 0)
+        last_len = int(last.get("history_len", 0) or 0)
+        if last_len >= 4 and cur_len < last_len * 0.5:
+            events.append(
+                {
+                    "type": "context_reset",
+                    "severity": "high",
+                    "detail": f"历史长度骤降 {last_len} → {cur_len}，缓存大概率全失效",
+                }
+            )
+
+    if on("detect_system_prompt_change"):
+        if current.get("system_hash") and last.get("system_hash"):
+            if current["system_hash"] != last["system_hash"]:
+                events.append(
+                    {
+                        "type": "system_prompt_change",
+                        "severity": "high",
+                        "detail": "system prompt 内容变化，前缀缓存失效",
+                    }
+                )
+
+    if on("detect_tools_change"):
+        if current.get("tools_hash") != last.get("tools_hash"):
+            # 仅当至少一轮有 tools 才报（避免空对空误报）
+            if current.get("tools_hash") or last.get("tools_hash"):
+                events.append(
+                    {
+                        "type": "tools_change",
+                        "severity": "medium",
+                        "detail": "工具定义变化，破坏缓存键",
+                    }
+                )
+
+    if on("detect_order_drift"):
+        cur_hashes = list(current.get("contexts_hashes", []) or [])
+        last_hashes = list(last.get("contexts_hashes", []) or [])
+        if last_hashes and len(cur_hashes) >= len(last_hashes):
+            # 正常追加：本轮前 len(last) 条应与上一轮完全一致
+            if cur_hashes[: len(last_hashes)] != last_hashes:
+                events.append(
+                    {
+                        "type": "order_drift",
+                        "severity": "medium",
+                        "detail": "历史消息顺序或内容漂移，前缀缓存失效",
+                    }
+                )
+
+    return events
 
 
 class CacheDiagMixin:
     """缓存破坏四类诊断的 Mixin。"""
 
-    async def diagnose(self, record: dict[str, Any]) -> list[dict[str, Any]]:
-        """对一条补充采集记录做缓存破坏诊断。
+    # 由 ``Main`` 宿主提供（Mixin 不定义 ``__init__``）。
+    context: Any
+    config: Any
 
-        Args:
-            record: ``SupplementMixin.collect_response`` 保存的记录，含 usage、
-                cache 字段与上下文快照。
+    # 上一轮上下文签名：key=umo。
+    _last_ctx: dict[str, dict[str, Any]]
+    # 最近诊断事件流：key=umo，value=事件列表（保留最近 20 条）。
+    _cache_events: dict[str, list[dict[str, Any]]]
+
+    def __init_cache_diag__(self) -> None:
+        """惰性初始化缓存诊断状态字典（多 Mixin 安全，幂等）。"""
+        if getattr(self, "_last_ctx", None) is None:
+            self._last_ctx = {}
+        if getattr(self, "_cache_events", None) is None:
+            self._cache_events = {}
+
+    def _cache_diag_flags(self) -> dict[str, bool]:
+        cfg = get_config(getattr(self, "config", None), "cache_diag", {}) or {}
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _hit_rate_threshold(self) -> float:
+        cfg = self._cache_diag_flags()
+        try:
+            return float(cfg.get("cache_hit_rate_alert_threshold", 30) or 0)
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _context_signature(self, req: ProviderRequest) -> dict[str, Any]:
+        """从 req 提取上下文签名（确定性 hash + 历史长度）。"""
+        try:
+            system = getattr(req, "system_prompt", "") or ""
+            func_tool = getattr(req, "func_tool", None)
+            contexts = list(getattr(req, "contexts", None) or [])
+            contexts_hashes = [
+                _hash_text(m.get("content") if isinstance(m, dict) else m) for m in contexts
+            ]
+            return {
+                "system_hash": _hash_text(system) if system else "",
+                "tools_hash": _hash_text(str(func_tool)) if func_tool is not None else "",
+                "contexts_hashes": contexts_hashes,
+                "history_len": len(contexts),
+            }
+        except Exception:
+            return {
+                "system_hash": "",
+                "tools_hash": "",
+                "contexts_hashes": [],
+                "history_len": 0,
+            }
+
+    def run_cache_diag(self, req: ProviderRequest, umo: str) -> list[dict[str, Any]]:
+        """对比上一轮上下文签名做四类诊断，更新内存缓存。
+
+        在 ``on_llm_request_tail`` 调用（此时 req 为最终态）。返回事件列表，
+        同时追加到 ``_cache_events[umo]``（保留最近 20 条）。任何异常降级为空。
+        """
+        self.__init_cache_diag__()
+        try:
+            current = self._context_signature(req)
+            last = self._last_ctx.get(umo, {}) if umo else {}
+            events = diagnose_changes(current, last, self._cache_diag_flags()) if last else []
+            # 给每个事件附 umo 便于命令展示
+            for ev in events:
+                ev["umo"] = umo
+            if umo:
+                self._last_ctx[umo] = current
+                bucket = self._cache_events.setdefault(umo, [])
+                bucket.extend(events)
+                if len(bucket) > 20:
+                    self._cache_events[umo] = bucket[-20:]
+            return events
+        except Exception:
+            return []
+
+    def check_hit_rate(self, record: dict[str, Any]) -> tuple[float, bool]:
+        """基于补充记录的 cache 字段计算命中率，判断是否低于阈值需告警。
 
         Returns:
-            诊断结果列表，每项形如
-            ``{"type": "context_reset", "severity": "high", "detail": "..."}``；
-            无问题则返回空列表。
+            ``(rate, should_alert)``。``rate`` 为百分比；无数据时 -1 且不告警。
         """
-        raise NotImplementedError("阶段3实现")
+        try:
+            rate = hit_rate(
+                record.get("cache_read") or record.get("token_input_cached"),
+                record.get("token_input_other"),
+                record.get("cache_creation"),
+            )
+            if rate < 0:
+                return rate, False
+            threshold = self._hit_rate_threshold()
+            return rate, threshold > 0 and rate < threshold
+        except Exception:
+            return -1.0, False
+
+    def recent_events(self, umo: str, limit: int = 10) -> list[dict[str, Any]]:
+        """返回指定会话最近的缓存诊断事件（供 ``/cache`` 命令展示）。"""
+        self.__init_cache_diag__()
+        try:
+            bucket = self._cache_events.get(umo, [])
+            return list(bucket[-limit:])
+        except Exception:
+            return []

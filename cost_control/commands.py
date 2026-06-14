@@ -31,8 +31,15 @@ class CommandsMixin:
     # 兄弟 Mixin 提供。
     query_usage: Any
     query_usage_grouped: Any
+    query_supplements: Any
     get_budgets: Any
     check_budget: Any
+    consume_last_injection: Any
+    last_system_prompt: Any
+    check_hit_rate: Any
+    recent_events: Any
+    analyze_prompt: Any
+    rewrite_prompt: Any
 
     def _umo(self, event: AstrMessageEvent) -> str:
         return str(getattr(event, "unified_msg_origin", None) or "")
@@ -94,15 +101,76 @@ class CommandsMixin:
 
     @filter.command("optimize")
     async def cmd_optimize(self, event: AstrMessageEvent):
-        """``/optimize``：分析并优化 system prompt。"""
-        # TODO 阶段3：调用 PromptOptimizerMixin
-        yield event.plain_result("该命令将在后续阶段实现。")
+        """``/optimize``：静态分析 system prompt；带 ``rewrite`` 参数触发 LLM 改写。
+
+        无参数时分析最近一次请求的 system prompt；``/optimize rewrite`` 则额外
+        经配置的 provider 改写并返回精简版。
+        """
+        try:
+            umo = self._umo(event)
+            arg = str(getattr(event, "message_str", "") or "").strip()
+            do_rewrite = arg.lower().startswith("rewrite")
+            sp = self.last_system_prompt(umo)
+            if not sp:
+                yield event.plain_result("暂无 system prompt（请先发起一次对话，且归因功能开启）。")
+                return
+            report = self.analyze_prompt(sp)
+            lines = [
+                "✏️ system prompt 静态分析",
+                f"长度 {report.get('length', 0)} 字符 / ≈ {report.get('tokens_est', 0)} token",
+                f"冗余 {report.get('redundancy_score', 0)}% / 可缓存性 "
+                f"{report.get('cacheability_score', 0)}/100",
+                "建议：",
+            ]
+            for s in report.get("suggestions", []):
+                lines.append(f"  · {s}")
+            if do_rewrite:
+                try:
+                    rewritten = await self.rewrite_prompt(sp, umo)
+                    lines.append("\n--- 改写后（前 500 字）---")
+                    lines.append(rewritten[:500])
+                except Exception as e:
+                    lines.append(f"\n改写失败：{e}")
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            yield event.plain_result(f"查询失败：{e}")
 
     @filter.command("cache")
     async def cmd_cache(self, event: AstrMessageEvent):
-        """``/cache``：查看缓存命中率与破坏诊断。"""
-        # TODO 阶段3：调用 CacheDiagMixin
-        yield event.plain_result("该命令将在后续阶段实现。")
+        """``/cache``：查看本会话最近缓存命中率与破坏诊断事件。"""
+        try:
+            umo = self._umo(event)
+            sups = await self.query_supplements(umo=umo, limit=10)
+            lines = ["🗄 缓存诊断（本会话最近）"]
+            rates: list[float] = []
+            for s in sups or []:
+                rate, _ = self.check_hit_rate(
+                    {
+                        "cache_read": getattr(s, "cache_read", None),
+                        "token_input_cached": getattr(s, "token_input_cached", 0),
+                        "token_input_other": getattr(s, "token_input_other", 0),
+                        "cache_creation": getattr(s, "cache_creation", None),
+                    }
+                )
+                if rate >= 0:
+                    rates.append(rate)
+            if rates:
+                avg = sum(rates) / len(rates)
+                lines.append(f"平均命中率 ≈ {avg:.0f}%（{len(rates)} 条样本）")
+            elif sups:
+                lines.append("暂无可用命中率样本（缓存数据缺失）")
+            else:
+                lines.append("暂无缓存数据（需先有 LLM 请求）")
+            events = self.recent_events(umo)
+            if events:
+                lines.append(f"最近破坏事件（共 {len(events)} 条，显示最新 5）：")
+                for ev in events[-5:]:
+                    lines.append(f"  · [{ev.get('type')}] {ev.get('detail')}")
+            else:
+                lines.append("未检测到缓存破坏事件")
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            yield event.plain_result(f"查询失败：{e}")
 
     @filter.command("report")
     async def cmd_report(self, event: AstrMessageEvent):
@@ -112,6 +180,25 @@ class CommandsMixin:
 
     @filter.command("attribution")
     async def cmd_attribution(self, event: AstrMessageEvent):
-        """``/attribution``：查看 token 注入归因。"""
-        # TODO 阶段3：调用 AttributorMixin
-        yield event.plain_result("该命令将在后续阶段实现。")
+        """``/attribution``：查看最近一次请求的上下文注入归因。"""
+        try:
+            umo = self._umo(event)
+            inj = self.consume_last_injection(umo)
+            if not inj:
+                yield event.plain_result("暂无归因数据（需先发起一次对话，且归因功能开启）。")
+                return
+            final = inj.get("final", {}) or {}
+            injected = inj.get("injected", {}) or {}
+            lines = [
+                "🔎 最近一次请求的上下文归因（token 估算）",
+                f"system {final.get('system', 0)} / tools {final.get('tools', 0)} / "
+                f"history {final.get('history', 0)} / user {final.get('user', 0)}",
+                f"  → 总计 {final.get('total', 0)}",
+                f"本轮插件累计注入 {inj.get('injected_total', 0)}"
+                f"（system +{injected.get('system', 0)} / "
+                f"tools +{injected.get('tools', 0)} / "
+                f"history +{injected.get('history', 0)}）",
+            ]
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            yield event.plain_result(f"查询失败：{e}")

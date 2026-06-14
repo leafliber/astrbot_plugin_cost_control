@@ -4,13 +4,20 @@
 各 ``XxxMixin``，把用量采集、预算拦截、缓存诊断、提示词优化、Plugin Page 等
 能力以可插拔方式挂载到单个插件上。
 
-阶段 0：仅骨架，所有钩子方法为 TODO 占位。
+钩子签名约束（已核对 ``astrbot/core/pipeline/context_utils.call_event_hook`` +
+``register/star_handler.py``）：``on_llm_request`` / ``on_llm_response`` /
+``on_waiting_llm_request`` 走 ``call_event_hook``，其 ``assert
+iscoroutinefunction(handler)`` ——故这些钩子 handler **必须是 coroutine**
+（``async def ... -> None``，**不能 yield**）。要给用户返回消息用
+``await event.send(MessageChain().message(text))``（见 ``notifier``）或
+``event.stop_event()`` 中止。``yield`` 仅用于 ``@filter.command`` 命令 handler
+（走 ``call_handler`` 洋葱模型）。
 """
 
 from __future__ import annotations
 
 from astrbot import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 
@@ -72,11 +79,12 @@ class Main(
             logger.warning("[cost_control] CronJob 注册失败: %s", e)
 
     @filter.on_llm_request(priority=100000)
-    async def on_llm_request_head(self, event: AstrMessageEvent, req: ProviderRequest):
-        """LLM 请求前（最高优先级）：阶段 2 预算硬拦截；阶段 3 上下文快照。
+    async def on_llm_request_head(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """LLM 请求前（最高优先级）：预算硬拦截 + 归因初始快照。
 
-        预算超限时调 ``event.stop_event()`` 中止后续 LLM 调用，并返回提示。
-        ``fallback_provider`` 策略暂降级为拦截（切换 provider 机制待阶段 3）。
+        必须为 coroutine（``call_event_hook`` 的 ``iscoroutinefunction`` assert），
+        **不能 yield**。超限时 ``event.stop_event()`` 中止后续 LLM 调用，并用
+        ``event.send`` 返回提示。归因初始快照仅在未超限时记录。
         异常一律降级放行，绝不阻断主流程。
         """
         try:
@@ -85,40 +93,65 @@ class Main(
             result = await self.check_budget(umo, model)
             if result.get("exceeded"):
                 policy = result.get("policy") or {}
-                action = policy.get("action", "stop_llm")
                 msg = (
                     f"⏸ 已超出预算（{result.get('dim')}）："
                     f"用 {result.get('used')} / 限 {result.get('limit')} token"
                 )
-                if action != "stop_llm":
+                if policy.get("action", "stop_llm") != "stop_llm":
                     msg += "\n（fallback 策略暂未启用，已拦截）"
                 event.stop_event()
-                yield event.plain_result(msg)
+                try:
+                    await event.send(MessageChain().message(msg))
+                except Exception as e:
+                    logger.warning("[cost_control] 超限提示发送失败: %s", e)
                 return
         except Exception as e:
             logger.warning("[cost_control] 预算检查失败: %s", e)
-        # TODO 阶段3：快照初始上下文 token
+        # 阶段 3：归因初始快照（head，所有插件执行前；采样在 record_initial_context 内判定）
+        try:
+            self.record_initial_context(req)
+        except Exception as e:
+            logger.warning("[cost_control] 归因初始快照失败: %s", e)
 
     @filter.on_llm_request(priority=-100000)
     async def on_llm_request_tail(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        """LLM 请求前（最低优先级）：快照最终上下文，算注入差。
+        """LLM 请求前（最低优先级）：归因注入差 + 缓存破坏诊断。
 
-        阶段 3 实现：在所有高优先级钩子执行完毕后，记录最终上下文，
-        与 head 快照对比，得到各组件（system / tools / history / user）的
-        token 注入量。
+        在所有高优先级钩子执行完毕后：与 head 快照对比得到本轮各组件注入量，
+        并与上一轮上下文签名对比做缓存破坏四类诊断。coroutine，不 yield。
         """
-        # TODO 阶段3：快照最终上下文，算注入差
-        ...
+        try:
+            umo = str(getattr(event, "unified_msg_origin", None) or "")
+            self.pop_injection(req, umo)
+            self.run_cache_diag(req, umo)
+        except Exception as e:
+            logger.warning("[cost_control] 阶段3请求尾处理失败: %s", e)
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp) -> None:
-        """LLM 响应后：采集 usage + raw cache 写补充表（阶段 1）。
+        """LLM 响应后：采集 usage + raw cache 写补充表（阶段 1）+
+        注入归因填充（阶段 3）+ 缓存命中率告警（阶段 3）。
 
-        阶段 2-3 在此扩展：预算阈值检查、缓存破坏诊断、主动告警。
-        任何异常都被捕获并降级（仅记录日志），绝不影响 AstrBot 主流程。
+        coroutine（走 ``call_event_hook``），不 yield。任何异常都被捕获并降级
+        （仅记录日志），绝不影响 AstrBot 主流程。
         """
         try:
             record = await self.collect_response(event, resp)
+            umo = record.get("umo", "") or ""
+            # 阶段 3：把 tail 算出的注入归因挂到本次补充记录
+            if umo:
+                inj = self.consume_last_injection(umo)
+                if inj:
+                    record["injection_total"] = inj.get("injected_total")
+                    record["attribution"] = inj.get("final")
             await self.save_supplement(record)
+            # 阶段 3：缓存命中率低于阈值则告警（带冷却）
+            rate, alert = self.check_hit_rate(record)
+            if alert:
+                await self.notify(
+                    event,
+                    f"⚠️ 本轮缓存命中率偏低：{rate:.0f}%"
+                    "（建议检查 system prompt 稳定性 / 上下文是否被重置）",
+                )
         except Exception as e:
             logger.warning("[cost_control] on_llm_response 采集失败: %s", e)
