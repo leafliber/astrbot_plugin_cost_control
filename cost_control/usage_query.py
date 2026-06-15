@@ -15,6 +15,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+# 时序分桶支持的列白名单（由 ``query_usage_timeseries`` 校验后传入 ``bucketize_rows``）。
+TIMESERIES_BUCKETS = ("day", "hour")
+
 
 def aggregate_rows(rows: list[Any]) -> dict[str, Any]:
     """聚合 ``ProviderStat`` 行（或类似对象）的 token 三类与条数。
@@ -42,6 +45,62 @@ def aggregate_rows(rows: list[Any]) -> dict[str, Any]:
         "token_output": s_output,
         "count": len(rows),
     }
+
+
+def _bucket_key(created: Any, bucket: str) -> str | None:
+    """从行的 ``created_at`` 派生桶 key（纯函数）。
+
+    - ``day``：``"YYYY-MM-DD"``。
+    - ``hour``：``"YYYY-MM-DD HH:00"``。
+
+    输入为 None 或解析失败返回 None（该行被丢弃）。
+    """
+    if created is None:
+        return None
+    try:
+        dt = created
+        if isinstance(dt, datetime):
+            iso = dt.isoformat(sep=" ")
+        else:
+            iso = str(dt)
+        # datetime.isoformat / 标准字符串均以 ``YYYY-MM-DD`` 开头
+        day = iso[:10]
+        if bucket == "hour":
+            hour = iso[11:13] if len(iso) >= 13 else "00"
+            return f"{day} {hour}:00"
+        return day
+    except Exception:
+        return None
+
+
+def bucketize_rows(
+    rows: list[Any],
+    bucket: str = "day",
+) -> list[dict[str, Any]]:
+    """应用层分桶聚合（纯函数，便于脱离 DB 单测）。
+
+    Args:
+        rows: ``ProviderStat`` 对象列表（duck-typed，含 ``created_at`` 与 token 三类）。
+        bucket: ``"day"`` 或 ``"hour"``。
+
+    Returns:
+        ``[{bucket, token_input_other, token_input_cached, token_output, count}, ...]``，
+        按 bucket 升序。``created_at`` 缺失的行被跳过。
+    """
+    buckets: dict[str, dict[str, int]] = {}
+    for row in rows:
+        key = _bucket_key(getattr(row, "created_at", None), bucket)
+        if key is None:
+            continue
+        b = buckets.setdefault(
+            key,
+            {"token_input_other": 0, "token_input_cached": 0, "token_output": 0, "count": 0},
+        )
+        b["token_input_other"] += int(getattr(row, "token_input_other", 0) or 0)
+        b["token_input_cached"] += int(getattr(row, "token_input_cached", 0) or 0)
+        b["token_output"] += int(getattr(row, "token_output", 0) or 0)
+        b["count"] += 1
+    return [{"bucket": k, **v} for k, v in sorted(buckets.items())]
 
 
 class UsageQueryMixin:
@@ -208,6 +267,81 @@ class UsageQueryMixin:
                         "count": int(r[4] or 0),
                     }
                 )
+            return out
+        except Exception:
+            return []
+
+    async def query_usage_timeseries(
+        self,
+        *,
+        start: datetime,
+        end: datetime | None = None,
+        bucket: str = "day",
+        umo: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """按天 / 小时分桶聚合 token 用量与条数（基于 ``ProviderStat``，全量历史）。
+
+        用 SQLite ``func.strftime`` 在 SQL 层按 **UTC** 分桶（避免应用层拉全量行；
+        前端用 ``toLocaleDateString`` 渲染本地日标签，UTC vs 本地最多 ±1 天偏差，
+        趋势看形状可接受）。``created_at`` 是 aware UTC datetime，文本序与 ISO 序一致，
+        可直接用 ``>=`` / ``<=`` 做区间筛选。
+
+        Args:
+            start: 窗口起始（含）。
+            end: 窗口结束（含），None 表示至今。
+            bucket: ``"day"``（默认）或 ``"hour"``，其余按 day。
+
+        Returns:
+            ``[{bucket, token_input_other, token_input_cached, token_output, count}, ...]``，
+            按 bucket 升序。失败返回空列表（不抛异常）。
+        """
+        from astrbot.core.db.po import ProviderStat
+        from sqlmodel import func, select
+
+        try:
+            db = self.context.get_db()
+            bucket_col = (
+                func.strftime("%Y-%m-%d %H:00", ProviderStat.created_at)
+                if bucket == "hour"
+                else func.strftime("%Y-%m-%d", ProviderStat.created_at)
+            )
+            stmt = select(  # type: ignore[call-overload]
+                bucket_col,
+                func.sum(ProviderStat.token_input_other),
+                func.sum(ProviderStat.token_input_cached),
+                func.sum(ProviderStat.token_output),
+                func.count(),
+            ).group_by(bucket_col)
+            if umo:
+                stmt = stmt.where(ProviderStat.umo == umo)
+            if provider:
+                stmt = stmt.where(ProviderStat.provider_id == provider)
+            if model:
+                stmt = stmt.where(ProviderStat.provider_model == model)
+            if start:
+                stmt = stmt.where(ProviderStat.created_at >= start)
+            if end:
+                stmt = stmt.where(ProviderStat.created_at <= end)
+            async with db.get_db() as session:
+                result = await session.execute(stmt)
+                rows = result.all()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                bkey = r[0]
+                if not bkey:
+                    continue
+                out.append(
+                    {
+                        "bucket": str(bkey),
+                        "token_input_other": int(r[1] or 0),
+                        "token_input_cached": int(r[2] or 0),
+                        "token_output": int(r[3] or 0),
+                        "count": int(r[4] or 0),
+                    }
+                )
+            out.sort(key=lambda x: x["bucket"])
             return out
         except Exception:
             return []

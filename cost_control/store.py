@@ -150,8 +150,25 @@ class StoreMixin:
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 100,
+        order_by: str = "created_at",
+        order_dir: str = "desc",
     ) -> list[CostSupplement]:
-        """按条件查询补充记录（失败返回空列表，不抛异常）。"""
+        """按条件查询补充记录（失败返回空列表，不抛异常）。
+
+        Args:
+            order_by: 排序列，白名单 ``created_at`` / ``token_input_other`` /
+                ``token_output`` / ``umo``，其余回退 ``created_at``。
+            order_dir: ``"desc"``（默认，最新优先）或 ``"asc"``。
+        """
+        _ORDER_WHITELIST = (
+            "created_at",
+            "token_input_other",
+            "token_output",
+            "umo",
+        )
+        col_name = order_by if order_by in _ORDER_WHITELIST else "created_at"
+        col = getattr(CostSupplement, col_name)
+        order_col = col.desc() if (order_dir or "desc").lower() != "asc" else col.asc()
         stmt = select(CostSupplement)
         if umo:
             stmt = stmt.where(CostSupplement.umo == umo)
@@ -163,7 +180,7 @@ class StoreMixin:
             stmt = stmt.where(CostSupplement.created_at >= start)
         if end:
             stmt = stmt.where(CostSupplement.created_at <= end)
-        stmt = stmt.order_by(CostSupplement.created_at.desc()).limit(limit)  # type: ignore[attr-defined]
+        stmt = stmt.order_by(order_col).limit(limit)  # type: ignore[call-overload]
         try:
             maker = await self._ensure_session_maker()
             async with maker() as session:

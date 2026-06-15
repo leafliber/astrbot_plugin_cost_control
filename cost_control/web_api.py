@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from .budget import resolve_tz
@@ -51,8 +52,11 @@ class WebApiMixin:
     # 兄弟 Mixin 提供。
     build_report: Any
     get_budgets: Any
+    get_over_limit_policy: Any
     query_usage: Any
+    query_usage_grouped: Any
     query_supplements: Any
+    query_usage_timeseries: Any
     cleanup_old_supplements: Any
     get_pricing: Any
     daily_report: Any
@@ -69,7 +73,14 @@ class WebApiMixin:
             routes: list[tuple[str, Any, list[str], str]] = [
                 (f"{prefix}/overview", self.api_overview, ["GET"], "总览聚合报表"),
                 (f"{prefix}/report", self.api_report, ["GET"], "综合报表（同 overview）"),
+                (f"{prefix}/timeline", self.api_timeline, ["GET"], "时序趋势（按天/小时分桶）"),
                 (f"{prefix}/records", self.api_records, ["GET"], "每请求明细记录"),
+                (
+                    f"{prefix}/records/aggregate",
+                    self.api_records_aggregate,
+                    ["GET"],
+                    "明细二级聚合（按模型/会话）",
+                ),
                 (f"{prefix}/budgets", self.api_budgets, ["GET"], "预算配置与消耗"),
                 (f"{prefix}/cache", self.api_cache, ["GET"], "缓存命中率与诊断事件"),
                 (f"{prefix}/attribution", self.api_attribution, ["GET"], "归因报表"),
@@ -77,6 +88,12 @@ class WebApiMixin:
                 (f"{prefix}/config", self.api_config, ["GET"], "当前插件配置"),
                 (f"{prefix}/actions/cleanup", self.api_action_cleanup, ["POST"], "手动清理"),
                 (f"{prefix}/actions/report", self.api_action_report, ["POST"], "手动推送日报"),
+                (
+                    f"{prefix}/actions/save_config",
+                    self.api_action_save_config,
+                    ["POST"],
+                    "保存预算/策略配置（热生效）",
+                ),
             ]
             for route, handler, methods, desc in routes:
                 try:
@@ -109,6 +126,34 @@ class WebApiMixin:
             return request.args.get(name, default)
         except Exception:
             return default
+
+    @staticmethod
+    def _parse_iso(s: str | None) -> datetime | None:
+        """把 ISO 字符串解析为 aware UTC datetime（失败返回 None）。
+
+        接受 ``2026-06-15``（按 UTC 00:00）、``2026-06-15T01:02:03``、
+        带偏移的 ISO。无时区信息者按 UTC 处理。
+        """
+        if not s:
+            return None
+        try:
+            from datetime import UTC, timedelta
+
+            raw = str(s).strip()
+            # 纯日期补全为 00:00:00
+            if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+                raw = raw + "T00:00:00"
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            else:
+                dt = dt.astimezone(UTC)
+            # end 区间包容到当天结束：纯日期输入顺延至次日 00:00
+            if len(str(s).strip()) == 10:
+                dt = dt + timedelta(days=1)
+            return dt
+        except Exception:
+            return None
 
     @staticmethod
     def _supplement_to_dict(s: Any) -> dict[str, Any]:
@@ -144,28 +189,150 @@ class WebApiMixin:
         """``GET /report``：综合报表（与 overview 等价，保留独立语义）。"""
         return await self.api_overview(**kwargs)
 
+    async def api_timeline(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /timeline``：用量 / 调用次数时序（基于 ProviderStat 全量历史）。
+
+        Query：``days``（默认 14，上限 90）、``bucket``（day|hour，默认 day）、
+        ``umo`` / ``provider`` / ``model``（可选筛选）。
+        """
+        try:
+            from datetime import UTC, timedelta
+
+            try:
+                days = max(1, min(90, int(self._param("days", "14"))))
+            except (TypeError, ValueError):
+                days = 14
+            bucket = self._param("bucket", "day") or "day"
+            end = datetime.now(UTC)
+            start = end - timedelta(days=days)
+            umo = self._param("umo") or None
+            provider = self._param("provider") or None
+            model = self._param("model") or None
+            series = await self.query_usage_timeseries(
+                start=start,
+                end=end,
+                bucket=bucket,
+                umo=umo,
+                provider=provider,
+                model=model,
+            )
+            return self._ok(
+                {
+                    "series": series,
+                    "bucket": bucket,
+                    "days": days,
+                    "coverage_note": "基于 ProviderStat 全量历史（按 UTC 分桶，展示为本地日）",
+                }
+            )
+        except Exception as e:
+            return self._err(str(e))
+
     async def api_records(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /records``：每请求补充明细（umo / model / token 三类 / cache / 归因）。
 
-        Query：``umo``（可选筛选）、``limit``（默认 100，上限 1000）。
+        Query：``umo`` / ``provider`` / ``model``（可选筛选）、``start`` / ``end``
+        （ISO）、``order_by``（created_at|token_input_other|token_output|umo）、
+        ``order_dir``（desc|asc）、``limit``（默认 100，上限 1000）。
         """
         try:
             umo = self._param("umo") or None
+            provider = self._param("provider") or None
+            model = self._param("model") or None
+            start = self._parse_iso(self._param("start"))
+            end = self._parse_iso(self._param("end"))
             try:
                 limit = max(1, min(1000, int(self._param("limit", "100"))))
             except (TypeError, ValueError):
                 limit = 100
-            rows = await self.query_supplements(umo=umo, limit=limit)
+            order_by = self._param("order_by", "created_at") or "created_at"
+            order_dir = self._param("order_dir", "desc") or "desc"
+            rows = await self.query_supplements(
+                umo=umo,
+                provider_id=provider,
+                provider_model=model,
+                start=start,
+                end=end,
+                limit=limit,
+                order_by=order_by,
+                order_dir=order_dir,
+            )
             return self._ok([self._supplement_to_dict(r) for r in rows])
         except Exception as e:
             return self._err(str(e))
 
+    async def api_records_aggregate(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /records/aggregate``：在筛选条件上按模型 / 会话二级聚合（基于 ProviderStat）。
+
+        Query：``by``（model|provider，默认 model）、``umo`` / ``provider`` / ``model``
+        （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
+        """
+        try:
+            from .cost import compute_cost_value
+
+            by = self._param("by", "model") or "model"
+            if by not in ("model", "provider"):
+                by = "model"
+            start = self._parse_iso(self._param("start"))
+            end = self._parse_iso(self._param("end"))
+            umo = self._param("umo") or None
+            provider = self._param("provider") or None
+            model = self._param("model") or None
+            rows = await self.query_usage_grouped(
+                by=by,
+                umo=umo,
+                provider=provider,
+                start=start,
+                end=end,
+            )
+            # query_usage_grouped 无 model 筛选参数，应用层补
+            if model and by == "model":
+                rows = [r for r in rows if r.get("key") == model]
+            pricing = self.get_pricing()
+            total_tokens = 0
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                tokens = (
+                    int(r.get("token_input_other", 0) or 0)
+                    + int(r.get("token_input_cached", 0) or 0)
+                    + int(r.get("token_output", 0) or 0)
+                )
+                cost = round(compute_cost_value(r, r.get("key") or None, pricing), 6)
+                total_tokens += tokens
+                out.append(
+                    {
+                        "key": r.get("key") or "",
+                        "count": int(r.get("count", 0) or 0),
+                        "tokens": tokens,
+                        "token_input_other": int(r.get("token_input_other", 0) or 0),
+                        "token_input_cached": int(r.get("token_input_cached", 0) or 0),
+                        "token_output": int(r.get("token_output", 0) or 0),
+                        "cost": cost,
+                    }
+                )
+            out.sort(key=lambda x: x["cost"], reverse=True)
+            for o in out:
+                o["pct"] = round(o["tokens"] * 100.0 / total_tokens, 1) if total_tokens else 0.0
+            return self._ok(
+                {
+                    "by": by,
+                    "total_tokens": total_tokens,
+                    "groups": out,
+                }
+            )
+        except Exception as e:
+            return self._err(str(e))
+
     async def api_budgets(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /budgets``：预算配置 + 各维度当前周期消耗与超限状态（全局视角）。"""
+        """``GET /budgets``：预算配置 + 各维度当前周期消耗（全局视角）。
+
+        全局维度（global_daily/global_monthly）给精确消耗；局部维度
+        （per_session/per_user/per_model）给「本周期消耗最多的会话/模型」代表值
+        （这些维度在运行时按当前请求的 umo/model 实时判定拦截，无单一全局消耗）。
+        """
         try:
             from datetime import UTC, datetime
 
-            from .budget import day_window_start, month_window_start
+            from .budget import day_window_start, month_window_start, total_tokens
 
             limits = self.get_budgets()
             now = datetime.now(UTC)
@@ -175,32 +342,50 @@ class WebApiMixin:
             m_start = month_window_start(now, tz)
             day_usage = await self.query_usage(start=d_start)
             month_usage = await self.query_usage(start=m_start)
-            day_total = (
-                int(day_usage.get("token_input_other", 0) or 0)
-                + int(day_usage.get("token_input_cached", 0) or 0)
-                + int(day_usage.get("token_output", 0) or 0)
-            )
-            month_total = (
-                int(month_usage.get("token_input_other", 0) or 0)
-                + int(month_usage.get("token_input_cached", 0) or 0)
-                + int(month_usage.get("token_output", 0) or 0)
-            )
+            day_total = total_tokens(day_usage)
+            month_total = total_tokens(month_usage)
 
-            def _dim(key: str, used: int) -> dict[str, Any]:
+            def _dim(key: str, used: int, top_key: str = "", note: str = "") -> dict[str, Any]:
                 limit = int(limits.get(key, 0) or 0)
                 return {
                     "limit": limit,
                     "used": used,
                     "ratio": round(used * 100.0 / limit, 1) if limit > 0 else 0.0,
                     "exceeded": limit > 0 and used >= limit,
+                    "top_key": top_key,
+                    "note": note,
                 }
+
+            # per_session / per_user：本日消耗最多的会话（per_user 阶段2 退化为 umo 维度）
+            top_session = await self.query_usage_grouped(by="umo", start=d_start)
+            top_session.sort(key=lambda r: total_tokens(r), reverse=True)
+            ses_used = total_tokens(top_session[0]) if top_session else 0
+            ses_key = str((top_session[0] or {}).get("key", "")) if top_session else ""
+            # per_model：本日消耗最多的模型
+            top_model = await self.query_usage_grouped(by="model", start=d_start)
+            top_model.sort(key=lambda r: total_tokens(r), reverse=True)
+            mod_used = total_tokens(top_model[0]) if top_model else 0
+            mod_key = str((top_model[0] or {}).get("key", "")) if top_model else ""
 
             return self._ok(
                 {
                     "limits": limits,
+                    "policy": self.get_over_limit_policy(),
                     "dimensions": {
                         "global_daily": _dim("global_daily", day_total),
                         "global_monthly": _dim("global_monthly", month_total),
+                        "per_session_daily": _dim(
+                            "per_session_daily", ses_used, ses_key, "今日消耗最多的会话"
+                        ),
+                        "per_user_daily": _dim(
+                            "per_user_daily",
+                            ses_used,
+                            ses_key,
+                            "退化为会话维度（ProviderStat 无独立 user_id）",
+                        ),
+                        "per_model_daily": _dim(
+                            "per_model_daily", mod_used, mod_key, "今日消耗最多的模型"
+                        ),
                     },
                 }
             )
@@ -316,5 +501,109 @@ class WebApiMixin:
         try:
             await self.daily_report()
             return self._ok({"message": "日报已触发"})
+        except Exception as e:
+            return self._err(str(e))
+
+    # 仅允许 WebUI 修改这两个顶层 key（白名单），防前端乱改 pricing/alerts 等。
+    _SAVE_BUDGET_KEYS = (
+        "per_session_daily",
+        "per_user_daily",
+        "per_model_daily",
+        "global_daily",
+        "global_monthly",
+    )
+    _SAVE_POLICY_KEYS = (
+        "action",
+        "fallback_provider_id",
+        "fallback_token_limit",
+        "block_wake_words_after_limit",
+    )
+
+    def _validate_save_payload(self, body: Any) -> tuple[dict[str, Any] | None, str]:
+        """校验 save_config 请求体，返回合并后的配置或错误信息。
+
+        ``self.config.save_config`` 是浅合并（整体替换顶层 key），故 budgets 必须含
+        5 个 key、policy 必须含 4 个 key——缺失者从现有配置补齐，防覆盖丢字段。
+        返回 ``(merged_or_None, error_msg)``；成功时 ``error_msg`` 为空串。
+        """
+        if not isinstance(body, dict):
+            return None, "请求体必须是 JSON 对象"
+        cfg = getattr(self, "config", None) or {}
+        merged: dict[str, Any] = {}
+
+        if "budgets" in body:
+            sub = body.get("budgets")
+            if not isinstance(sub, dict):
+                return None, "budgets 必须是对象"
+            cur_budgets = cfg.get("budgets", {}) if isinstance(cfg, dict) else {}
+            if not isinstance(cur_budgets, dict):
+                cur_budgets = {}
+            out_b: dict[str, int] = {}
+            for k in self._SAVE_BUDGET_KEYS:
+                if k in sub:
+                    try:
+                        out_b[k] = max(0, int(sub[k]))
+                    except (TypeError, ValueError):
+                        return None, f"budgets.{k} 必须是整数"
+                else:
+                    try:
+                        out_b[k] = max(0, int(cur_budgets.get(k, 0) or 0))
+                    except (TypeError, ValueError):
+                        out_b[k] = 0
+            merged["budgets"] = out_b
+
+        if "over_limit_policy" in body:
+            sub = body.get("over_limit_policy")
+            if not isinstance(sub, dict):
+                return None, "over_limit_policy 必须是对象"
+            cur_policy = cfg.get("over_limit_policy", {}) if isinstance(cfg, dict) else {}
+            if not isinstance(cur_policy, dict):
+                cur_policy = {}
+            out_p: dict[str, Any] = {}
+            for k in self._SAVE_POLICY_KEYS:
+                if k in sub:
+                    v = sub[k]
+                    if k == "action":
+                        v = str(v) if v is not None else "stop_llm"
+                        if v not in ("stop_llm", "fallback_provider"):
+                            return None, "action 必须是 stop_llm 或 fallback_provider"
+                        out_p[k] = v
+                    elif k == "fallback_provider_id":
+                        out_p[k] = str(v or "")
+                    elif k == "fallback_token_limit":
+                        try:
+                            out_p[k] = max(0, int(v))
+                        except (TypeError, ValueError):
+                            return None, "fallback_token_limit 必须是整数"
+                    elif k == "block_wake_words_after_limit":
+                        out_p[k] = bool(v)
+                else:
+                    out_p[k] = cur_policy.get(k)
+            merged["over_limit_policy"] = out_p
+
+        if not merged:
+            return None, "未提供可更新的配置（仅支持 budgets / over_limit_policy）"
+        return merged, ""
+
+    async def api_action_save_config(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /actions/save_config``：保存预算 / 策略配置（热生效，无需重载）。
+
+        只接受白名单顶层 key（``budgets`` / ``over_limit_policy``），类型校验 + 补齐
+        缺失 key 后调用 ``self.config.save_config(merged)``——同步更新内存 + 落盘
+        ``data/config/<plugin>_config.json``，立即对后续 ``check_budget`` 生效。
+        """
+        try:
+            from quart import request
+
+            try:
+                body = await request.json
+            except Exception:
+                body = None
+            merged, err = self._validate_save_payload(body)
+            if err:
+                return self._err(err)
+            assert merged is not None
+            self.config.save_config(merged)
+            return self._ok({"saved": list(merged.keys()), "config": merged})
         except Exception as e:
             return self._err(str(e))

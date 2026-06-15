@@ -15,8 +15,11 @@
  * ``"actions/cleanup"``），与后端 ``register_web_api`` 的 route
  * ``/astrbot_plugin_cost_control/<endpoint>`` 一一对应。
  *
- * 兜底：即便 bridge 因故未在 app.js 前就绪，``waitForBridge`` 也会轮询等待，
- * 避免直接报「未注入」。
+ * 响应信封：后端用非标准 {success, data}（见 web_api.py），父级 SPA 的 API
+ * 客户端只解包标准 {status, data}，对 {success} 原样透传，前端 extractData 自处理。
+ *
+ * 图表：Chart.js（CDN，index.html 引入）。CDN 失败时（window.__chartJsFailed
+ * 或 typeof Chart === "undefined"）降级为纯 CSS 柱状条（renderCssBars）。
  */
 (function () {
     "use strict";
@@ -26,6 +29,21 @@
     var currentTab = "overview";
     var currentWindow = "daily";
     var pollTimer = null;
+
+    // 模块级状态
+    var charts = {}; // 当前 tab 的 Chart 实例（key=canvas id）
+    var recordsFilter = {
+        preset: "7d", // today|7d|30d|custom
+        start: "",
+        end: "",
+        model: "",
+        umo: "",
+        provider: "",
+        order_by: "created_at",
+        order_dir: "desc",
+    };
+    var cachedModels = []; // 模型下拉选项（首次拉 overview 后缓存）
+    var aggMode = "model"; // 明细聚合视图：model|umo
 
     function $(id) {
         return document.getElementById(id);
@@ -44,6 +62,13 @@
         n = Number(n || 0);
         return "$" + (n < 0.01 && n > 0 ? n.toFixed(6) : n.toFixed(4));
     }
+    function fmtCompact(n) {
+        n = Number(n || 0);
+        if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+        if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+        return String(Math.round(n));
+    }
     function shortTime(iso) {
         if (!iso) return "-";
         try {
@@ -55,6 +80,24 @@
             });
         } catch (e) {
             return esc(iso);
+        }
+    }
+    function shortDate(iso) {
+        if (!iso) return "-";
+        try {
+            return new Date(iso).toLocaleDateString("zh-CN", {
+                month: "2-digit",
+                day: "2-digit",
+            });
+        } catch (e) {
+            return esc(iso);
+        }
+    }
+    function cssVar(name) {
+        try {
+            return getComputedStyle(document.body).getPropertyValue(name).trim();
+        } catch (e) {
+            return "";
         }
     }
 
@@ -75,10 +118,7 @@
         });
     }
 
-    // ===== API 封装（endpoint 不带插件名前缀；父级 SPA 自动补 /api/plug/<plugin>/） =====
-    // 响应信封：后端用非标准的 {success, data} / {success:false, error}（见 web_api.py），
-    // 父级 SPA 的 API 客户端只解包标准 {status, data} 信封，对 {success} 原样透传，
-    // 故前端需自行 extractData（与参考插件 message_recorder 一致）。
+    // ===== API 封装 =====
     function extractData(response) {
         if (response && typeof response === "object") {
             if (response.success === true) return response.data;
@@ -104,7 +144,116 @@
             '<div class="loading">' + esc(msg || "加载中…") + "</div>";
     }
 
-    // ===== 各标签渲染 =====
+    // ===== 图表辅助 =====
+    function chartAvailable() {
+        return typeof window.Chart !== "undefined" && !window.__chartJsFailed;
+    }
+    // 销毁当前所有 Chart 实例（切 tab / 重渲前调用，防 canvas 累积泄漏）
+    function destroyCharts() {
+        Object.keys(charts).forEach(function (k) {
+            try {
+                charts[k].destroy();
+            } catch (e) {
+                /* noop */
+            }
+            delete charts[k];
+        });
+    }
+    // 渲染或更新一个图表；Chart 不可用时降级为 CSS 柱状条
+    function ensureChart(id, type, data, options) {
+        var el = document.getElementById(id);
+        if (!el) return null;
+        if (!chartAvailable()) {
+            renderCssBars(el, data);
+            return null;
+        }
+        try {
+            if (charts[id]) {
+                charts[id].data = data;
+                charts[id].update();
+                return charts[id];
+            }
+            var c = new Chart(el.getContext("2d"), {
+                type: type,
+                data: data,
+                options: options || {},
+            });
+            charts[id] = c;
+            return c;
+        } catch (e) {
+            renderCssBars(el, data);
+            return null;
+        }
+    }
+    // CDN 失败兜底：用 .bar-wrap 渲染纵向柱状条（labels + values）
+    function renderCssBars(el, data) {
+        var labels = (data && data.labels) || [];
+        var dset = (data && data.datasets && data.datasets[0]) || {};
+        var vals = dset.data || [];
+        var max = 0;
+        vals.forEach(function (v) {
+            if (v > max) max = v;
+        });
+        var html = '<div class="cssbars">';
+        labels.forEach(function (lbl, i) {
+            var v = vals[i] || 0;
+            var pct = max > 0 ? Math.round((v * 100) / max) : 0;
+            html +=
+                '<div class="cssbar-col"><div class="cssbar-bar" style="height:' +
+                Math.max(2, pct) +
+                '%"></div><div class="cssbar-val">' +
+                esc(fmtCompact(v)) +
+                '</div><div class="cssbar-lbl">' +
+                esc(lbl) +
+                "</div></div>";
+        });
+        html += "</div>";
+        el.parentNode.innerHTML =
+            '<div class="cssbars-wrap"><div class="cssbars-note">图表库加载失败，已降级显示</div>' +
+            html +
+            "</div>";
+    }
+    function baseChartOptions(extra) {
+        var grid = cssVar("--border") || "#e3e6ea";
+        var dim = cssVar("--text-dim") || "#6b7280";
+        var o = {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    labels: { color: dim, boxWidth: 12, font: { size: 11 } },
+                },
+                tooltip: { intersect: false },
+            },
+            scales: {
+                x: { ticks: { color: dim, font: { size: 10 } }, grid: { display: false } },
+                y: {
+                    ticks: {
+                        color: dim,
+                        font: { size: 10 },
+                        callback: function (v) {
+                            return fmtCompact(v);
+                        },
+                    },
+                    grid: { color: grid },
+                },
+            },
+        };
+        if (extra) o = mergeOpts(o, extra);
+        return o;
+    }
+    function mergeOpts(a, b) {
+        Object.keys(b || {}).forEach(function (k) {
+            var bv = b[k];
+            if (bv && typeof bv === "object" && !Array.isArray(bv) && a[k] && typeof a[k] === "object") {
+                a[k] = mergeOpts(a[k], bv);
+            } else {
+                a[k] = bv;
+            }
+        });
+        return a;
+    }
+
     function cardsBlock(items) {
         return (
             '<div class="cards">' +
@@ -115,10 +264,8 @@
                         esc(c.label) +
                         '</div><div class="value">' +
                         esc(c.value) +
-                        '</div>' +
-                        (c.sub
-                            ? '<div class="sub">' + esc(c.sub) + "</div>"
-                            : "") +
+                        "</div>" +
+                        (c.sub ? '<div class="sub">' + esc(c.sub) + "</div>" : "") +
                         "</div>"
                     );
                 })
@@ -127,138 +274,657 @@
         );
     }
 
+    function windowToDays(w) {
+        return w === "monthly" ? 90 : w === "weekly" ? 30 : 7;
+    }
+
+    // ===== 总览（问题导向 + 图表） =====
     async function loadOverview() {
         setLoading();
         try {
+            var days = windowToDays(currentWindow);
+            // 并行拉聚合报表 + 时序
             var r = await api("overview", { window: currentWindow });
-            var u = r.usage || {};
-            var cards = [
-                { label: "调用次数", value: fmtNum(u.count) },
-                { label: "成本", value: fmtCost(r.cost), sub: "USD" },
-                {
-                    label: "输入(非缓存)",
-                    value: fmtNum(u.token_input_other),
-                    sub: "token",
-                },
-                {
-                    label: "缓存命中",
-                    value: fmtNum(u.token_input_cached),
-                    sub: "token",
-                },
-                {
-                    label: "输出",
-                    value: fmtNum(u.token_output),
-                    sub: "token",
-                },
-                {
-                    label: "平均缓存命中率",
-                    value: (r.cache_hit_rate || 0) + "%",
-                    sub: (r.cache_samples || 0) + " 样本",
-                },
-                {
-                    label: "平均上下文注入",
-                    value: fmtNum(r.avg_injection),
-                    sub: (r.injection_samples || 0) + " 样本 · token",
-                },
-            ];
-            var html = cardsBlock(cards);
-
-            var byModel = r.cost_by_model || [];
-            if (byModel.length) {
-                html +=
-                    '<div class="panel"><h2>按模型成本</h2><table><thead><tr>' +
-                    "<th>模型</th><th>调用</th><th>token</th><th>成本</th></tr>" +
-                    "</thead><tbody>";
-                byModel.forEach(function (m) {
-                    html +=
-                        "<tr><td class='mono'>" +
-                        esc(m.model || "?") +
-                        "</td><td>" +
-                        fmtNum(m.count) +
-                        "</td><td>" +
-                        fmtNum(m.tokens) +
-                        "</td><td>" +
-                        fmtCost(m.cost) +
-                        "</td></tr>";
-                });
-                html += "</tbody></table></div>";
+            var series = [];
+            try {
+                var tl = await api("timeline", { days: days, bucket: "day" });
+                series = (tl && tl.series) || [];
+            } catch (e) {
+                /* 时序失败不阻断 */
             }
-
-            var top = r.top_sessions || [];
-            if (top.length) {
-                html +=
-                    '<div class="panel"><h2>Top 会话（按 token）</h2><table><thead><tr>' +
-                    "<th>会话</th><th>调用</th><th>token</th></tr>" +
-                    "</thead><tbody>";
-                top.forEach(function (s) {
-                    html +=
-                        "<tr><td class='mono'>" +
-                        esc(s.umo || "?") +
-                        "</td><td>" +
-                        fmtNum(s.count) +
-                        "</td><td>" +
-                        fmtNum(s.tokens) +
-                        "</td></tr>";
-                });
-                html += "</tbody></table></div>";
-            }
-            $("content").innerHTML = html;
+            renderOverview(r, series, days);
         } catch (e) {
             setError("加载总览失败：" + esc(e.message));
         }
     }
 
+    function renderOverview(r, series, days) {
+        destroyCharts();
+        var u = r.usage || {};
+        // 缓存模型列表（明细页模型下拉复用）
+        try {
+            cachedModels = (r.cost_by_model || []).map(function (m) {
+                return m.model;
+            });
+        } catch (e) {
+            cachedModels = [];
+        }
+
+        var cards = [
+            { label: "成本", value: fmtCost(r.cost), sub: "USD · " + currentWindowLabel() },
+            { label: "调用次数", value: fmtNum(u.count), sub: currentWindowLabel() },
+            {
+                label: "平均缓存命中率",
+                value: (r.cache_hit_rate || 0) + "%",
+                sub: (r.cache_samples || 0) + " 样本",
+            },
+            {
+                label: "平均上下文注入",
+                value: fmtNum(r.avg_injection),
+                sub: (r.injection_samples || 0) + " 样本 · token",
+            },
+        ];
+        var html = cardsBlock(cards);
+
+        // 趋势 + 模型 两列
+        html +=
+            '<div class="grid-2">' +
+            '<div class="panel"><h2>用量趋势（近 ' +
+            days +
+            ' 天）</h2><div class="chart-box"><canvas id="chart-trend"></canvas></div></div>' +
+            '<div class="panel"><h2>按模型成本</h2><div class="chart-box"><canvas id="chart-model"></canvas></div></div>' +
+            "</div>";
+        // token 构成 + top 会话
+        html +=
+            '<div class="grid-2">' +
+            '<div class="panel"><h2>Token 构成</h2><div class="chart-box"><canvas id="chart-tokens"></canvas></div></div>' +
+            '<div class="panel"><h2>Top 会话（按 token）</h2><div class="chart-box"><canvas id="chart-sessions"></canvas></div></div>' +
+            "</div>";
+
+        $("content").innerHTML = html;
+
+        var accent = cssVar("--accent") || "#4f7cff";
+        var cached = cssVar("--ok") || "#2f9e44";
+        var warn = cssVar("--warn") || "#f08c00";
+        var other = "#8ab4ff";
+
+        // 趋势折线
+        if (series.length) {
+            ensureChart(
+                "chart-trend",
+                "line",
+                {
+                    labels: series.map(function (s) {
+                        return shortDate(s.bucket);
+                    }),
+                    datasets: [
+                        {
+                            label: "调用",
+                            data: series.map(function (s) {
+                                return s.count;
+                            }),
+                            borderColor: accent,
+                            backgroundColor: accent + "22",
+                            tension: 0.3,
+                            fill: true,
+                            yAxisID: "y",
+                        },
+                        {
+                            label: "Token",
+                            data: series.map(function (s) {
+                                return (
+                                    (s.token_input_other || 0) +
+                                    (s.token_input_cached || 0) +
+                                    (s.token_output || 0)
+                                );
+                            }),
+                            borderColor: warn,
+                            backgroundColor: "transparent",
+                            tension: 0.3,
+                            yAxisID: "y1",
+                        },
+                    ],
+                },
+                baseChartOptions({
+                    scales: {
+                        y: { position: "left", title: { display: true, text: "调用", color: accent } },
+                        y1: {
+                            position: "right",
+                            grid: { drawOnChartArea: false },
+                            title: { display: true, text: "Token", color: warn },
+                            ticks: {
+                                callback: function (v) {
+                                    return fmtCompact(v);
+                                },
+                            },
+                        },
+                    },
+                })
+            );
+        } else {
+            var el = document.getElementById("chart-trend");
+            if (el) el.parentNode.innerHTML = '<div class="empty">暂无时序数据</div>';
+        }
+
+        // 按模型成本柱状
+        var byModel = (r.cost_by_model || []).slice(0, 8);
+        if (byModel.length) {
+            ensureChart(
+                "chart-model",
+                "bar",
+                {
+                    labels: byModel.map(function (m) {
+                        return shortModelName(m.model);
+                    }),
+                    datasets: [
+                        {
+                            label: "成本 (USD)",
+                            data: byModel.map(function (m) {
+                                return m.cost;
+                            }),
+                            backgroundColor: accent,
+                        },
+                    ],
+                },
+                baseChartOptions({
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: {
+                            ticks: {
+                                callback: function (v) {
+                                    return "$" + fmtCompact(v);
+                                },
+                            },
+                        },
+                    },
+                })
+            );
+        } else {
+            var em = document.getElementById("chart-model");
+            if (em) em.parentNode.innerHTML = '<div class="empty">暂无模型成本数据</div>';
+        }
+
+        // token 构成（堆叠单柱）
+        var tOther = u.token_input_other || 0;
+        var tCached = u.token_input_cached || 0;
+        var tOut = u.token_output || 0;
+        if (tOther + tCached + tOut > 0) {
+            ensureChart(
+                "chart-tokens",
+                "bar",
+                {
+                    labels: [currentWindowLabel()],
+                    datasets: [
+                        { label: "输入(非缓存)", data: [tOther], backgroundColor: other },
+                        { label: "缓存命中", data: [tCached], backgroundColor: cached },
+                        { label: "输出", data: [tOut], backgroundColor: accent },
+                    ],
+                },
+                baseChartOptions({
+                    scales: { x: { stacked: true }, y: { stacked: true } },
+                })
+            );
+        } else {
+            var et = document.getElementById("chart-tokens");
+            if (et) et.parentNode.innerHTML = '<div class="empty">暂无 token 数据</div>';
+        }
+
+        // Top 会话横向柱状
+        var top = (r.top_sessions || []).slice(0, 8);
+        if (top.length) {
+            var labels = top
+                .map(function (s) {
+                    return shortUmo(s.umo);
+                })
+                .reverse();
+            var data = top
+                .map(function (s) {
+                    return s.tokens;
+                })
+                .reverse();
+            ensureChart(
+                "chart-sessions",
+                "bar",
+                {
+                    labels: labels,
+                    datasets: [{ label: "Token", data: data, backgroundColor: warn }],
+                },
+                baseChartOptions({
+                    indexAxis: "y",
+                    plugins: { legend: { display: false } },
+                })
+            );
+        } else {
+            var es = document.getElementById("chart-sessions");
+            if (es) es.parentNode.innerHTML = '<div class="empty">暂无会话数据</div>';
+        }
+    }
+
+    function currentWindowLabel() {
+        return currentWindow === "monthly"
+            ? "本月"
+            : currentWindow === "weekly"
+              ? "近 7 天"
+              : "今日";
+    }
+    function shortModelName(m) {
+        m = String(m || "?");
+        return m.length > 24 ? m.slice(0, 22) + "…" : m;
+    }
+    function shortUmo(u) {
+        u = String(u || "?");
+        var parts = u.split(":");
+        var tail = parts[parts.length - 1] || u;
+        return tail.length > 16 ? tail.slice(0, 14) + "…" : tail;
+    }
+
+    // ===== 明细（筛选 + 排序 + 聚合） =====
     async function loadRecords() {
         setLoading();
-        $("content").innerHTML =
-            '<div class="toolbar"><input id="rec-umo" placeholder="按会话筛选" style="flex:1"></div>' +
-            '<div id="rec-body" class="loading">加载中…</div>';
-        async function fetchRecords() {
-            var umo = $("rec-umo").value.trim();
-            try {
-                var rows = await api("records", {
-                    umo: umo,
-                    limit: 200,
-                });
-                if (!rows || !rows.length) {
-                    $("rec-body").innerHTML =
-                        '<div class="empty">暂无明细记录</div>';
-                    return;
-                }
-                var html =
-                    '<div class="panel"><table><thead><tr>' +
-                    "<th>时间</th><th>会话</th><th>模型</th><th>输入</th><th>缓存</th>" +
-                    "<th>输出</th><th>cache 写入</th><th>注入</th></tr>" +
-                    "</thead><tbody>";
-                rows.forEach(function (r) {
-                    html +=
-                        "<tr><td>" +
-                        shortTime(r.created_at) +
-                        "</td><td class='mono'>" +
-                        esc(r.umo) +
-                        "</td><td class='mono'>" +
-                        esc(r.provider_model || r.provider_id || "-") +
-                        "</td><td>" +
-                        fmtNum(r.token_input_other) +
-                        "</td><td>" +
-                        fmtNum(r.token_input_cached) +
-                        "</td><td>" +
-                        fmtNum(r.token_output) +
-                        "</td><td>" +
-                        fmtNum(r.cache_creation) +
-                        "</td><td>" +
-                        (r.injection_total == null ? "-" : fmtNum(r.injection_total)) +
-                        "</td></tr>";
-                });
-                html += "</tbody></table></div>";
-                $("rec-body").innerHTML = html;
-            } catch (e) {
-                $("rec-body").innerHTML =
-                    '<div class="error">加载失败：' + esc(e.message) + "</div>";
-            }
-        }
-        $("rec-umo").addEventListener("change", fetchRecords);
         await fetchRecords();
+    }
+
+    function recordsRangeParams() {
+        var now = new Date();
+        var end = now.toISOString().slice(0, 10);
+        var start;
+        if (recordsFilter.preset === "today") {
+            start = end;
+        } else if (recordsFilter.preset === "7d") {
+            var d = new Date(now);
+            d.setDate(d.getDate() - 6);
+            start = d.toISOString().slice(0, 10);
+        } else if (recordsFilter.preset === "30d") {
+            var d2 = new Date(now);
+            d2.setDate(d2.getDate() - 29);
+            start = d2.toISOString().slice(0, 10);
+        } else {
+            // custom
+            start = recordsFilter.start || "";
+            end = recordsFilter.end || "";
+        }
+        return { start: start, end: end };
+    }
+
+    function renderRecordsToolbar() {
+        var presetBtns = ["today", "7d", "30d", "custom"]
+            .map(function (p) {
+                var labels = { today: "今日", "7d": "7日", "30d": "30日", custom: "自定义" };
+                return (
+                    '<button class="preset-btn ' +
+                    (recordsFilter.preset === p ? "active" : "") +
+                    '" data-preset="' +
+                    p +
+                    '">' +
+                    labels[p] +
+                    "</button>"
+                );
+            })
+            .join("");
+        var customStyle = recordsFilter.preset === "custom" ? "" : ' style="display:none"';
+        var modelOpts =
+            '<option value="">全部模型</option>' +
+            cachedModels
+                .map(function (m) {
+                    return (
+                        '<option value="' +
+                        esc(m) +
+                        '"' +
+                        (recordsFilter.model === m ? " selected" : "") +
+                        ">" +
+                        esc(m) +
+                        "</option>"
+                    );
+                })
+                .join("");
+        return (
+            '<div class="toolbar records-toolbar">' +
+            '<div class="preset-group">' +
+            presetBtns +
+            "</div>" +
+            '<span class="custom-range"' +
+            customStyle +
+            "><input type='date' id='rec-start' value='" +
+            esc(recordsFilter.start) +
+            "'> ~ <input type='date' id='rec-end' value='" +
+            esc(recordsFilter.end) +
+            "'></span>" +
+            "<select id='rec-model'>" +
+            modelOpts +
+            "</select>" +
+            "<input id='rec-umo' placeholder='按会话 UMO 筛选' value='" +
+            esc(recordsFilter.umo) +
+            "'>" +
+            "<input id='rec-provider' placeholder='Provider ID' value='" +
+            esc(recordsFilter.provider) +
+            "'>" +
+            "<select id='rec-order'>" +
+            "<option value='created_at'" +
+            (recordsFilter.order_by === "created_at" ? " selected" : "") +
+            ">按时间</option>" +
+            "<option value='token_input_other'" +
+            (recordsFilter.order_by === "token_input_other" ? " selected" : "") +
+            ">按输入</option>" +
+            "<option value='token_output'" +
+            (recordsFilter.order_by === "token_output" ? " selected" : "") +
+            ">按输出</option>" +
+            "</select>" +
+            "<button class='btn' id='rec-order-dir' title='升降序'>" +
+            (recordsFilter.order_dir === "desc" ? "↓" : "↑") +
+            "</button>" +
+            "</div>"
+        );
+    }
+
+    async function fetchRecords() {
+        destroyCharts();
+        var range = recordsRangeParams();
+        var body =
+            renderRecordsToolbar() +
+            '<div id="rec-body" class="loading">加载中…</div>' +
+            '<div class="panel agg-panel"><div class="agg-head"><h2 style="margin:0">交叉聚合</h2>' +
+            '<span class="agg-switch"><button class="agg-btn ' +
+            (aggMode === "model" ? "active" : "") +
+            '" data-agg="model">按模型</button>' +
+            '<button class="agg-btn ' +
+            (aggMode === "umo" ? "active" : "") +
+            '" data-agg="umo">按会话</button></span></div>' +
+            '<div id="rec-agg" class="loading">加载聚合…</div></div>';
+        $("content").innerHTML = body;
+        bindRecordsToolbar();
+        // 明细
+        try {
+            var rows = await api("records", {
+                umo: recordsFilter.umo,
+                provider: recordsFilter.provider,
+                model: recordsFilter.model,
+                start: range.start,
+                end: range.end,
+                order_by: recordsFilter.order_by,
+                order_dir: recordsFilter.order_dir,
+                limit: 300,
+            });
+            renderRecordsTable(rows);
+        } catch (e) {
+            $("rec-body").innerHTML =
+                '<div class="error">加载失败：' + esc(e.message) + "</div>";
+        }
+        // 聚合
+        try {
+            var agg = await api("records/aggregate", {
+                by: aggMode,
+                umo: recordsFilter.umo,
+                provider: recordsFilter.provider,
+                model: recordsFilter.model,
+                start: range.start,
+                end: range.end,
+            });
+            renderRecordsAgg(agg);
+        } catch (e) {
+            $("rec-agg").innerHTML =
+                '<div class="muted">聚合失败：' + esc(e.message) + "</div>";
+        }
+    }
+
+    function renderRecordsTable(rows) {
+        if (!rows || !rows.length) {
+            $("rec-body").innerHTML = '<div class="empty">暂无明细记录</div>';
+            return;
+        }
+        var html =
+            '<div class="panel"><table><thead><tr>' +
+            "<th>时间</th><th>会话</th><th>模型</th><th>Provider</th>" +
+            "<th>输入</th><th>缓存</th><th>输出</th><th>cache写入</th><th>注入</th>" +
+            "</tr></thead><tbody>";
+        rows.forEach(function (r) {
+            html +=
+                "<tr><td>" +
+                shortTime(r.created_at) +
+                "</td><td class='mono'>" +
+                esc(shortUmo(r.umo)) +
+                "</td><td class='mono'>" +
+                esc(r.provider_model || "-") +
+                "</td><td class='mono'>" +
+                esc(r.provider_id || "-") +
+                "</td><td>" +
+                fmtNum(r.token_input_other) +
+                "</td><td>" +
+                fmtNum(r.token_input_cached) +
+                "</td><td>" +
+                fmtNum(r.token_output) +
+                "</td><td>" +
+                fmtNum(r.cache_creation) +
+                "</td><td>" +
+                (r.injection_total == null ? "-" : fmtNum(r.injection_total)) +
+                "</td></tr>";
+        });
+        html += "</tbody></table></div>";
+        $("rec-body").innerHTML = html;
+    }
+
+    function renderRecordsAgg(agg) {
+        var groups = (agg && agg.groups) || [];
+        if (!groups.length) {
+            $("rec-agg").innerHTML = '<div class="empty">暂无聚合数据</div>';
+            return;
+        }
+        var html =
+            "<table><thead><tr><th>" +
+            (aggMode === "model" ? "模型" : "会话") +
+            "</th><th>调用</th><th>token 合计</th><th>成本</th><th>占比</th></tr></thead><tbody>";
+        groups.forEach(function (g) {
+            var pct = g.pct || 0;
+            var cls = pct >= 50 ? "bad" : pct >= 25 ? "warn" : "";
+            html +=
+                "<tr><td class='mono'>" +
+                esc(aggMode === "model" ? shortModelName(g.key) : shortUmo(g.key)) +
+                "</td><td>" +
+                fmtNum(g.count) +
+                "</td><td>" +
+                fmtNum(g.tokens) +
+                "</td><td>" +
+                fmtCost(g.cost) +
+                '</td><td style="min-width:160px"><div class="row" style="align-items:center;gap:8px">' +
+                '<div class="bar-wrap" style="flex:1"><div class="bar ' +
+                cls +
+                '" style="width:' +
+                Math.min(100, pct) +
+                '%"></div></div><span>' +
+                pct +
+                "%</span></div></td></tr>";
+        });
+        html += "</tbody></table>";
+        $("rec-agg").innerHTML = html;
+    }
+
+    function bindRecordsToolbar() {
+        var presetBtns = document.querySelectorAll(".preset-btn");
+        for (var i = 0; i < presetBtns.length; i++) {
+            (function (b) {
+                b.onclick = function () {
+                    recordsFilter.preset = b.dataset.preset;
+                    fetchRecords();
+                };
+            })(presetBtns[i]);
+        }
+        var customRange = document.querySelector(".custom-range");
+        var startEl = $("rec-start");
+        var endEl = $("rec-end");
+        if (startEl) {
+            startEl.onchange = function () {
+                recordsFilter.start = startEl.value;
+                recordsFilter.preset = "custom";
+                if (customRange) customRange.style.display = "";
+            };
+        }
+        if (endEl) {
+            endEl.onchange = function () {
+                recordsFilter.end = endEl.value;
+                recordsFilter.preset = "custom";
+                if (customRange) customRange.style.display = "";
+            };
+        }
+        var modelEl = $("rec-model");
+        if (modelEl) {
+            modelEl.onchange = function () {
+                recordsFilter.model = modelEl.value;
+                fetchRecords();
+            };
+        }
+        var umoEl = $("rec-umo");
+        if (umoEl) {
+            umoEl.addEventListener("change", function () {
+                recordsFilter.umo = umoEl.value.trim();
+                fetchRecords();
+            });
+        }
+        var provEl = $("rec-provider");
+        if (provEl) {
+            provEl.addEventListener("change", function () {
+                recordsFilter.provider = provEl.value.trim();
+                fetchRecords();
+            });
+        }
+        var orderEl = $("rec-order");
+        if (orderEl) {
+            orderEl.onchange = function () {
+                recordsFilter.order_by = orderEl.value;
+                fetchRecords();
+            };
+        }
+        var dirEl = $("rec-order-dir");
+        if (dirEl) {
+            dirEl.onclick = function () {
+                recordsFilter.order_dir = recordsFilter.order_dir === "desc" ? "asc" : "desc";
+                fetchRecords();
+            };
+        }
+        var aggBtns = document.querySelectorAll(".agg-btn");
+        for (var j = 0; j < aggBtns.length; j++) {
+            (function (b) {
+                b.onclick = function () {
+                    aggMode = b.dataset.agg;
+                    fetchRecords();
+                };
+            })(aggBtns[j]);
+        }
+    }
+
+    // ===== 预算（可编辑表单） =====
+    async function loadBudgets() {
+        setLoading();
+        try {
+            var r = await api("budgets");
+            renderBudgets(r);
+        } catch (e) {
+            setError("加载预算失败：" + esc(e.message));
+        }
+    }
+
+    function renderBudgets(r) {
+        var limits = r.limits || {};
+        var policy = r.policy || {};
+        var dims = r.dimensions || {};
+        var dimMeta = [
+            ["per_session_daily", "单会话每日"],
+            ["per_user_daily", "单用户每日"],
+            ["per_model_daily", "单模型每日"],
+            ["global_daily", "全局每日"],
+            ["global_monthly", "全局每月"],
+        ];
+        var html =
+            '<div class="panel"><h2>预算阈值（token，0 = 不限制）</h2>' +
+            "<table><thead><tr><th>维度</th><th>上限</th><th>当前消耗</th><th>进度</th></tr></thead><tbody>";
+        dimMeta.forEach(function (d) {
+            var key = d[0];
+            var limit = limits[key] || 0;
+            var dim = dims[key] || {};
+            var used = dim.used || 0;
+            var ratio = dim.ratio || 0;
+            var topKey = dim.top_key || "";
+            var note = dim.note || "";
+            var inputCell =
+                '<input type="number" min="0" class="budget-input" data-key="' +
+                key +
+                '" value="' +
+                limit +
+                '" style="width:120px">';
+            var usedInfo =
+                fmtNum(used) +
+                (topKey ? ' <span class="muted">(' + esc(topKey) + ")</span>" : "") +
+                (note ? '<div class="muted small">' + esc(note) + "</div>" : "");
+            var prog;
+            if (limit <= 0) {
+                prog = '<span class="muted">未设上限</span>';
+            } else {
+                prog = bar(ratio, used, limit);
+            }
+            html +=
+                "<tr><td>" +
+                d[1] +
+                "</td><td>" +
+                inputCell +
+                "</td><td>" +
+                usedInfo +
+                "</td><td style='min-width:200px'>" +
+                prog +
+                "</td></tr>";
+        });
+        html += "</tbody></table></div>";
+
+        // 策略
+        html +=
+            '<div class="panel"><h2>超限处理策略</h2><div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">' +
+            "<label>动作 <select id='p-action' style='width:auto'>" +
+            '<option value="stop_llm"' +
+            (policy.action === "stop_llm" ? " selected" : "") +
+            ">拦截 LLM 请求</option>" +
+            '<option value="fallback_provider"' +
+            (policy.action === "fallback_provider" ? " selected" : "") +
+            ">切换备用 Provider</option>" +
+            "</select></label>" +
+            "<label>备用 Provider ID <input id='p-fallback_provider_id' value='" +
+            esc(policy.fallback_provider_id || "") +
+            "'></label>" +
+            "<label>备用 token 上限 <input type='number' min='0' id='p-fallback_token_limit' value='" +
+            (policy.fallback_token_limit || 0) +
+            "' style='width:100px'></label>" +
+            "<label><input type='checkbox' id='p-block_wake'" +
+            (policy.block_wake_words_after_limit ? " checked" : "") +
+            "> 超限后屏蔽唤醒词</label>" +
+            "</div></div>";
+
+        html +=
+            '<div class="row" style="align-items:center;gap:12px;margin-top:4px">' +
+            '<button class="btn primary" id="save-budgets">保存（热生效）</button>' +
+            "<span id='save-result' class='muted'></span></div>";
+
+        $("content").innerHTML = html;
+
+        $("save-budgets").onclick = async function () {
+            var body = {
+                budgets: {},
+                over_limit_policy: {
+                    action: $("p-action").value,
+                    fallback_provider_id: $("p-fallback_provider_id").value.trim(),
+                    fallback_token_limit: +$("p-fallback_token_limit").value || 0,
+                    block_wake_words_after_limit: $("p-block_wake").checked,
+                },
+            };
+            var inputs = document.querySelectorAll(".budget-input");
+            for (var i = 0; i < inputs.length; i++) {
+                body.budgets[inputs[i].dataset.key] = +inputs[i].value || 0;
+            }
+            $("save-result").textContent = "保存中…";
+            try {
+                var res = await apiPost("actions/save_config", body);
+                $("save-result").textContent =
+                    "✅ 已保存（" + ((res && res.saved) || []).join(", ") + "），立即生效";
+                await loadBudgets();
+            } catch (e) {
+                $("save-result").textContent = "❌ 保存失败：" + e.message;
+            }
+        };
     }
 
     function bar(ratio, used, limit) {
@@ -281,61 +947,7 @@
         );
     }
 
-    async function loadBudgets() {
-        setLoading();
-        try {
-            var r = await api("budgets");
-            var limits = r.limits || {};
-            var dims = r.dimensions || {};
-            var dimRows = [
-                ["per_session_daily", "单会话每日"],
-                ["per_user_daily", "单用户每日"],
-                ["per_model_daily", "单模型每日"],
-                ["global_daily", "全局每日"],
-                ["global_monthly", "全局每月"],
-            ];
-            var html =
-                '<div class="panel"><h2>预算配置（token）</h2><table><thead><tr>' +
-                "<th>维度</th><th>上限</th><th>当前消耗</th><th>进度</th></tr></thead><tbody>";
-            dimRows.forEach(function (d) {
-                var key = d[0];
-                var limit = limits[key] || 0;
-                // 后端仅提供 global_daily/global_monthly 的全局消耗；
-                // per_session/per_user/per_model 维度由运行时按会话/模型实时判定拦截，无全局消耗值
-                var dim = dims[key];
-                var used = dim ? dim.used || 0 : 0;
-                var ratio = dim ? dim.ratio || 0 : 0;
-                var limitCell =
-                    limit > 0 ? fmtNum(limit) : '<span class="muted">不限制</span>';
-                var usedCell, prog;
-                if (limit <= 0) {
-                    usedCell = '<span class="muted">-</span>';
-                    prog = '<span class="muted">-</span>';
-                } else if (!dim) {
-                    usedCell = '<span class="muted">运行时判定</span>';
-                    prog = '<span class="muted">按会话/模型实时拦截</span>';
-                } else {
-                    usedCell = fmtNum(used);
-                    prog = bar(ratio, used, limit);
-                }
-                html +=
-                    "<tr><td>" +
-                    d[1] +
-                    "</td><td>" +
-                    limitCell +
-                    "</td><td>" +
-                    usedCell +
-                    "</td><td style='min-width:220px'>" +
-                    prog +
-                    "</td></tr>";
-            });
-            html += "</tbody></table></div>";
-            $("content").innerHTML = html;
-        } catch (e) {
-            setError("加载预算失败：" + esc(e.message));
-        }
-    }
-
+    // ===== 缓存 / 归因 / 定价 / 设置（沿用既有实现） =====
     async function loadCache() {
         setLoading();
         try {
@@ -350,8 +962,7 @@
             ];
             var html = cardsBlock(cards);
             var events = r.events || [];
-            html +=
-                '<div class="panel"><h2>缓存破坏事件（最近）</h2>';
+            html += '<div class="panel"><h2>缓存破坏事件（最近）</h2>';
             if (!events.length) {
                 html += '<div class="empty">未检测到缓存破坏事件</div>';
             } else {
@@ -411,9 +1022,7 @@
                         "</td><td class='mono'>" +
                         esc(it.umo || "-") +
                         "</td><td>" +
-                        (it.injection_total == null
-                            ? "-"
-                            : fmtNum(it.injection_total)) +
+                        (it.injection_total == null ? "-" : fmtNum(it.injection_total)) +
                         "</td><td>" +
                         fmtNum(a.system) +
                         "</td><td>" +
@@ -437,8 +1046,7 @@
             var data = await api("pricing");
             var keys = Object.keys(data || {}).sort();
             if (!keys.length) {
-                $("content").innerHTML =
-                    '<div class="empty">暂无定价数据</div>';
+                $("content").innerHTML = '<div class="empty">暂无定价数据</div>';
                 return;
             }
             var html =
@@ -472,8 +1080,7 @@
         try {
             var cfg = await api("config");
             var html = '<div class="panel"><h2>手动操作</h2><div class="row">';
-            html +=
-                '<button class="btn" id="act-cleanup">清理过期数据</button>';
+            html += '<button class="btn" id="act-cleanup">清理过期数据</button>';
             html += '<button class="btn" id="act-report">推送日报</button>';
             html += "</div><div id='action-result' class='muted' style='margin-top:8px'></div></div>";
             html +=
@@ -485,9 +1092,9 @@
             $("act-cleanup").onclick = async function () {
                 $("action-result").textContent = "执行中…";
                 try {
-                    var r = await apiPost("actions/cleanup");
+                    var rc = await apiPost("actions/cleanup");
                     $("action-result").textContent =
-                        "已清理 " + fmtNum((r && r.deleted) || 0) + " 条记录";
+                        "已清理 " + fmtNum((rc && rc.deleted) || 0) + " 条记录";
                 } catch (e) {
                     $("action-result").textContent = "失败：" + e.message;
                 }
@@ -525,6 +1132,7 @@
         var winSwitch = $("window-switch");
         winSwitch.hidden = name !== "overview";
         stopPoll();
+        destroyCharts(); // 切 tab 前清理上个 tab 的 Chart 实例
         var loader = LOADERS[name] || loadOverview;
         loader();
         if (name === "overview") {
@@ -550,16 +1158,22 @@
 
     function applyTheme(isDark) {
         document.body.dataset.theme = isDark ? "dark" : "light";
+        // 主题切换后更新 Chart 默认色 + 刷新当前图表
+        if (chartAvailable()) {
+            try {
+                Chart.defaults.color = cssVar("--text-dim") || "#6b7280";
+            } catch (e) {
+                /* noop */
+            }
+        }
     }
 
     async function init() {
-        // 等 bridge SDK 就绪（index.html 已显式先加载它；此处为兜底）
         Page = await waitForBridge(5000);
         if (!Page) {
             setError("bridge SDK 未注入（请在 AstrBot WebUI 插件页打开本页面）");
             return;
         }
-        // 等父级 SPA 回传 context（握手完成，apiGet 才可用）
         try {
             await Page.ready();
         } catch (e) {
@@ -585,7 +1199,6 @@
 
         $("status").textContent = "已连接";
 
-        // 标签点击
         var tabs = document.querySelectorAll(".tab");
         for (var i = 0; i < tabs.length; i++) {
             (function (t) {
@@ -595,7 +1208,6 @@
             })(tabs[i]);
         }
 
-        // 窗口切换
         var winBtns = document.querySelectorAll(".win-btn");
         for (var j = 0; j < winBtns.length; j++) {
             (function (b) {
