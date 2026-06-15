@@ -2,8 +2,8 @@ name: astrbot_plugin_cost_control
 desc: 细粒度 token 监控、超预算提醒、缓存破坏诊断、提示词优化与全数据可视化
 short_desc: Token 成本监控与优化
 version: 0.1.0
-author: Fiber
-repo: ""
+author: Leafiber
+repo: "https://github.com/leafliber/astrbot_plugin_cost_control"
 display_name: 成本控制
 astrbot_version: ">=4.24.2"
 pages:
