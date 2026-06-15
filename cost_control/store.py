@@ -32,6 +32,11 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     """
 
     __tablename__ = "cost_supplements"
+    # 热重载安全：插件重载时本模块被重新 import，CostSupplement 类会再次定义，
+    # DeclarativeMeta 会尝试把同名 Table 二次注册进全局 SQLModel.metadata，抛
+    # InvalidRequestError「Table ... is already defined」。extend_existing=True
+    # 让重定义复用已注册的 Table（覆盖 columns/options），schema 不变时无副作用。
+    __table_args__ = {"extend_existing": True}
 
     id: int | None = Field(default=None, primary_key=True)
     umo: str = Field(index=True)

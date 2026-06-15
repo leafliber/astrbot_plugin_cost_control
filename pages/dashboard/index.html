@@ -41,6 +41,10 @@
             <span id="bridge-info"></span>
         </footer>
     </div>
+    <!-- 显式声明 bridge SDK：dashboard 服务本页时会把这个 src 替换为带
+         asset_token 的真实 URL（见 plugin.py:623），并保证它在 app.js 之前
+         加载执行，使 window.AstrBotPluginPage 在 app.js 运行时已就绪。 -->
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

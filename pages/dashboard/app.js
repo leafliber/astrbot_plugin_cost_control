@@ -1,20 +1,28 @@
 /*
  * 成本控制 Plugin Page 前端逻辑。
  *
- * bridge SDK：window.AstrBotPluginPage（由 dashboard 自动注入）。
- *   - ready() / getContext() / getLocale() / onContext(fn)
- *   - apiGet(endpoint, params) / apiPost(endpoint, body)
+ * bridge SDK：window.AstrBotPluginPage（由 dashboard 注入的
+ *   /api/plugin/page/bridge-sdk.js；index.html 用显式 <script> 标签在 app.js
+ *   之前加载它，dashboard 会把该 src 替换为带 asset_token 的真实 URL）。
+ *   - ready()：返回 Promise，父级 SPA 回传 context 后 resolve（握手完成）
+ *   - getContext() / onContext(fn)：取 / 监听主题、locale 等上下文
+ *   - apiGet(endpoint, params) / apiPost(endpoint, body)：经 postMessage 由
+ *     父级 SPA 代发到后端 REST（自动带 dashboard JWT）
  *
- * endpoint 前缀自适应：后端 route 自带 /astrbot_plugin_cost_control 命名空间，
- * 但父级 dashboard SPA 给 apiGet 的 endpoint 拼接规则无法从源码确认（Vue dist
- * 不在 wheel）。故启动时探测两种格式，锁定命中者后缓存。
+ * endpoint 规则（已核对 message_recorder 参考实现 + bridge.js 源码 + 本机
+ * astrbot 4.25.5）：父级 SPA 代发时自动补 ``/api/plug/<pluginName>/`` 前缀，
+ * 故前端 endpoint **不带前导斜杠、不带插件名**（如 ``"overview"``、
+ * ``"actions/cleanup"``），与后端 ``register_web_api`` 的 route
+ * ``/astrbot_plugin_cost_control/<endpoint>`` 一一对应。
+ *
+ * 兜底：即便 bridge 因故未在 app.js 前就绪，``waitForBridge`` 也会轮询等待，
+ * 避免直接报「未注入」。
  */
 (function () {
     "use strict";
 
-    var Page = window.AstrBotPluginPage;
-    var PLUGIN = "astrbot_plugin_cost_control";
-    var API_PREFIX = null; // null=未探测；""=短格式；"/<plugin>"=全格式
+    var Page = null;
+    var bridgeReady = false;
     var currentTab = "overview";
     var currentWindow = "daily";
     var pollTimer = null;
@@ -50,49 +58,37 @@
         }
     }
 
-    // ===== API 前缀探测与封装 =====
-    async function rawApi(suffix, params, method) {
-        if (!Page) throw new Error("bridge SDK 未就绪");
-        var endpoint = (API_PREFIX || "") + suffix;
-        if (method === "POST") {
-            return await Page.apiPost(endpoint, params || {});
-        }
-        return await Page.apiGet(endpoint, params || {});
-    }
-
-    async function probePrefix() {
-        var candidates = ["", "/" + PLUGIN];
-        for (var i = 0; i < candidates.length; i++) {
-            var saved = API_PREFIX;
-            API_PREFIX = candidates[i];
-            try {
-                var r = await Page.apiGet(candidates[i] + "/overview", {
-                    window: "daily",
-                });
-                if (r && r.status === "ok") {
-                    return candidates[i];
+    // ===== bridge 就绪 =====
+    function waitForBridge(timeout) {
+        return new Promise(function (resolve) {
+            if (window.AstrBotPluginPage) return resolve(window.AstrBotPluginPage);
+            var start = Date.now();
+            var t = setInterval(function () {
+                if (window.AstrBotPluginPage) {
+                    clearInterval(t);
+                    resolve(window.AstrBotPluginPage);
+                } else if (Date.now() - start > (timeout || 5000)) {
+                    clearInterval(t);
+                    resolve(null);
                 }
-            } catch (e) {
-                // 试下一个
-            }
-        }
-        API_PREFIX = ""; // 兜底默认短格式
-        return API_PREFIX;
+            }, 50);
+        });
     }
 
-    async function api(suffix, params) {
-        var r = await rawApi(suffix, params, "GET");
+    // ===== API 封装（endpoint 不带插件名前缀；父级 SPA 自动补 /api/plug/<plugin>/） =====
+    async function api(endpoint, params) {
+        if (!Page || !bridgeReady) throw new Error("Bridge SDK 未就绪");
+        var r = await Page.apiGet(endpoint, params || {});
         if (r && r.status === "ok") return r.data;
-        if (r && r.status === "error")
-            throw new Error(r.message || "请求失败");
+        if (r && r.status === "error") throw new Error(r.message || "请求失败");
         if (r && r.data != null) return r.data;
         throw new Error("无效响应");
     }
-    async function apiPost(suffix, body) {
-        var r = await rawApi(suffix, body, "POST");
+    async function apiPost(endpoint, body) {
+        if (!Page || !bridgeReady) throw new Error("Bridge SDK 未就绪");
+        var r = await Page.apiPost(endpoint, body || {});
         if (r && r.status === "ok") return r.data;
-        if (r && r.status === "error")
-            throw new Error(r.message || "请求失败");
+        if (r && r.status === "error") throw new Error(r.message || "请求失败");
         throw new Error("无效响应");
     }
 
@@ -130,7 +126,7 @@
     async function loadOverview() {
         setLoading();
         try {
-            var r = await api("/overview", { window: currentWindow });
+            var r = await api("overview", { window: currentWindow });
             var u = r.usage || {};
             var cards = [
                 { label: "调用次数", value: fmtNum(u.count) },
@@ -216,7 +212,7 @@
         async function fetchRecords() {
             var umo = $("rec-umo").value.trim();
             try {
-                var rows = await api("/records", {
+                var rows = await api("records", {
                     umo: umo,
                     limit: 200,
                 });
@@ -284,7 +280,7 @@
     async function loadBudgets() {
         setLoading();
         try {
-            var r = await api("/budgets");
+            var r = await api("budgets");
             var limits = r.limits || {};
             var dims = r.dimensions || {};
             var dimRows = [
@@ -339,7 +335,7 @@
     async function loadCache() {
         setLoading();
         try {
-            var r = await api("/cache");
+            var r = await api("cache");
             var cards = [
                 {
                     label: "平均缓存命中率",
@@ -387,7 +383,7 @@
     async function loadAttribution() {
         setLoading();
         try {
-            var r = await api("/attribution");
+            var r = await api("attribution");
             var avg = r.avg_components || {};
             var cards = [
                 { label: "system 平均", value: fmtNum(avg.system) },
@@ -434,7 +430,7 @@
     async function loadPricing() {
         setLoading();
         try {
-            var data = await api("/pricing");
+            var data = await api("pricing");
             var keys = Object.keys(data || {}).sort();
             if (!keys.length) {
                 $("content").innerHTML =
@@ -470,7 +466,7 @@
     async function loadSettings() {
         setLoading();
         try {
-            var cfg = await api("/config");
+            var cfg = await api("config");
             var html = '<div class="panel"><h2>手动操作</h2><div class="row">';
             html +=
                 '<button class="btn" id="act-cleanup">清理过期数据</button>';
@@ -485,7 +481,7 @@
             $("act-cleanup").onclick = async function () {
                 $("action-result").textContent = "执行中…";
                 try {
-                    var r = await apiPost("/actions/cleanup");
+                    var r = await apiPost("actions/cleanup");
                     $("action-result").textContent =
                         "已清理 " + fmtNum((r && r.deleted) || 0) + " 条记录";
                 } catch (e) {
@@ -495,7 +491,7 @@
             $("act-report").onclick = async function () {
                 $("action-result").textContent = "执行中…";
                 try {
-                    await apiPost("/actions/report");
+                    await apiPost("actions/report");
                     $("action-result").textContent = "日报已触发推送";
                 } catch (e) {
                     $("action-result").textContent = "失败：" + e.message;
@@ -553,12 +549,21 @@
     }
 
     async function init() {
+        // 等 bridge SDK 就绪（index.html 已显式先加载它；此处为兜底）
+        Page = await waitForBridge(5000);
         if (!Page) {
             setError("bridge SDK 未注入（请在 AstrBot WebUI 插件页打开本页面）");
             return;
         }
+        // 等父级 SPA 回传 context（握手完成，apiGet 才可用）
         try {
             await Page.ready();
+        } catch (e) {
+            /* ready 失败也继续尝试调用 */
+        }
+        bridgeReady = true;
+
+        try {
             var ctx = Page.getContext ? Page.getContext() : null;
             if (ctx) {
                 applyTheme(!!ctx.isDark);
@@ -571,15 +576,10 @@
                 });
             }
         } catch (e) {
-            /* ready 失败也继续尝试调用 */
+            /* 上下文读取失败不阻断 */
         }
 
-        try {
-            await probePrefix();
-            $("status").textContent = "已连接";
-        } catch (e) {
-            $("status").textContent = "连接失败";
-        }
+        $("status").textContent = "已连接";
 
         // 标签点击
         var tabs = document.querySelectorAll(".tab");
