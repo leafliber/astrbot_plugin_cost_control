@@ -1,13 +1,16 @@
 """命令 Mixin。
 
-注册本插件提供的交互命令。阶段 2 实现 ``/cost``（本会话用量 + 成本）与
-``/budget``（预算配置 + 超限状态）；``/optimize`` ``/cache`` ``/report``
-``/attribution`` 留待后续阶段，handler 返回占位提示。
+注册本插件提供的交互命令：
+
+- ``/cost`` —— 本会话今日 token 用量 + 按模型成本。
+- ``/budget`` —— 预算配置与当前超限状态。
+- ``/optimize`` —— system prompt 静态分析；带 ``rewrite`` 参数触发 LLM 改写。
+- ``/cache`` —— 本会话最近缓存命中率与四类破坏诊断事件。
+- ``/report [daily|weekly|monthly]`` —— 用量 / 成本 / 缓存 / 归因综合报表。
+- ``/attribution`` —— 最近一次请求的上下文注入归因。
 
 命令 handler 为 ``async`` generator，通过 ``yield event.plain_result(...)``
-返回文本（已核对 ``astrbot/core/star/`` 内置插件写法）。
-
-阶段 2 实现。
+返回文本（走 ``call_handler`` 洋葱模型，已核对 ``astrbot/core/star/`` 内置插件写法）。
 """
 
 from __future__ import annotations

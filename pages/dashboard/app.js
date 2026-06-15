@@ -300,25 +300,31 @@
             dimRows.forEach(function (d) {
                 var key = d[0];
                 var limit = limits[key] || 0;
-                var used = 0,
-                    ratio = 0;
-                if (dims[key]) {
-                    used = dims[key].used || 0;
-                    ratio = dims[key].ratio || 0;
-                }
+                // 后端仅提供 global_daily/global_monthly 的全局消耗；
+                // per_session/per_user/per_model 维度由运行时按会话/模型实时判定拦截，无全局消耗值
+                var dim = dims[key];
+                var used = dim ? dim.used || 0 : 0;
+                var ratio = dim ? dim.ratio || 0 : 0;
                 var limitCell =
                     limit > 0 ? fmtNum(limit) : '<span class="muted">不限制</span>';
-                var prog =
-                    limit > 0
-                        ? bar(ratio, used, limit)
-                        : '<span class="muted">-</span>';
+                var usedCell, prog;
+                if (limit <= 0) {
+                    usedCell = '<span class="muted">-</span>';
+                    prog = '<span class="muted">-</span>';
+                } else if (!dim) {
+                    usedCell = '<span class="muted">运行时判定</span>';
+                    prog = '<span class="muted">按会话/模型实时拦截</span>';
+                } else {
+                    usedCell = fmtNum(used);
+                    prog = bar(ratio, used, limit);
+                }
                 html +=
                     "<tr><td>" +
                     d[1] +
                     "</td><td>" +
                     limitCell +
                     "</td><td>" +
-                    fmtNum(used) +
+                    usedCell +
                     "</td><td style='min-width:220px'>" +
                     prog +
                     "</td></tr>";

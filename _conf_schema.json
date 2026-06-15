@@ -1,11 +1,11 @@
-[
-  {
+{
+  "enabled": {
     "description": "是否启用本插件",
     "hint": "总开关，关闭后所有钩子与命令均不生效",
     "type": "bool",
     "default": true
   },
-  {
+  "platforms": {
     "description": "生效平台列表",
     "hint": "为空则全部平台生效；填写平台 ID 以限定作用范围",
     "type": "list",
@@ -17,77 +17,58 @@
       "default": ""
     }
   },
-  {
+  "budgets": {
     "description": "预算阈值配置",
     "hint": "按会话/用户/模型/全局分别设置每日或每月的 token 上限，超出后按 over_limit_policy 处理",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "per_session_daily": {
         "description": "单会话每日 token 上限",
         "hint": "超出则触发 over_limit_policy，0 表示不限制",
         "type": "int",
         "default": 0
       },
-      {
+      "per_user_daily": {
         "description": "单用户每日 token 上限",
         "hint": "超出则触发 over_limit_policy，0 表示不限制",
         "type": "int",
         "default": 0
       },
-      {
+      "per_model_daily": {
         "description": "单模型每日 token 上限",
         "hint": "超出则触发 over_limit_policy，0 表示不限制",
         "type": "int",
         "default": 0
       },
-      {
+      "global_daily": {
         "description": "全局每日 token 上限",
         "hint": "超出则触发 over_limit_policy，0 表示不限制",
         "type": "int",
         "default": 0
       },
-      {
+      "global_monthly": {
         "description": "全局每月 token 上限",
         "hint": "超出则触发 over_limit_policy，0 表示不限制",
         "type": "int",
         "default": 0
       }
-    ]
+    }
   },
-  {
+  "pricing": {
     "description": "模型单价表（每百万 token 美元）",
-    "hint": "键为模型名，值含 input/output 单价；未配置的模型按 0 计价",
+    "hint": "键为模型名，值为含 input/input_cached/output/cache_creation 的对象。内置常用模型默认价已生效；此处可覆盖或新增。WebUI 表单受限，高级配置可直接编辑插件 config.json",
     "type": "object",
     "default": {},
-    "items": [
-      {
-        "description": "输入 token 单价（美元 / 百万 token）",
-        "hint": "含 cache_creation 与普通输入的单价",
-        "type": "float",
-        "default": 0.0
-      },
-      {
-        "description": "缓存命中输入 token 单价（美元 / 百万 token）",
-        "hint": "一般低于普通输入单价",
-        "type": "float",
-        "default": 0.0
-      },
-      {
-        "description": "输出 token 单价（美元 / 百万 token）",
-        "hint": "输出通常比输入贵",
-        "type": "float",
-        "default": 0.0
-      }
-    ]
+    "items": {}
   },
-  {
+  "over_limit_policy": {
     "description": "超限处理策略",
     "hint": "预算超限时执行的动作",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "action": {
         "description": "超限动作",
         "hint": "stop_llm 直接拦截；fallback_provider 切换到备用 provider",
         "type": "string",
@@ -95,101 +76,101 @@
         "options": ["stop_llm", "fallback_provider"],
         "option_labels": ["拦截 LLM 请求", "切换备用 Provider"]
       },
-      {
+      "fallback_provider_id": {
         "description": "备用 Provider ID",
         "hint": "action=fallback_provider 时使用的 Provider ID",
         "type": "string",
         "default": ""
       },
-      {
+      "fallback_token_limit": {
         "description": "备用 Provider token 上限",
         "hint": "切换到备用 provider 后允许的最大 token 数，0 表示不限制",
         "type": "int",
         "default": 0
       },
-      {
+      "block_wake_words_after_limit": {
         "description": "超限后屏蔽唤醒词",
         "hint": "开启后，超限会话将不再响应 LLM 唤醒词（仅命令可用）",
         "type": "bool",
         "default": false
       }
-    ]
+    }
   },
-  {
+  "refresh_time": {
     "description": "每日重置时间",
     "hint": "格式 HH:MM，默认 00:00；按服务器本地时区计算每日窗口",
     "type": "string",
     "default": "00:00"
   },
-  {
+  "match_unique_session": {
     "description": "匹配唯一会话",
     "hint": "开启后将按 (umo, session_id) 维度聚合，否则仅按 umo 聚合",
     "type": "bool",
     "default": false
   },
-  {
+  "cache_diag": {
     "description": "缓存破坏诊断配置",
     "hint": "四类诊断开关与告警阈值",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "detect_context_reset": {
         "description": "启用上下文重置检测",
         "hint": "检测会话上下文是否被意外重置导致缓存全部失效",
         "type": "bool",
         "default": true
       },
-      {
+      "detect_system_prompt_change": {
         "description": "启用 system prompt 变更检测",
         "hint": "检测 system prompt 在多轮间是否被修改",
         "type": "bool",
         "default": true
       },
-      {
+      "detect_tools_change": {
         "description": "启用工具定义变更检测",
         "hint": "检测工具集合（tools）是否在多轮间变化",
         "type": "bool",
         "default": true
       },
-      {
+      "detect_order_drift": {
         "description": "启用上下文顺序漂移检测",
         "hint": "检测消息顺序变化导致前缀不匹配",
         "type": "bool",
         "default": true
       },
-      {
+      "cache_hit_rate_alert_threshold": {
         "description": "缓存命中率告警阈值（百分比）",
         "hint": "命中率低于此值则触发告警，0 表示不告警",
         "type": "int",
         "default": 30
       }
-    ]
+    }
   },
-  {
+  "alerts": {
     "description": "告警配置",
     "hint": "主动推送与冷却相关设置",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "enabled": {
         "description": "启用超预算主动推送",
         "hint": "开启后超预算时通过 notifier 主动通知用户",
         "type": "bool",
         "default": true
       },
-      {
+      "cooldown_seconds": {
         "description": "告警冷却时间（秒）",
         "hint": "同一会话两次告警的最小间隔，避免刷屏",
         "type": "int",
         "default": 300
       },
-      {
+      "daily_report_time": {
         "description": "每日报告推送时间",
         "hint": "格式 HH:MM，留空则不推送日报",
         "type": "string",
         "default": "09:00"
       },
-      {
+      "daily_report_to": {
         "description": "每日报告推送目标会话列表",
         "hint": "UMO 列表（unified_msg_origin），日报会逐个推送给这些会话；为空则不主动推送",
         "type": "list",
@@ -201,72 +182,72 @@
           "default": ""
         }
       }
-    ]
+    }
   },
-  {
+  "prompt_optimizer": {
     "description": "提示词优化器配置",
     "hint": "静态分析与 LLM 改写相关设置",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "enabled": {
         "description": "启用提示词优化",
         "hint": "开启后 /optimize 命令可用",
         "type": "bool",
         "default": true
       },
-      {
+      "provider_id": {
         "description": "改写使用的 Provider ID",
         "hint": "留空则使用当前会话的 Provider",
         "type": "string",
         "default": ""
       },
-      {
+      "max_static_analysis_length": {
         "description": "静态分析最大 system prompt 长度（字符）",
         "hint": "超过此长度的 system prompt 只做粗粒度分析",
         "type": "int",
         "default": 8000
       }
-    ]
+    }
   },
-  {
+  "attribution": {
     "description": "归因分析配置",
     "hint": "上下文 token 估算与注入归因相关设置",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "enabled": {
         "description": "启用上下文注入归因",
         "hint": "开启后记录每次请求的上下文组成（system/tools/history/user）",
         "type": "bool",
         "default": true
       },
-      {
+      "sample_rate": {
         "description": "归因采样率（百分比）",
         "hint": "为降低性能开销，按比例采样请求做归因，100 表示全采样",
         "type": "int",
         "default": 100
       }
-    ]
+    }
   },
-  {
+  "schedule": {
     "description": "定时任务配置",
     "hint": "CronJob 注册与历史数据清理",
     "type": "object",
     "default": {},
-    "items": [
-      {
+    "items": {
+      "enable_daily_report": {
         "description": "启用每日报告 CronJob",
         "hint": "开启后在 alerts.daily_report_time 自动生成并推送日报",
         "type": "bool",
         "default": true
       },
-      {
+      "retain_days": {
         "description": "历史数据保留天数",
         "hint": "超过此天数的补充记录会被清理，0 表示永不清理",
         "type": "int",
         "default": 90
       }
-    ]
+    }
   }
-]
+}
