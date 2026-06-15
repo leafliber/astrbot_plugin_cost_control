@@ -266,6 +266,7 @@
                         esc(c.value) +
                         "</div>" +
                         (c.sub ? '<div class="sub">' + esc(c.sub) + "</div>" : "") +
+                        (c.delta ? '<div class="delta-row">' + c.delta + "</div>" : "") +
                         "</div>"
                     );
                 })
@@ -286,19 +287,25 @@
             // 并行拉聚合报表 + 时序
             var r = await api("overview", { window: currentWindow });
             var series = [];
+            var cmp = null;
             try {
                 var tl = await api("timeline", { days: days, bucket: "day" });
                 series = (tl && tl.series) || [];
             } catch (e) {
                 /* 时序失败不阻断 */
             }
-            renderOverview(r, series, days);
+            try {
+                cmp = await api("compare", { window: currentWindow });
+            } catch (e) {
+                /* 环比失败不阻断 */
+            }
+            renderOverview(r, series, days, cmp);
         } catch (e) {
             setError("加载总览失败：" + esc(e.message));
         }
     }
 
-    function renderOverview(r, series, days) {
+    function renderOverview(r, series, days, cmp) {
         destroyCharts();
         var u = r.usage || {};
         // 缓存模型列表（明细页模型下拉复用）
@@ -311,8 +318,18 @@
         }
 
         var cards = [
-            { label: "成本", value: fmtCost(r.cost), sub: "USD · " + currentWindowLabel() },
-            { label: "调用次数", value: fmtNum(u.count), sub: currentWindowLabel() },
+            {
+                label: "成本",
+                value: fmtCost(r.cost),
+                sub: "USD · " + currentWindowLabel(),
+                delta: deltaText(cmp, "cost"),
+            },
+            {
+                label: "调用次数",
+                value: fmtNum(u.count),
+                sub: currentWindowLabel(),
+                delta: deltaText(cmp, "count"),
+            },
             {
                 label: "平均缓存命中率",
                 value: (r.cache_hit_rate || 0) + "%",
@@ -472,16 +489,16 @@
         // Top 会话横向柱状
         var top = (r.top_sessions || []).slice(0, 8);
         if (top.length) {
-            var labels = top
-                .map(function (s) {
-                    return shortUmo(s.umo);
-                })
-                .reverse();
-            var data = top
-                .map(function (s) {
-                    return s.tokens;
-                })
-                .reverse();
+            var rev = top.slice().reverse();
+            var labels = rev.map(function (s) {
+                return shortUmo(s.umo);
+            });
+            var data = rev.map(function (s) {
+                return s.tokens;
+            });
+            var costs = rev.map(function (s) {
+                return s.cost || 0;
+            });
             ensureChart(
                 "chart-sessions",
                 "bar",
@@ -491,7 +508,20 @@
                 },
                 baseChartOptions({
                     indexAxis: "y",
-                    plugins: { legend: { display: false } },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function (ctx) {
+                                    var tok = ctx.parsed.x;
+                                    var c = costs[ctx.dataIndex] || 0;
+                                    return (
+                                        "Token " + fmtCompact(tok) + " · 成本 " + fmtCost(c)
+                                    );
+                                },
+                            },
+                        },
+                    },
                 })
             );
         } else {
@@ -506,6 +536,29 @@
             : currentWindow === "weekly"
               ? "近 7 天"
               : "今日";
+    }
+    // 环比徽标：cmp 为 compare 端点结果，key 为 cost/count/tokens。
+    // 成本/调用上升=不利（红），下降=有利（绿）；上期为 0 时显示「新增」。
+    function deltaText(cmp, key) {
+        if (!cmp) return "";
+        var d = cmp.delta || {};
+        var pct = d[key + "_pct"];
+        var label = cmp.label || "上期";
+        if (pct == null) {
+            return '<span class="delta new">' + esc(label) + "无用量</span>";
+        }
+        var cls = pct > 0 ? "up" : pct < 0 ? "down" : "flat";
+        var arrow = pct > 0 ? "↑" : pct < 0 ? "↓" : "→";
+        return (
+            '<span class="delta ' +
+            cls +
+            '">' +
+            arrow +
+            Math.abs(pct) +
+            "% vs " +
+            esc(label) +
+            "</span>"
+        );
     }
     function shortModelName(m) {
         m = String(m || "?");
@@ -671,18 +724,28 @@
             $("rec-body").innerHTML = '<div class="empty">暂无明细记录</div>';
             return;
         }
+        var sums = { input: 0, cached: 0, output: 0, creation: 0, cost: 0 };
         var html =
             '<div class="panel"><table><thead><tr>' +
             "<th>时间</th><th>会话</th><th>模型</th><th>Provider</th>" +
-            "<th>输入</th><th>缓存</th><th>输出</th><th>cache写入</th><th>注入</th>" +
+            "<th>输入</th><th>缓存</th><th>输出</th><th>cache写入</th><th>注入</th><th>成本</th>" +
             "</tr></thead><tbody>";
         rows.forEach(function (r) {
+            sums.input += +r.token_input_other || 0;
+            sums.cached += +r.token_input_cached || 0;
+            sums.output += +r.token_output || 0;
+            sums.creation += +r.cache_creation || 0;
+            sums.cost += +r.cost || 0;
             html +=
                 "<tr><td>" +
                 shortTime(r.created_at) +
-                "</td><td class='mono'>" +
+                '</td><td class="mono" title="' +
+                esc(r.umo || "") +
+                '">' +
                 esc(shortUmo(r.umo)) +
-                "</td><td class='mono'>" +
+                '</td><td class="mono" title="' +
+                esc(r.provider_model || "") +
+                '">' +
                 esc(r.provider_model || "-") +
                 "</td><td class='mono'>" +
                 esc(r.provider_id || "-") +
@@ -696,9 +759,24 @@
                 fmtNum(r.cache_creation) +
                 "</td><td>" +
                 (r.injection_total == null ? "-" : fmtNum(r.injection_total)) +
+                "</td><td>" +
+                fmtCost(r.cost) +
                 "</td></tr>";
         });
-        html += "</tbody></table></div>";
+        html +=
+            '</tbody><tfoot><tr class="sum-row"><td colspan="4">合计（' +
+            rows.length +
+            " 条）</td><td>" +
+            fmtNum(sums.input) +
+            "</td><td>" +
+            fmtNum(sums.cached) +
+            "</td><td>" +
+            fmtNum(sums.output) +
+            "</td><td>" +
+            fmtNum(sums.creation) +
+            "</td><td></td><td>" +
+            fmtCost(sums.cost) +
+            "</td></tr></tfoot></table></div>";
         $("rec-body").innerHTML = html;
     }
 
@@ -959,8 +1037,20 @@
                     sub: (r.samples || 0) + " 样本",
                 },
                 { label: "破坏事件", value: fmtNum((r.events || []).length) },
+                {
+                    label: "非缓存输入 token",
+                    value: fmtNum(r.total_input_other || 0),
+                    sub: "可经提升命中率优化",
+                },
             ];
             var html = cardsBlock(cards);
+            html +=
+                '<div class="panel potential"><h2>优化潜力</h2>' +
+                '<div class="alert-body">缓存命中单价通常为非缓存的 <strong>1/10</strong>。' +
+                "当前非缓存输入 <strong>" +
+                fmtNum(r.total_input_other || 0) +
+                "</strong> token，提升命中率可直接降低这部分输入成本。" +
+                "重点排查：system prompt 稳定性、上下文是否被重置、工具定义是否频繁变化。</div></div>";
             var events = r.events || [];
             html += '<div class="panel"><h2>缓存破坏事件（最近）</h2>';
             if (!events.length) {
@@ -1004,8 +1094,68 @@
                 { label: "system 平均", value: fmtNum(avg.system) },
                 { label: "tools 平均", value: fmtNum(avg.tools) },
                 { label: "history 平均", value: fmtNum(avg.history) },
+                { label: "user 平均", value: fmtNum(avg.user) },
             ];
             var html = cardsBlock(cards);
+            // 组件占比堆叠条（平均）
+            var comps = [
+                { k: "system", v: avg.system || 0, c: "var(--accent)" },
+                { k: "tools", v: avg.tools || 0, c: "#8ab4ff" },
+                { k: "history", v: avg.history || 0, c: "var(--warn)" },
+                { k: "user", v: avg.user || 0, c: "var(--ok)" },
+            ];
+            var totalAttr = comps.reduce(function (s, c) {
+                return s + (c.v || 0);
+            }, 0);
+            html += '<div class="panel"><h2>组件占比（平均）</h2>';
+            if (totalAttr > 0) {
+                var barHtml = '<div class="stacked-bar">';
+                comps.forEach(function (c) {
+                    var pct = Math.round((c.v * 100) / totalAttr);
+                    if (pct > 0) {
+                        barHtml +=
+                            '<div class="stacked-seg" style="width:' +
+                            pct +
+                            "%;background:" +
+                            c.c +
+                            '" title="' +
+                            esc(c.k) +
+                            " " +
+                            pct +
+                            '%">' +
+                            (pct >= 8 ? pct + "%" : "") +
+                            "</div>";
+                    }
+                });
+                barHtml += "</div>";
+                barHtml += '<div class="legend">';
+                comps.forEach(function (c) {
+                    var pct = totalAttr > 0 ? Math.round((c.v * 100) / totalAttr) : 0;
+                    barHtml +=
+                        '<span class="legend-item"><span class="legend-dot" style="background:' +
+                        c.c +
+                        '"></span>' +
+                        esc(c.k) +
+                        " " +
+                        fmtNum(c.v) +
+                        " (" +
+                        pct +
+                        "%)</span>";
+                });
+                barHtml += "</div>";
+                html += barHtml;
+                var histPct =
+                    totalAttr > 0 ? Math.round(((avg.history || 0) * 100) / totalAttr) : 0;
+                if (histPct >= 40) {
+                    html +=
+                        '<div class="alert-body" style="margin-top:10px">history 占注入的 <strong>' +
+                        histPct +
+                        "%</strong>，是可优化的主要部分——精简历史可显著降低每轮输入 token。</div>";
+                }
+            } else {
+                html += '<div class="empty">暂无组件数据</div>';
+            }
+            html += "</div>";
             var recent = r.recent || [];
             html += '<div class="panel"><h2>最近请求归因</h2>';
             if (!recent.length) {
@@ -1013,13 +1163,15 @@
             } else {
                 html +=
                     '<table><thead><tr><th>时间</th><th>会话</th><th>注入 token</th>' +
-                    "<th>system</th><th>tools</th><th>history</th></tr></thead><tbody>";
+                    "<th>system</th><th>tools</th><th>history</th><th>user</th></tr></thead><tbody>";
                 recent.forEach(function (it) {
                     var a = it.attribution || {};
                     html +=
                         "<tr><td>" +
                         shortTime(it.created_at) +
-                        "</td><td class='mono'>" +
+                        '</td><td class="mono" title="' +
+                        esc(it.umo || "") +
+                        '">' +
                         esc(it.umo || "-") +
                         "</td><td>" +
                         (it.injection_total == null ? "-" : fmtNum(it.injection_total)) +
@@ -1029,6 +1181,8 @@
                         fmtNum(a.tools) +
                         "</td><td>" +
                         fmtNum(a.history) +
+                        "</td><td>" +
+                        fmtNum(a.user) +
                         "</td></tr>";
                 });
                 html += "</tbody></table>";
@@ -1044,31 +1198,52 @@
         setLoading();
         try {
             var data = await api("pricing");
-            var keys = Object.keys(data || {}).sort();
-            if (!keys.length) {
-                $("content").innerHTML = '<div class="empty">暂无定价数据</div>';
-                return;
-            }
-            var html =
-                '<div class="panel"><h2>模型单价（USD / 百万 token）</h2>' +
-                '<table><thead><tr><th>模型</th><th>输入</th><th>缓存命中</th>' +
-                "<th>输出</th><th>缓存写入</th></tr></thead><tbody>";
-            keys.forEach(function (k) {
-                var p = data[k] || {};
+            var pricing = (data && data.pricing) || {};
+            var unpriced = (data && data.unpriced) || [];
+            var keys = Object.keys(pricing).sort();
+            var html = "";
+            if (unpriced.length) {
                 html +=
-                    "<tr><td class='mono'>" +
-                    esc(k) +
-                    "</td><td>" +
-                    (p.input != null ? p.input : "-") +
-                    "</td><td>" +
-                    (p.input_cached != null ? p.input_cached : "-") +
-                    "</td><td>" +
-                    (p.output != null ? p.output : "-") +
-                    "</td><td>" +
-                    (p.cache_creation != null ? p.cache_creation : "-") +
-                    "</td></tr>";
-            });
-            html += "</tbody></table></div>";
+                    '<div class="panel alert-panel"><h2>未定价模型告警</h2>' +
+                    '<div class="alert-body">以下模型有用量但未配置单价，其成本被计为 <strong>$0</strong>，' +
+                    "会导致成本统计偏低。请在插件配置的 <code>pricing</code> 项补充单价。</div>" +
+                    '<table><thead><tr><th>模型</th><th>用量 token</th><th>调用</th></tr></thead><tbody>';
+                unpriced.forEach(function (u) {
+                    html +=
+                        "<tr><td class='mono'>" +
+                        esc(u.model) +
+                        "</td><td>" +
+                        fmtNum(u.tokens) +
+                        "</td><td>" +
+                        fmtNum(u.count) +
+                        "</td></tr>";
+                });
+                html += "</tbody></table></div>";
+            }
+            if (!keys.length) {
+                html += '<div class="empty">暂无定价数据</div>';
+            } else {
+                html +=
+                    '<div class="panel"><h2>模型单价（USD / 百万 token）</h2>' +
+                    '<table><thead><tr><th>模型</th><th>输入</th><th>缓存命中</th>' +
+                    "<th>输出</th><th>缓存写入</th></tr></thead><tbody>";
+                keys.forEach(function (k) {
+                    var p = pricing[k] || {};
+                    html +=
+                        "<tr><td class='mono'>" +
+                        esc(k) +
+                        "</td><td>" +
+                        (p.input != null ? p.input : "-") +
+                        "</td><td>" +
+                        (p.input_cached != null ? p.input_cached : "-") +
+                        "</td><td>" +
+                        (p.output != null ? p.output : "-") +
+                        "</td><td>" +
+                        (p.cache_creation != null ? p.cache_creation : "-") +
+                        "</td></tr>";
+                });
+                html += "</tbody></table></div>";
+            }
             $("content").innerHTML = html;
         } catch (e) {
             setError("加载定价失败：" + esc(e.message));

@@ -51,6 +51,42 @@ def report_window_start(
     return daily_start
 
 
+def compare_windows(
+    window: str,
+    now_utc: datetime,
+    tz: ZoneInfo,
+    refresh_time: str,
+) -> tuple[datetime, datetime, datetime, datetime]:
+    """计算同比对比的当前窗口与上一窗口 UTC 边界（纯函数）。
+
+    返回 ``(cur_start, cur_end, prev_start, prev_end)``（均 aware UTC）。
+    当前窗口与 :func:`report_window_start` 一致（``cur_end`` 为 ``now_utc``）；
+    上一窗口为紧邻当前窗口起点的上一段：
+    - ``daily``：``[cur_start-1d, cur_start)``
+    - ``weekly``：``[cur_start-7d, cur_start)``
+    - ``monthly``：``[上月1号, 本月1号)``（自然月环比，与当前「本月至今」口径对应）
+    未知 window 按 daily。
+    """
+    cur_start = report_window_start(window, now_utc, tz, refresh_time)
+    cur_end = now_utc
+    w = (window or "daily").strip().lower()
+    if w == "monthly":
+        prev_end = cur_start
+        local = cur_start.astimezone(tz)
+        if local.month == 1:
+            prev_start_local = local.replace(year=local.year - 1, month=12)
+        else:
+            prev_start_local = local.replace(month=local.month - 1)
+        prev_start = prev_start_local.astimezone(UTC)
+    elif w == "weekly":
+        prev_start = cur_start - timedelta(days=7)
+        prev_end = cur_start
+    else:
+        prev_start = cur_start - timedelta(days=1)
+        prev_end = cur_start
+    return cur_start, cur_end, prev_start, prev_end
+
+
 def _row_cost(row: dict[str, Any], pricing: dict[str, dict[str, float]]) -> float:
     """按模型单价算单行成本（纯函数辅助）。模型无匹配单价返回 0.0。"""
     return compute_cost_value(row, row.get("key") or None, pricing)
@@ -58,6 +94,7 @@ def _row_cost(row: dict[str, Any], pricing: dict[str, dict[str, float]]) -> floa
 
 def _aggregate_supplements(
     sups: list[Any],
+    pricing: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     """从补充记录列表聚合缓存命中率与归因注入（纯函数）。
 
@@ -65,6 +102,8 @@ def _aggregate_supplements(
         sups: ``CostSupplement`` 对象列表（duck-typed，含 ``cache_read`` /
             ``cache_creation`` / ``token_input_cached`` / ``token_input_other`` /
             ``injection_total`` / ``umo`` / token 三类属性）。
+        pricing: 模型单价表，非空时按模型算每条成本并按会话累加到
+            ``by_session[*].cost``（未定价为 0.0）。
 
     Returns:
         ``{"cache_hit_rate": float, "cache_samples": int, "avg_injection": float,
@@ -72,7 +111,7 @@ def _aggregate_supplements(
     """
     rates: list[float] = []
     injections: list[int] = []
-    sessions: dict[str, dict[str, int]] = {}
+    sessions: dict[str, dict[str, Any]] = {}
     for s in sups or []:
         rate = hit_rate(
             getattr(s, "cache_read", None) or getattr(s, "token_input_cached", None),
@@ -87,16 +126,31 @@ def _aggregate_supplements(
                 injections.append(int(inj))
             except (TypeError, ValueError):
                 pass
+        token_input_other = int(getattr(s, "token_input_other", 0) or 0)
+        token_input_cached = int(getattr(s, "token_input_cached", 0) or 0)
+        token_output = int(getattr(s, "token_output", 0) or 0)
         umo = str(getattr(s, "umo", "") or "(unknown)")
-        bucket = sessions.setdefault(umo, {"count": 0, "tokens": 0})
+        bucket = sessions.setdefault(umo, {"count": 0, "tokens": 0, "cost": 0.0})
         bucket["count"] += 1
-        bucket["tokens"] += (
-            int(getattr(s, "token_input_other", 0) or 0)
-            + int(getattr(s, "token_input_cached", 0) or 0)
-            + int(getattr(s, "token_output", 0) or 0)
-        )
+        bucket["tokens"] += token_input_other + token_input_cached + token_output
+        if pricing is not None:
+            bucket["cost"] += compute_cost_value(
+                {
+                    "token_input_other": token_input_other,
+                    "token_input_cached": token_input_cached,
+                    "token_output": token_output,
+                    "cache_creation": getattr(s, "cache_creation", None),
+                },
+                getattr(s, "provider_model", None),
+                pricing,
+            )
     by_session: list[dict[str, Any]] = [
-        {"umo": umo, "count": v["count"], "tokens": v["tokens"]}
+        {
+            "umo": umo,
+            "count": v["count"],
+            "tokens": v["tokens"],
+            "cost": round(float(v["cost"]), 6),
+        }
         for umo, v in sorted(sessions.items(), key=lambda kv: kv[1]["tokens"], reverse=True)
     ]
     return {
@@ -172,7 +226,7 @@ class AnalyticsMixin:
             total_cost = round(sum(m["cost"] for m in cost_by_model), 6)
 
             sups = await self.query_supplements(start=start, limit=5000)
-            agg = _aggregate_supplements(sups)
+            agg = _aggregate_supplements(sups, pricing)
 
             return {
                 "window": window,

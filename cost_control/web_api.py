@@ -73,6 +73,7 @@ class WebApiMixin:
             routes: list[tuple[str, Any, list[str], str]] = [
                 (f"{prefix}/overview", self.api_overview, ["GET"], "总览聚合报表"),
                 (f"{prefix}/report", self.api_report, ["GET"], "综合报表（同 overview）"),
+                (f"{prefix}/compare", self.api_compare, ["GET"], "环比对比（当前 vs 上一窗口）"),
                 (f"{prefix}/timeline", self.api_timeline, ["GET"], "时序趋势（按天/小时分桶）"),
                 (f"{prefix}/records", self.api_records, ["GET"], "每请求明细记录"),
                 (
@@ -156,21 +157,49 @@ class WebApiMixin:
             return None
 
     @staticmethod
-    def _supplement_to_dict(s: Any) -> dict[str, Any]:
-        """把 ``CostSupplement`` 行序列化为 JSON 友好 dict。"""
+    def _supplement_to_dict(
+        s: Any, pricing: dict[str, dict[str, float]] | None = None
+    ) -> dict[str, Any]:
+        """把 ``CostSupplement`` 行序列化为 JSON 友好 dict。
+
+        ``pricing`` 非空时按模型单价算出本条成本 ``cost``（未定价为 0.0，与
+        全局口径一致）。
+        """
+        from .cost import compute_cost_value
+
         created = getattr(s, "created_at", None)
+        token_input_other = int(getattr(s, "token_input_other", 0) or 0)
+        token_input_cached = int(getattr(s, "token_input_cached", 0) or 0)
+        token_output = int(getattr(s, "token_output", 0) or 0)
+        cache_creation = getattr(s, "cache_creation", None)
+        cost = 0.0
+        if pricing is not None:
+            cost = round(
+                compute_cost_value(
+                    {
+                        "token_input_other": token_input_other,
+                        "token_input_cached": token_input_cached,
+                        "token_output": token_output,
+                        "cache_creation": cache_creation,
+                    },
+                    getattr(s, "provider_model", None),
+                    pricing,
+                ),
+                6,
+            )
         return {
             "umo": getattr(s, "umo", "") or "",
             "provider_id": getattr(s, "provider_id", "") or "",
             "provider_model": getattr(s, "provider_model", None),
             "conversation_id": getattr(s, "conversation_id", None),
-            "token_input_other": int(getattr(s, "token_input_other", 0) or 0),
-            "token_input_cached": int(getattr(s, "token_input_cached", 0) or 0),
-            "token_output": int(getattr(s, "token_output", 0) or 0),
-            "cache_creation": getattr(s, "cache_creation", None),
+            "token_input_other": token_input_other,
+            "token_input_cached": token_input_cached,
+            "token_output": token_output,
+            "cache_creation": cache_creation,
             "cache_read": getattr(s, "cache_read", None),
             "injection_total": getattr(s, "injection_total", None),
             "attribution": getattr(s, "attribution", None),
+            "cost": cost,
             "created_at": created.isoformat() if created else None,
         }
 
@@ -188,6 +217,64 @@ class WebApiMixin:
     async def api_report(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /report``：综合报表（与 overview 等价，保留独立语义）。"""
         return await self.api_overview(**kwargs)
+
+    async def api_compare(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /compare``：当前窗口 vs 上一窗口的 cost/count/tokens 环比。
+
+        Query：``window``（daily|weekly|monthly，默认 daily）。当前窗口与报表口径
+        一致，上一窗口为紧邻的等长（月度按自然月）上一段（见
+        :func:`analytics.compare_windows`）。``previous`` 为 0 时对应 ``delta`` 百分比
+        为 ``null``（前端显示「新增」）。
+        """
+        try:
+            from datetime import UTC, datetime
+
+            from .analytics import compare_windows
+            from .budget import total_tokens
+            from .cost import compute_cost_value
+
+            window = self._param("window", "daily") or "daily"
+            now = datetime.now(UTC)
+            tz = resolve_tz(self.context)
+            refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+            cur_start, cur_end, prev_start, prev_end = compare_windows(window, now, tz, refresh)
+            pricing = self.get_pricing()
+
+            async def _stats(start: datetime, end: datetime) -> dict[str, Any]:
+                usage = await self.query_usage(start=start, end=end)
+                rows = await self.query_usage_grouped(by="model", start=start, end=end)
+                cost = round(
+                    sum(compute_cost_value(r, r.get("key") or None, pricing) for r in rows),
+                    6,
+                )
+                return {
+                    "cost": cost,
+                    "count": int(usage.get("count", 0) or 0),
+                    "tokens": total_tokens(usage),
+                }
+
+            cur = await _stats(cur_start, cur_end)
+            prev = await _stats(prev_start, prev_end)
+
+            def _pct(c: float, p: float) -> float | None:
+                return round((c - p) * 100.0 / p, 1) if p > 0 else None
+
+            label = "昨日" if window == "daily" else "上周" if window == "weekly" else "上月"
+            return self._ok(
+                {
+                    "window": window,
+                    "current": cur,
+                    "previous": prev,
+                    "delta": {
+                        "cost_pct": _pct(cur["cost"], prev["cost"]),
+                        "count_pct": _pct(cur["count"], prev["count"]),
+                        "tokens_pct": _pct(cur["tokens"], prev["tokens"]),
+                    },
+                    "label": label,
+                }
+            )
+        except Exception as e:
+            return self._err(str(e))
 
     async def api_timeline(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /timeline``：用量 / 调用次数时序（基于 ProviderStat 全量历史）。
@@ -256,7 +343,8 @@ class WebApiMixin:
                 order_by=order_by,
                 order_dir=order_dir,
             )
-            return self._ok([self._supplement_to_dict(r) for r in rows])
+            pricing = self.get_pricing()
+            return self._ok([self._supplement_to_dict(r, pricing) for r in rows])
         except Exception as e:
             return self._err(str(e))
 
@@ -403,6 +491,8 @@ class WebApiMixin:
             from .cache_diag import hit_rate
 
             rates: list[float] = []
+            total_input_other = 0
+            total_input_cached = 0
             for s in sups:
                 rate = hit_rate(
                     getattr(s, "cache_read", None) or getattr(s, "token_input_cached", None),
@@ -411,6 +501,8 @@ class WebApiMixin:
                 )
                 if rate >= 0:
                     rates.append(rate)
+                total_input_other += int(getattr(s, "token_input_other", 0) or 0)
+                total_input_cached += int(getattr(s, "token_input_cached", 0) or 0)
             avg = round(sum(rates) / len(rates), 1) if rates else 0.0
 
             events: list[dict[str, Any]] = []
@@ -426,6 +518,8 @@ class WebApiMixin:
                 {
                     "cache_hit_rate": avg,
                     "samples": len(rates),
+                    "total_input_other": total_input_other,
+                    "total_input_cached": total_input_cached,
                     "events": events,
                 }
             )
@@ -441,7 +535,12 @@ class WebApiMixin:
                 limit = 50
             sups = await self.query_supplements(limit=limit)
             items: list[dict[str, Any]] = []
-            comps: dict[str, list[int]] = {"system": [], "tools": [], "history": []}
+            comps: dict[str, list[int]] = {
+                "system": [],
+                "tools": [],
+                "history": [],
+                "user": [],
+            }
             for s in sups:
                 attr = getattr(s, "attribution", None)
                 inj = getattr(s, "injection_total", None)
@@ -464,9 +563,39 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_pricing(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /pricing``：当前生效的模型单价表（USD / 百万 token）。"""
+        """``GET /pricing``：模型单价表 + 有用量但未定价的模型告警。
+
+        返回 ``{pricing: {model: prices}, unpriced: [{model, tokens, count}]}``。
+        ``unpriced`` 取全量历史（``query_usage_grouped(by="model")``）中
+        :func:`cost.match_pricing` 匹配不到单价的模型——这些模型的成本被计为 0，
+        会使整体成本统计偏低，需提示用户补单价。附 token 量表明失真影响范围。
+        """
         try:
-            return self._ok(self.get_pricing())
+            from .cost import match_pricing
+
+            pricing = self.get_pricing()
+            unpriced: list[dict[str, Any]] = []
+            try:
+                rows = await self.query_usage_grouped(by="model")
+                for r in rows:
+                    model = r.get("key") or ""
+                    if model and match_pricing(model, pricing) is None:
+                        tokens = (
+                            int(r.get("token_input_other", 0) or 0)
+                            + int(r.get("token_input_cached", 0) or 0)
+                            + int(r.get("token_output", 0) or 0)
+                        )
+                        unpriced.append(
+                            {
+                                "model": model,
+                                "tokens": tokens,
+                                "count": int(r.get("count", 0) or 0),
+                            }
+                        )
+                unpriced.sort(key=lambda x: x["tokens"], reverse=True)
+            except Exception:
+                pass  # 用量查询失败不阻断定价表展示
+            return self._ok({"pricing": pricing, "unpriced": unpriced})
         except Exception as e:
             return self._err(str(e))
 

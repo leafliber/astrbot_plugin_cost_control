@@ -483,3 +483,114 @@ code {
 .small {
     font-size: 11px;
 }
+
+/* ===== 环比徽标 ===== */
+.delta-row {
+    margin-top: 6px;
+}
+
+.delta {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.delta.up {
+    background: rgba(224, 49, 49, 0.12);
+    color: var(--bad);
+}
+
+.delta.down {
+    background: rgba(47, 158, 68, 0.14);
+    color: var(--ok);
+}
+
+.delta.flat {
+    background: var(--panel-2);
+    color: var(--text-dim);
+}
+
+.delta.new {
+    background: var(--accent-weak);
+    color: var(--accent);
+}
+
+/* ===== 告警区 / 优化潜力 ===== */
+.alert-panel {
+    border-color: rgba(224, 49, 49, 0.35);
+    background: rgba(224, 49, 49, 0.04);
+}
+
+.alert-panel h2 {
+    color: var(--bad);
+}
+
+.alert-body {
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.alert-body code {
+    color: var(--text);
+}
+
+.potential {
+    border-color: rgba(240, 140, 0, 0.3);
+    background: rgba(240, 140, 0, 0.04);
+}
+
+.potential h2 {
+    color: var(--warn);
+}
+
+/* ===== 归因组件堆叠条 ===== */
+.stacked-bar {
+    display: flex;
+    height: 22px;
+    border-radius: 5px;
+    overflow: hidden;
+    margin-bottom: 8px;
+    background: var(--panel-2);
+}
+
+.stacked-seg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 500;
+    min-width: 0;
+}
+
+.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.legend-dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+}
+
+/* ===== 明细合计行 ===== */
+.sum-row td {
+    font-weight: 600;
+    border-top: 2px solid var(--border);
+    border-bottom: none;
+    background: var(--panel-2);
+}
