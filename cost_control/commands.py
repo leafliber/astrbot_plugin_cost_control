@@ -40,6 +40,7 @@ class CommandsMixin:
     recent_events: Any
     analyze_prompt: Any
     rewrite_prompt: Any
+    build_report: Any
 
     def _umo(self, event: AstrMessageEvent) -> str:
         return str(getattr(event, "unified_msg_origin", None) or "")
@@ -174,9 +175,42 @@ class CommandsMixin:
 
     @filter.command("report")
     async def cmd_report(self, event: AstrMessageEvent):
-        """``/report``：生成用量 / 成本报表。"""
-        # TODO 阶段4：调用 AnalyticsMixin
-        yield event.plain_result("该命令将在后续阶段实现。")
+        """``/report``：生成用量 / 成本 / 缓存 / 归因综合报表。
+
+        可选参数 ``daily``（默认）/ ``weekly`` / ``monthly`` 指定时间窗。
+        """
+        try:
+            arg = str(getattr(event, "message_str", "") or "").strip().lower()
+            window = arg if arg in ("daily", "weekly", "monthly") else "daily"
+            report = await self.build_report(window=window)
+            usage = report.get("usage", {}) or {}
+            lines = [
+                f"📊 成本报表（{window}）",
+                f"调用 {usage.get('count', 0)} 次，成本 ≈ ${report.get('cost', 0):.4f}",
+                f"输入(非缓存) {usage.get('token_input_other', 0)} / "
+                f"缓存命中 {usage.get('token_input_cached', 0)} / "
+                f"输出 {usage.get('token_output', 0)}",
+                f"平均缓存命中率 ≈ {report.get('cache_hit_rate', 0)}%"
+                f"（{report.get('cache_samples', 0)} 样本）",
+                f"平均上下文注入 ≈ {report.get('avg_injection', 0)} token"
+                f"（{report.get('injection_samples', 0)} 样本）",
+            ]
+            by_model = report.get("cost_by_model", []) or []
+            if by_model:
+                lines.append("按模型成本（Top 5）：")
+                for m in by_model[:5]:
+                    lines.append(
+                        f"  · {m.get('model') or '?'}：{m.get('count', 0)}次 / "
+                        f"${m.get('cost', 0):.4f}"
+                    )
+            top = report.get("top_sessions", []) or []
+            if top:
+                lines.append("Top 会话（按 token）：")
+                for s in top[:3]:
+                    lines.append(f"  · {s.get('umo', '?')}：{s.get('tokens', 0)} token")
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            yield event.plain_result(f"查询失败：{e}")
 
     @filter.command("attribution")
     async def cmd_attribution(self, event: AstrMessageEvent):

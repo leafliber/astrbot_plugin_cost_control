@@ -65,7 +65,7 @@ class Main(
         self.config = config or {}
 
     async def initialize(self) -> None:
-        """插件加载时初始化：建立独立 sqlite 补充表 + 注册 CronJob。
+        """插件加载时初始化：建立独立 sqlite 补充表 + 注册 CronJob + 注册 Web API。
 
         任一步失败仅记录日志，不阻断插件加载（降级：相应能力不可用，其余正常）。
         """
@@ -77,6 +77,10 @@ class Main(
             await self.register_cron()
         except Exception as e:
             logger.warning("[cost_control] CronJob 注册失败: %s", e)
+        try:
+            self.register_routes()
+        except Exception as e:
+            logger.warning("[cost_control] Web API 注册失败: %s", e)
 
     @filter.on_llm_request(priority=100000)
     async def on_llm_request_head(self, event: AstrMessageEvent, req: ProviderRequest) -> None:

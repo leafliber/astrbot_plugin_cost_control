@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>成本控制</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <header class="topbar">
+            <div class="title-group">
+                <h1>成本控制</h1>
+                <span id="window-switch" class="window-switch" hidden>
+                    <button data-window="daily" class="win-btn active">日</button>
+                    <button data-window="weekly" class="win-btn">周</button>
+                    <button data-window="monthly" class="win-btn">月</button>
+                </span>
+            </div>
+            <div class="topbar-right">
+                <span id="status" class="status">连接中…</span>
+                <button id="refresh" class="btn" title="刷新">↻</button>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" data-tab="overview">总览</button>
+            <button class="tab" data-tab="records">明细</button>
+            <button class="tab" data-tab="budgets">预算</button>
+            <button class="tab" data-tab="cache">缓存</button>
+            <button class="tab" data-tab="attribution">归因</button>
+            <button class="tab" data-tab="pricing">定价</button>
+            <button class="tab" data-tab="settings">设置</button>
+        </nav>
+
+        <main id="content" class="content">
+            <div class="loading">加载中…</div>
+        </main>
+
+        <footer class="footer">
+            <span id="bridge-info"></span>
+        </footer>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
