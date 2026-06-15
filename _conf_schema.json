@@ -140,9 +140,9 @@
       },
       "cache_hit_rate_alert_threshold": {
         "description": "缓存命中率告警阈值（百分比）",
-        "hint": "命中率低于此值则触发告警，0 表示不告警",
+        "hint": "命中率低于此值则触发告警，0 表示不告警（默认关闭主动推送）",
         "type": "int",
-        "default": 30
+        "default": 0
       }
     }
   },
@@ -238,9 +238,9 @@
     "items": {
       "enable_daily_report": {
         "description": "启用每日报告 CronJob",
-        "hint": "开启后在 alerts.daily_report_time 自动生成并推送日报",
+        "hint": "开启后在 alerts.daily_report_time 自动生成并推送到 alerts.daily_report_to（默认关闭，避免主动推送打扰）",
         "type": "bool",
-        "default": true
+        "default": false
       },
       "retain_days": {
         "description": "历史数据保留天数",

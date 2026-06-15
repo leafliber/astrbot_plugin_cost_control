@@ -78,17 +78,23 @@ class ScheduleMixin:
                     except Exception as e:
                         logger.warning("[cost_control] 删除旧 CronJob 失败: %s", e)
 
-            report_cron = self._report_cron()
             tz_key = resolve_tz(self.context).key
-            await cm.add_basic_job(
-                name=REPORT_JOB_NAME,
-                cron_expression=report_cron,
-                handler=self.daily_report,
-                description="cost_control 每日成本日报",
-                timezone=tz_key,
-                enabled=True,
-                persistent=False,
+            sched = get_config(getattr(self, "config", None), "schedule", {}) or {}
+            enable_report = bool(
+                sched.get("enable_daily_report", False) if isinstance(sched, dict) else False
             )
+            # 仅当显式启用时才注册日报 CronJob（默认关闭，避免主动推送打扰）。
+            # 历史清理 job 不发消息，始终注册。
+            if enable_report:
+                await cm.add_basic_job(
+                    name=REPORT_JOB_NAME,
+                    cron_expression=self._report_cron(),
+                    handler=self.daily_report,
+                    description="cost_control 每日成本日报",
+                    timezone=tz_key,
+                    enabled=True,
+                    persistent=False,
+                )
             await cm.add_basic_job(
                 name=CLEANUP_JOB_NAME,
                 cron_expression=_CLEANUP_CRON,
@@ -98,7 +104,7 @@ class ScheduleMixin:
                 enabled=True,
                 persistent=False,
             )
-            logger.info("[cost_control] CronJob 注册完成 (report=%s)", report_cron)
+            logger.info("[cost_control] CronJob 注册完成 (daily_report=%s)", enable_report)
         except Exception as e:
             logger.warning("[cost_control] CronJob 注册失败: %s", e)
 

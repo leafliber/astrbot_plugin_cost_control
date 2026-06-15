@@ -76,20 +76,24 @@
     }
 
     // ===== API 封装（endpoint 不带插件名前缀；父级 SPA 自动补 /api/plug/<plugin>/） =====
+    // 响应信封：后端用非标准的 {success, data} / {success:false, error}（见 web_api.py），
+    // 父级 SPA 的 API 客户端只解包标准 {status, data} 信封，对 {success} 原样透传，
+    // 故前端需自行 extractData（与参考插件 message_recorder 一致）。
+    function extractData(response) {
+        if (response && typeof response === "object") {
+            if (response.success === true) return response.data;
+            if (response.success === false)
+                throw new Error(response.error || "请求失败");
+        }
+        return response;
+    }
     async function api(endpoint, params) {
         if (!Page || !bridgeReady) throw new Error("Bridge SDK 未就绪");
-        var r = await Page.apiGet(endpoint, params || {});
-        if (r && r.status === "ok") return r.data;
-        if (r && r.status === "error") throw new Error(r.message || "请求失败");
-        if (r && r.data != null) return r.data;
-        throw new Error("无效响应");
+        return extractData(await Page.apiGet(endpoint, params || {}));
     }
     async function apiPost(endpoint, body) {
         if (!Page || !bridgeReady) throw new Error("Bridge SDK 未就绪");
-        var r = await Page.apiPost(endpoint, body || {});
-        if (r && r.status === "ok") return r.data;
-        if (r && r.status === "error") throw new Error(r.message || "请求失败");
-        throw new Error("无效响应");
+        return extractData(await Page.apiPost(endpoint, body || {}));
     }
 
     function setError(msg) {

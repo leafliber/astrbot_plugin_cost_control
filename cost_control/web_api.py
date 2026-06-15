@@ -16,8 +16,18 @@
   ``AstrBotJSONProvider`` 转 ISO。
 - 认证：需 dashboard JWT；Plugin Page 通过 bridge 由父级 SPA 代发（自动带 JWT）。
 
-降级原则：每个 handler 独立 try/except，失败返回 ``{"status": "error", ...}``，
+降级原则：每个 handler 独立 try/except，失败返回 ``{"success": False, ...}``，
 绝不抛出未捕获异常。
+
+⚠️ 响应信封选用 ``{"success": True, "data": ...}``（而非 AstrBot 标准的
+``{"status": "ok", "data": ...}``）。原因（已核对参考插件 message_recorder
++ bridge 行为）：Plugin Page bridge 的父级 SPA 复用 AstrBot 的 dashboard API
+客户端，该客户端的响应拦截器会**自动解包标准 ``{status, data}`` 信封**——对
+``{status:"ok", data}`` 直接 resolve 解包后的 ``data``，故前端拿到的 ``r``
+是裸业务数据、不再含 ``status`` 字段，前端按 ``r.status`` 判定会落空。改用非
+标准的 ``{success, data}`` 信封后，父级不识别 ``status`` 字段即**原样透传**，
+前端再自行 ``extractData``（见 ``pages/dashboard/app.js``），与 message_recorder
+完全一致、跨版本稳定。
 
 阶段 4 实现。
 """
@@ -80,7 +90,7 @@ class WebApiMixin:
 
     @staticmethod
     def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
-        out: dict[str, Any] = {"status": "ok"}
+        out: dict[str, Any] = {"success": True}
         if data is not None:
             out["data"] = data
         out.update(extra)
@@ -88,7 +98,7 @@ class WebApiMixin:
 
     @staticmethod
     def _err(message: str) -> dict[str, Any]:
-        return {"status": "error", "message": message}
+        return {"success": False, "error": message}
 
     @staticmethod
     def _param(name: str, default: str = "") -> str:
