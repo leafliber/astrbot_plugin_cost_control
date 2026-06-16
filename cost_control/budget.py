@@ -20,6 +20,7 @@ DB 查询在 ``BudgetMixin.check_budget`` 内复用 ``UsageQueryMixin.query_usag
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -32,6 +33,7 @@ from .config import (
     migrate_legacy_policy,
     normalize_strategy,
 )
+from .cost import compute_cost_value
 
 
 def resolve_tz(context: Any) -> ZoneInfo:
@@ -123,6 +125,53 @@ def check_dimensions(
     return {"exceeded": False, "dim": None, "limit": 0, "used": 0}
 
 
+def check_dimensions_dual(
+    used_t: Mapping[str, float],
+    used_c: Mapping[str, float],
+    limits_t: Mapping[str, float],
+    limits_c: Mapping[str, float],
+) -> dict[str, Any]:
+    """逐维比较 token / cost 用量与阈值，返回首个超限维度 + 指标（纯函数）。
+
+    按 :data:`_DIM_ORDER` 逐维；某维 token 或 cost 任一超限即返回。同维两者都超
+    优先报 token（更直观）。``limit <= 0`` 视为该指标不限，跳过。
+
+    Returns:
+        ``{"exceeded": bool, "dim": str | None, "metric": "token"|"cost"|None,
+        "limit": float, "used": float}``。
+    """
+    for dim in _DIM_ORDER:
+        lt = float(limits_t.get(dim, 0) or 0)
+        lc = float(limits_c.get(dim, 0) or 0)
+        if lt <= 0 and lc <= 0:
+            continue
+        ut = float(used_t.get(dim, 0) or 0)
+        uc = float(used_c.get(dim, 0) or 0)
+        if lt > 0 and ut >= lt:
+            return {"exceeded": True, "dim": dim, "metric": "token", "limit": lt, "used": ut}
+        if lc > 0 and uc >= lc:
+            return {"exceeded": True, "dim": dim, "metric": "cost", "limit": lc, "used": uc}
+    return {"exceeded": False, "dim": None, "metric": None, "limit": 0.0, "used": 0.0}
+
+
+def _groups_cost(
+    groups: list[dict[str, Any]],
+    pricing: dict[str, dict[str, float]],
+) -> float:
+    """把 ``query_usage_grouped(by="model")`` 结果按模型求和花费（纯函数）。
+
+    每组用 :func:`compute_cost_value` 按其 ``key``（模型名）匹配单价；未定价
+    模型贡献 0（与全局口径一致）。
+    """
+    total = 0.0
+    for g in groups or []:
+        try:
+            total += compute_cost_value(g, g.get("key"), pricing)
+        except Exception:
+            continue
+    return round(total, 6)
+
+
 def total_tokens(usage: dict[str, Any]) -> int:
     """把三类 token 聚合为总数（纯函数）。"""
     return (
@@ -163,11 +212,13 @@ class BudgetMixin:
     context: Any
     # 兄弟 Mixin 提供，这里仅声明以通过 mypy。
     query_usage: Any
+    query_usage_grouped: Any
+    get_pricing: Any
     save_supplement: Any
 
     def get_budgets(self) -> dict[str, int]:
         """返回生效的预算阈值 dict（合并用户配置与默认值）。"""
-        budgets = get_config(getattr(self, "config", None), "budgets", {}) or {}
+        budgets = get_config(getattr(self, "cfg", None), "budgets", {}) or {}
         defaults: dict[str, int] = dict(get_config(None, "budgets", {}) or {})
         merged: dict[str, int] = dict(defaults)
         if isinstance(budgets, dict):
@@ -181,6 +232,25 @@ class BudgetMixin:
                     continue
         return merged
 
+    def get_budgets_cost(self) -> dict[str, float]:
+        """返回生效的花费预算阈值 dict（USD float，合并用户配置与默认值）。
+
+        与 :meth:`get_budgets` 同 5 维、独立生效。``<=0`` 视为该维度不限花费。
+        """
+        budgets_cost = get_config(getattr(self, "cfg", None), "budgets_cost", {}) or {}
+        defaults: dict[str, float] = dict(get_config(None, "budgets_cost", {}) or {})
+        merged: dict[str, float] = dict(defaults)
+        if isinstance(budgets_cost, dict):
+            for dim in _DIM_ORDER:
+                val = budgets_cost.get(dim)
+                if val is None:
+                    continue
+                try:
+                    merged[dim] = float(val)
+                except (TypeError, ValueError):
+                    continue
+        return merged
+
     def get_over_limit_strategies(self) -> list[dict[str, Any]]:
         """返回生效的超限策略链（规范化 ``list[dict]``）。
 
@@ -189,7 +259,7 @@ class BudgetMixin:
         都没有则返回 :data:`CONFIG_DEFAULTS.over_limit_strategies` 默认值。
         每条策略经 :func:`normalize_strategy` 规范化（字段齐全、action 合法）。
         """
-        cfg = getattr(self, "config", None)
+        cfg = getattr(self, "cfg", None)
         if isinstance(cfg, dict) and "over_limit_strategies" in cfg:
             raw = cfg.get("over_limit_strategies")
             if isinstance(raw, list):
@@ -209,48 +279,75 @@ class BudgetMixin:
             model: 当前请求所用模型名（用于 ``per_model_daily``）。
 
         Returns:
-            ``{"exceeded": bool, "dim": str | None, "limit": int, "used": int,
-            "strategies": list}``。任何异常都降级为「未超限」，绝不阻断主流程。
+            ``{"exceeded": bool, "dim": str | None, "metric": "token"|"cost"|None,
+            "limit": float, "used": float, "strategies": list}``。任一维度的 token 或
+            cost 超出即超限。任何异常都降级为「未超限」，绝不阻断主流程。
         """
         strategies = self.get_over_limit_strategies()
         zero: dict[str, Any] = {
             "exceeded": False,
             "dim": None,
-            "limit": 0,
-            "used": 0,
+            "metric": None,
+            "limit": 0.0,
+            "used": 0.0,
             "strategies": strategies,
         }
         try:
-            limits = self.get_budgets()
-            if not any(int(limits.get(d, 0) or 0) > 0 for d in _DIM_ORDER):
+            limits_t = self.get_budgets()
+            limits_c = self.get_budgets_cost()
+            has_token = any(float(limits_t.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
+            has_cost = any(float(limits_c.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
+            if not has_token and not has_cost:
                 return zero  # 未配置任何预算，直接放行
 
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
-            refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
             d_start = day_window_start(refresh, now, tz)
             m_start = month_window_start(now, tz)
 
-            # 单会话 / 单用户：阶段 2 均按 umo 聚合（ProviderStat 无独立 user_id）。
-            session_usage = await self.query_usage(umo=umo, start=d_start)
-            session_total = total_tokens(session_usage)
+            # token 用量（单会话 / 单用户：阶段 2 均按 umo 聚合）
+            used_t: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
+            if has_token:
+                session_usage = await self.query_usage(umo=umo, start=d_start)
+                session_total = total_tokens(session_usage)
+                model_total = session_total
+                if model:
+                    model_total = total_tokens(await self.query_usage(model=model, start=d_start))
+                used_t = {
+                    "per_session_daily": session_total,
+                    "per_user_daily": session_total,  # 阶段 2 退化为 umo 维度
+                    "per_model_daily": model_total,
+                    "global_daily": total_tokens(await self.query_usage(start=d_start)),
+                    "global_monthly": total_tokens(await self.query_usage(start=m_start)),
+                }
 
-            model_total = session_total
-            if model:
-                model_usage = await self.query_usage(model=model, start=d_start)
-                model_total = total_tokens(model_usage)
+            # 花费用量（快路径：仅当存在 cost 限额才查；按模型分组 + 单价求和）
+            used_c: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
+            if has_cost:
+                pricing = self.get_pricing()
+                ses_cost = _groups_cost(
+                    await self.query_usage_grouped(by="model", umo=umo, start=d_start),
+                    pricing,
+                )
+                mod_cost = ses_cost
+                if model:
+                    mod_cost = compute_cost_value(
+                        await self.query_usage(model=model, start=d_start), model, pricing
+                    )
+                used_c = {
+                    "per_session_daily": ses_cost,
+                    "per_user_daily": ses_cost,  # 阶段 2 退化为 umo 维度
+                    "per_model_daily": mod_cost,
+                    "global_daily": _groups_cost(
+                        await self.query_usage_grouped(by="model", start=d_start), pricing
+                    ),
+                    "global_monthly": _groups_cost(
+                        await self.query_usage_grouped(by="model", start=m_start), pricing
+                    ),
+                }
 
-            global_day_total = total_tokens(await self.query_usage(start=d_start))
-            global_month_total = total_tokens(await self.query_usage(start=m_start))
-
-            used = {
-                "per_session_daily": session_total,
-                "per_user_daily": session_total,  # 阶段 2 退化为 umo 维度
-                "per_model_daily": model_total,
-                "global_daily": global_day_total,
-                "global_monthly": global_month_total,
-            }
-            result = check_dimensions(used, limits)
+            result = check_dimensions_dual(used_t, used_c, limits_t, limits_c)
             result["strategies"] = strategies
             return result
         except Exception:
@@ -434,10 +531,15 @@ class BudgetMixin:
 
         msg = str(strategy.get("message", "") or "").strip()
         if not msg:
-            msg = (
-                f"⏸ 已超出预算（{result.get('dim')}）："
-                f"用 {result.get('used')} / 限 {result.get('limit')} token"
-            )
+            dim = result.get("dim")
+            used = result.get("used")
+            limit = result.get("limit")
+            if result.get("metric") == "cost":
+                msg = (
+                    f"⏸ 已超出花费预算（{dim}）：${float(used or 0):.4f} / ${float(limit or 0):.2f}"
+                )
+            else:
+                msg = f"⏸ 已超出预算（{dim}）：用 {used} / 限 {limit} token"
         try:
             event.stop_event()
         except Exception:

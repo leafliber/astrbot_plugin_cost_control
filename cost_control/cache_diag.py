@@ -139,21 +139,20 @@ class CacheDiagMixin:
     # 由 ``Main`` 宿主提供（Mixin 不定义 ``__init__``）。
     context: Any
     config: Any
+    # 兄弟 StoreMixin 提供（事件落库）。
+    save_cache_event: Any
+    query_cache_events: Any
 
-    # 上一轮上下文签名：key=umo。
+    # 上一轮上下文签名：key=umo（用于跨轮对比；事件本身落库 CacheEvent）。
     _last_ctx: dict[str, dict[str, Any]]
-    # 最近诊断事件流：key=umo，value=事件列表（保留最近 20 条）。
-    _cache_events: dict[str, list[dict[str, Any]]]
 
     def __init_cache_diag__(self) -> None:
-        """惰性初始化缓存诊断状态字典（多 Mixin 安全，幂等）。"""
+        """惰性初始化上下文签名字典（多 Mixin 安全，幂等）。"""
         if getattr(self, "_last_ctx", None) is None:
             self._last_ctx = {}
-        if getattr(self, "_cache_events", None) is None:
-            self._cache_events = {}
 
     def _cache_diag_flags(self) -> dict[str, bool]:
-        cfg = get_config(getattr(self, "config", None), "cache_diag", {}) or {}
+        cfg = get_config(getattr(self, "cfg", None), "cache_diag", {}) or {}
         return cfg if isinstance(cfg, dict) else {}
 
     def _hit_rate_threshold(self) -> float:
@@ -186,26 +185,32 @@ class CacheDiagMixin:
                 "history_len": 0,
             }
 
-    def run_cache_diag(self, req: ProviderRequest, umo: str) -> list[dict[str, Any]]:
-        """对比上一轮上下文签名做四类诊断，更新内存缓存。
+    async def run_cache_diag(self, req: ProviderRequest, umo: str) -> list[dict[str, Any]]:
+        """对比上一轮上下文签名做四类诊断，事件落库。
 
-        在 ``on_llm_request_tail`` 调用（此时 req 为最终态）。返回事件列表，
-        同时追加到 ``_cache_events[umo]``（保留最近 20 条）。任何异常降级为空。
+        在 ``on_llm_request_tail`` 调用（此时 req 为最终态）。返回事件列表，同时
+        把每个事件写入 ``CacheEvent`` 表（重载不丢，可查询）。任何异常降级为空。
         """
         self.__init_cache_diag__()
         try:
             current = self._context_signature(req)
             last = self._last_ctx.get(umo, {}) if umo else {}
             events = diagnose_changes(current, last, self._cache_diag_flags()) if last else []
-            # 给每个事件附 umo 便于命令展示
             for ev in events:
                 ev["umo"] = umo
+                try:
+                    await self.save_cache_event(
+                        {
+                            "umo": umo,
+                            "type": ev.get("type", ""),
+                            "severity": ev.get("severity", "medium"),
+                            "detail": ev.get("detail", ""),
+                        }
+                    )
+                except Exception:
+                    pass
             if umo:
                 self._last_ctx[umo] = current
-                bucket = self._cache_events.setdefault(umo, [])
-                bucket.extend(events)
-                if len(bucket) > 20:
-                    self._cache_events[umo] = bucket[-20:]
             return events
         except Exception:
             return []
@@ -229,11 +234,19 @@ class CacheDiagMixin:
         except Exception:
             return -1.0, False
 
-    def recent_events(self, umo: str, limit: int = 10) -> list[dict[str, Any]]:
-        """返回指定会话最近的缓存诊断事件（供 ``/cache`` 命令展示）。"""
-        self.__init_cache_diag__()
+    async def recent_events(self, umo: str, limit: int = 10) -> list[dict[str, Any]]:
+        """返回指定会话最近的缓存诊断事件（供 ``/cache`` 命令展示，读 DB）。"""
         try:
-            bucket = self._cache_events.get(umo, [])
-            return list(bucket[-limit:])
+            rows = await self.query_cache_events(umo=umo, limit=limit)
+            return [
+                {
+                    "umo": getattr(r, "umo", "") or "",
+                    "type": getattr(r, "type", "") or "",
+                    "severity": getattr(r, "severity", "medium") or "medium",
+                    "detail": getattr(r, "detail", "") or "",
+                    "created_at": getattr(r, "created_at", None),
+                }
+                for r in rows
+            ]
         except Exception:
             return []

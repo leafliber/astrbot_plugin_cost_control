@@ -117,7 +117,7 @@ class PromptOptimizerMixin:
     config: Any
 
     def _optimizer_cfg(self) -> dict[str, Any]:
-        cfg = get_config(getattr(self, "config", None), "prompt_optimizer", {}) or {}
+        cfg = get_config(getattr(self, "cfg", None), "prompt_optimizer", {}) or {}
         return cfg if isinstance(cfg, dict) else {}
 
     def analyze_prompt(self, system_prompt: str) -> dict[str, Any]:

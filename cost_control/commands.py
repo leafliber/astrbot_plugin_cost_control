@@ -36,6 +36,7 @@ class CommandsMixin:
     query_usage_grouped: Any
     query_supplements: Any
     get_budgets: Any
+    get_budgets_cost: Any
     get_over_limit_strategies: Any
     check_budget: Any
     consume_last_injection: Any
@@ -50,7 +51,7 @@ class CommandsMixin:
         return str(getattr(event, "unified_msg_origin", None) or "")
 
     def _day_start(self) -> datetime:
-        refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+        refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
         return day_window_start(refresh, datetime.now(UTC), resolve_tz(self.context))
 
     @filter.command("cost")
@@ -61,7 +62,7 @@ class CommandsMixin:
             d_start = self._day_start()
             usage = await self.query_usage(umo=umo, start=d_start)
             rows = await self.query_usage_grouped(by="model", umo=umo, start=d_start)
-            pricing = get_pricing(getattr(self, "config", None))
+            pricing = get_pricing(getattr(self, "cfg", None))
             cost = sum(compute_cost_value(r, r.get("key") or None, pricing) for r in rows)
             lines = [
                 "💰 今日用量（本会话）",
@@ -83,13 +84,20 @@ class CommandsMixin:
         try:
             umo = self._umo(event)
             budgets = self.get_budgets()
+            budgets_cost = self.get_budgets_cost()
             result = await self.check_budget(umo, None)
-            lines = ["📋 预算配置（token）"]
+            lines = ["📋 预算配置"]
             any_cfg = False
             for dim in _DIM_ORDER:
-                limit = int(budgets.get(dim, 0) or 0)
-                if limit > 0:
-                    lines.append(f"  {dim}: {limit}")
+                t = int(budgets.get(dim, 0) or 0)
+                c = float(budgets_cost.get(dim, 0) or 0)
+                if t > 0 or c > 0:
+                    parts = []
+                    if t > 0:
+                        parts.append(f"token {t}")
+                    if c > 0:
+                        parts.append(f"花费 ${c:.2f}")
+                    lines.append(f"  {dim}: " + " / ".join(parts))
                     any_cfg = True
             if not any_cfg:
                 lines.append("  （未配置任何预算）")
@@ -107,10 +115,15 @@ class CommandsMixin:
                         parts.append(f"{idx}.拦截{tag}")
                 lines.append("🧭 超限策略：" + " → ".join(parts))
             if result.get("exceeded"):
-                lines.append(
-                    f"⚠️ 已超限：{result.get('dim')}（用 {result.get('used')} / "
-                    f"限 {result.get('limit')}）"
-                )
+                dim = result.get("dim")
+                used = result.get("used")
+                limit = result.get("limit")
+                if result.get("metric") == "cost":
+                    used_s = f"${float(used or 0):.4f}"
+                    limit_s = f"${float(limit or 0):.2f}"
+                    lines.append(f"⚠️ 已超出花费预算（{dim}）：{used_s} / {limit_s}")
+                else:
+                    lines.append(f"⚠️ 已超限（{dim}）：用 {used} / 限 {limit} token")
             else:
                 lines.append("✅ 当前未超限")
             yield event.plain_result("\n".join(lines))
@@ -179,7 +192,7 @@ class CommandsMixin:
                 lines.append("暂无可用命中率样本（缓存数据缺失）")
             else:
                 lines.append("暂无缓存数据（需先有 LLM 请求）")
-            events = self.recent_events(umo)
+            events = await self.recent_events(umo)
             if events:
                 lines.append(f"最近破坏事件（共 {len(events)} 条，显示最新 5）：")
                 for ev in events[-5:]:

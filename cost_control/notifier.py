@@ -61,7 +61,7 @@ class NotifierMixin:
 
     def _cooldown_seconds(self) -> int:
         """读取 ``alerts.cooldown_seconds``，解析失败回退 0（不冷却）。"""
-        alerts = get_config(getattr(self, "config", None), "alerts", {}) or {}
+        alerts = get_config(getattr(self, "cfg", None), "alerts", {}) or {}
         try:
             return int(alerts.get("cooldown_seconds", 0) or 0)
         except (TypeError, ValueError):

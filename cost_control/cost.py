@@ -73,7 +73,7 @@ class CostMixin:
 
     def get_pricing(self) -> dict[str, dict[str, float]]:
         """返回当前生效的模型单价表（默认表 + 用户配置覆盖）。"""
-        return get_pricing(getattr(self, "config", None))
+        return get_pricing(getattr(self, "cfg", None))
 
     async def compute_cost(self, usage: dict[str, Any], model: str | None) -> float:
         """按模型单价把 usage 换算为 USD 成本。

@@ -57,7 +57,7 @@ class ScheduleMixin:
 
     def _report_cron(self) -> str:
         """从 ``alerts.daily_report_time`` 解析出日报 cron 表达式。"""
-        alerts = get_config(getattr(self, "config", None), "alerts", {}) or {}
+        alerts = get_config(getattr(self, "cfg", None), "alerts", {}) or {}
         if isinstance(alerts, dict):
             return hhmm_to_cron(str(alerts.get("daily_report_time", "09:00")))
         return hhmm_to_cron("09:00")
@@ -79,7 +79,7 @@ class ScheduleMixin:
                         logger.warning("[cost_control] 删除旧 CronJob 失败: %s", e)
 
             tz_key = resolve_tz(self.context).key
-            sched = get_config(getattr(self, "config", None), "schedule", {}) or {}
+            sched = get_config(getattr(self, "cfg", None), "schedule", {}) or {}
             enable_report = bool(
                 sched.get("enable_daily_report", False) if isinstance(sched, dict) else False
             )
@@ -113,7 +113,7 @@ class ScheduleMixin:
         try:
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
-            refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
             d_start = day_window_start(refresh, now, tz)
             m_start = month_window_start(now, tz)
 
@@ -132,7 +132,7 @@ class ScheduleMixin:
                 f"本月：{month_usage.get('count', 0)} 次调用，成本 ≈ ${month_cost:.4f}"
             )
 
-            alerts = get_config(getattr(self, "config", None), "alerts", {}) or {}
+            alerts = get_config(getattr(self, "cfg", None), "alerts", {}) or {}
             targets = alerts.get("daily_report_to", []) if isinstance(alerts, dict) else []
             for umo in targets or []:
                 await self.push_to_session(str(umo), text)
@@ -142,7 +142,7 @@ class ScheduleMixin:
     async def cleanup_old(self) -> None:
         """CronJob 回调：按 ``schedule.retain_days`` 清理过期补充记录。"""
         try:
-            sched = get_config(getattr(self, "config", None), "schedule", {}) or {}
+            sched = get_config(getattr(self, "cfg", None), "schedule", {}) or {}
             days = int(sched.get("retain_days", 0) or 0) if isinstance(sched, dict) else 0
             if days <= 0:
                 return
@@ -157,7 +157,7 @@ class ScheduleMixin:
         """按模型分组聚合用量并求和成本（model 为空或无单价的行计 0）。"""
         try:
             rows = await self.query_usage_grouped(by="model", start=start)
-            pricing = get_pricing(getattr(self, "config", None))
+            pricing = get_pricing(getattr(self, "cfg", None))
             return sum(compute_cost_value(r, r.get("key") or None, pricing) for r in rows)
         except Exception:
             return 0.0

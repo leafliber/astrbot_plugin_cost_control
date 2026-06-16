@@ -65,10 +65,34 @@ class Main(
         self.config = config or {}
 
     async def initialize(self) -> None:
-        """插件加载时初始化：建立独立 sqlite 补充表 + 注册 CronJob + 注册 Web API。
+        """插件加载时初始化：构建运行时配置 + 建立独立 sqlite 补充表 + 注册 CronJob + 注册 Web API。
 
         任一步失败仅记录日志，不阻断插件加载（降级：相应能力不可用，其余正常）。
+
+        ``self.cfg`` = ``CONFIG_DEFAULTS`` ⊕ 插件自有配置文件(``config.json``) ⊕
+        AstrBot 开关(``self.config``)。详细配置存插件文件（不被 AstrBot schema 裁剪），
+        schema 仅保留开关。
         """
+        try:
+            from .config import (
+                CONFIG_DEFAULTS,
+                deep_merge,
+                load_plugin_config,
+                switches_from_config,
+            )
+
+            data_dir = str(self.get_data_dir())
+            self._data_dir = data_dir
+            self.cfg = deep_merge(
+                CONFIG_DEFAULTS,
+                load_plugin_config(data_dir),
+                switches_from_config(getattr(self, "config", None)),
+            )
+        except Exception as e:
+            logger.warning("[cost_control] 加载运行时配置失败，使用默认值: %s", e)
+            from .config import CONFIG_DEFAULTS
+
+            self.cfg = dict(CONFIG_DEFAULTS)
         try:
             await self.init_store()
         except Exception as e:
@@ -122,7 +146,7 @@ class Main(
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             self.pop_injection(req, umo)
-            self.run_cache_diag(req, umo)
+            await self.run_cache_diag(req, umo)
         except Exception as e:
             logger.warning("[cost_control] 阶段3请求尾处理失败: %s", e)
 

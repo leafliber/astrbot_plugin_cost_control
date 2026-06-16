@@ -70,3 +70,64 @@ def test_diagnose_flags_disable():
     flags = {"detect_context_reset": False}
     types = [e["type"] for e in diagnose_changes(cur, last, flags)]
     assert "context_reset" not in types
+
+
+# ===== CacheEvent 落库（集成，内存 sqlite，不依赖 StarTools/真实 astrbot） =====
+
+
+async def test_cache_event_save_query():
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlmodel import SQLModel
+
+    from cost_control.store import CacheEvent, StoreMixin
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: SQLModel.metadata.create_all(
+                c,
+                tables=[CacheEvent.__table__],
+                checkfirst=True,  # type: ignore[attr-defined]
+            )
+        )
+    store = StoreMixin()
+    store._session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    await store.save_cache_event(
+        {"umo": "s1", "type": "context_reset", "severity": "high", "detail": "重置"}
+    )
+    await store.save_cache_event(
+        {"umo": "s1", "type": "tools_change", "severity": "medium", "detail": "工具变"}
+    )
+    await store.save_cache_event(
+        {"umo": "s2", "type": "order_drift", "severity": "medium", "detail": "顺序漂移"}
+    )
+
+    by_s1 = await store.query_cache_events(umo="s1", limit=10)
+    assert len(by_s1) == 2
+    assert all(getattr(r, "umo") == "s1" for r in by_s1)
+
+    all_rows = await store.query_cache_events(limit=10)
+    assert len(all_rows) == 3
+    # 最新优先
+    assert getattr(all_rows[0], "created_at") >= getattr(all_rows[-1], "created_at")
+
+
+async def test_cache_event_query_empty():
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlmodel import SQLModel
+
+    from cost_control.store import CacheEvent, StoreMixin
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: SQLModel.metadata.create_all(
+                c,
+                tables=[CacheEvent.__table__],
+                checkfirst=True,  # type: ignore[attr-defined]
+            )
+        )
+    store = StoreMixin()
+    store._session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    assert await store.query_cache_events(limit=10) == []

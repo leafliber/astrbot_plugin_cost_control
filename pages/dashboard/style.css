@@ -746,3 +746,51 @@ code {
 .tag-del:hover {
     color: var(--bad);
 }
+
+/* ===== 预算双指标切换（token / 花费） ===== */
+.budget-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.metric-switch {
+    display: inline-flex;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.metric-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.metric-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* ===== 设置页表单行 ===== */
+.set-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    flex-wrap: wrap;
+}
+
+.set-row label {
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}

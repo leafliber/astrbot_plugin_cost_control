@@ -893,15 +893,24 @@
         setLoading();
         try {
             var r = await api("budgets");
-            renderBudgets(r);
+            var provs = [];
+            try {
+                var pr = await api("providers");
+                provs = (pr && pr.providers) || [];
+            } catch (e2) {
+                provs = [];
+            }
+            renderBudgets(r, provs);
         } catch (e) {
             setError("加载预算失败：" + esc(e.message));
         }
     }
 
-    function renderBudgets(r) {
-        var limits = r.limits || {};
+    function renderBudgets(r, provs) {
         var dims = r.dimensions || {};
+        var budgetsTokens = Object.assign({}, r.limits || {});
+        var budgetsCost = Object.assign({}, r.limits_cost || {});
+        var metric = "token";
         var dimMeta = [
             ["per_session_daily", "单会话每日"],
             ["per_user_daily", "单用户每日"],
@@ -909,50 +918,43 @@
             ["global_daily", "全局每日"],
             ["global_monthly", "全局每月"],
         ];
+        var provHint = (provs || [])
+            .map(function (p) {
+                return p.id + (p.model ? "(" + p.model + ")" : "");
+            })
+            .join("、");
         var html =
-            '<div class="panel"><h2>预算阈值（token，0 = 不限制）</h2>' +
-            "<table><thead><tr><th>维度</th><th>上限</th><th>当前消耗</th><th>进度</th></tr></thead><tbody>";
-        dimMeta.forEach(function (d) {
-            var key = d[0];
-            var limit = limits[key] || 0;
-            var dim = dims[key] || {};
-            var used = dim.used || 0;
-            var ratio = dim.ratio || 0;
-            var topKey = dim.top_key || "";
-            var note = dim.note || "";
-            var inputCell =
-                '<input type="number" min="0" class="budget-input" data-key="' +
-                key +
-                '" value="' +
-                limit +
-                '" style="width:120px">';
-            var usedInfo =
-                fmtNum(used) +
-                (topKey ? ' <span class="muted">(' + esc(topKey) + ")</span>" : "") +
-                (note ? '<div class="muted small">' + esc(note) + "</div>" : "");
-            var prog;
-            if (limit <= 0) {
-                prog = '<span class="muted">未设上限</span>';
-            } else {
-                prog = bar(ratio, used, limit);
-            }
-            html +=
-                "<tr><td>" +
-                d[1] +
-                "</td><td>" +
-                inputCell +
-                "</td><td>" +
-                usedInfo +
-                "</td><td style='min-width:200px'>" +
-                prog +
-                "</td></tr>";
-        });
-        html += "</tbody></table></div>";
+            '<div class="panel"><div class="budget-head">' +
+            '<h2>预算阈值</h2>' +
+            '<div class="metric-switch">' +
+            '<button type="button" class="metric-btn active" data-m="token">Token</button>' +
+            '<button type="button" class="metric-btn" data-m="cost">花费 $</button>' +
+            "</div></div>" +
+            '<div id="budget-table"></div></div>';
 
         // 策略链容器（由 renderStrategies 动态填充）
+        var provOpts = (provs || [])
+            .map(function (p) {
+                return (
+                    '<option value="' +
+                    esc(p.id) +
+                    '">' +
+                    esc(p.id + (p.model ? " (" + p.model + ")" : "")) +
+                    "</option>"
+                );
+            })
+            .join("");
         html +=
             '<div class="panel"><h2>超限处理策略（按序尝试）</h2>' +
             '<div class="muted small" style="margin-bottom:8px">超限时从上到下依次求值：<b>切换备用 Provider</b> 按其列表逐个尝试，首个成功即返回响应；全部失败或遇到 <b>拦截</b> 则终止。</div>' +
+            (provHint
+                ? '<div class="muted small" style="margin-bottom:8px">可用 Provider：' +
+                  esc(provHint) +
+                  "</div>"
+                : "") +
+            '<datalist id="prov-opts">' +
+            provOpts +
+            "</datalist>" +
             '<div id="strategy-list"></div>' +
             '<button class="btn" id="add-strategy" style="margin-top:8px">+ 添加策略</button>' +
             "</div>";
@@ -963,6 +965,77 @@
             "<span id='save-result' class='muted'></span></div>";
 
         $("content").innerHTML = html;
+
+        // ===== 预算阈值表（token / 花费 双指标，切换重渲染） =====
+        function renderBudgetTable() {
+            var isCost = metric === "cost";
+            var state = isCost ? budgetsCost : budgetsTokens;
+            var h =
+                "<table><thead><tr><th>维度</th><th>上限 " +
+                (isCost ? "($)" : "(token)") +
+                "，0=不限</th><th>当前消耗</th><th>进度</th></tr></thead><tbody>";
+            dimMeta.forEach(function (d) {
+                var key = d[0];
+                var limit = state[key] || 0;
+                var dim = (dims[key] || {})[metric] || {};
+                var used = dim.used || 0;
+                var ratio = dim.ratio || 0;
+                var topKey = dim.top_key || "";
+                var note = dim.note || "";
+                var step = isCost ? ' step="0.01"' : "";
+                var inputCell =
+                    '<input type="number" min="0"' +
+                    step +
+                    ' class="budget-input" data-key="' +
+                    key +
+                    '" style="width:120px">';
+                var usedInfo =
+                    (isCost ? fmtCost(used) : fmtNum(used)) +
+                    (topKey ? ' <span class="muted">(' + esc(topKey) + ")</span>" : "") +
+                    (note ? '<div class="muted small">' + esc(note) + "</div>" : "");
+                var prog =
+                    limit <= 0 ? '<span class="muted">未设上限</span>' : bar(ratio, used, limit);
+                h +=
+                    "<tr><td>" +
+                    d[1] +
+                    "</td><td>" +
+                    inputCell +
+                    "</td><td>" +
+                    usedInfo +
+                    "</td><td style='min-width:200px'>" +
+                    prog +
+                    "</td></tr>";
+            });
+            h += "</tbody></table>";
+            var box = $("budget-table");
+            if (!box) return;
+            box.innerHTML = h;
+            // 回填 input 值 + onchange 写回当前指标的状态（切换指标后另一套状态保留）
+            eachSel(".budget-input", function (el) {
+                el.value = state[el.dataset.key] || 0;
+                el.onchange = function () {
+                    var v;
+                    if (isCost) {
+                        v = +el.value || 0;
+                        if (v < 0) v = 0;
+                    } else {
+                        v = Math.max(0, parseInt(el.value, 10) || 0);
+                    }
+                    state[el.dataset.key] = v;
+                };
+            });
+        }
+
+        eachSel(".metric-btn", function (el) {
+            el.onclick = function () {
+                metric = el.dataset.m;
+                eachSel(".metric-btn", function (b) {
+                    b.classList.toggle("active", b.dataset.m === metric);
+                });
+                renderBudgetTable();
+            };
+        });
+        renderBudgetTable();
 
         // 策略链状态（可变，编辑后整块重渲染）
         var strategies = (r.strategies || []).map(function (s) {
@@ -1053,9 +1126,9 @@
                             '<span class="muted small">（空，此策略将被跳过）</span>';
                     h += "</div>";
                     h +=
-                        '<div class="field-row"><input type="text" class="pid-input" data-i="' +
+                        '<div class="field-row"><input type="text" list="prov-opts" class="pid-input" data-i="' +
                         i +
-                        '" placeholder="输入 Provider ID 后回车添加"></div>';
+                        '" placeholder="选择或输入 Provider ID 后回车添加"></div>';
                     h +=
                         '<div class="field-row"><label>token 上限 <input type="number" min="0" class="s-token" data-i="' +
                         i +
@@ -1150,13 +1223,10 @@
 
         $("save-budgets").onclick = async function () {
             var body = {
-                budgets: {},
+                budgets: budgetsTokens,
+                budgets_cost: budgetsCost,
                 over_limit_strategies: strategies,
             };
-            var inputs = document.querySelectorAll(".budget-input");
-            for (var i = 0; i < inputs.length; i++) {
-                body.budgets[inputs[i].dataset.key] = +inputs[i].value || 0;
-            }
             $("save-result").textContent = "保存中…";
             try {
                 var res = await apiPost("actions/save_config", body);
@@ -1417,16 +1487,183 @@
     async function loadSettings() {
         setLoading();
         try {
-            var cfg = await api("config");
-            var html = '<div class="panel"><h2>手动操作</h2><div class="row">';
-            html += '<button class="btn" id="act-cleanup">清理过期数据</button>';
-            html += '<button class="btn" id="act-report">推送日报</button>';
-            html += "</div><div id='action-result' class='muted' style='margin-top:8px'></div></div>";
+            var cfg = (await api("config")) || {};
+            // 配置区块定义（_master = 顶层标量；其余按 object 键嵌套）
+            var SECTIONS = [
+                {
+                    key: "_master",
+                    title: "总开关",
+                    fields: [
+                        { k: "enabled", label: "启用插件", type: "bool" },
+                        { k: "refresh_time", label: "每日重置时间 (HH:MM)", type: "str" },
+                        { k: "match_unique_session", label: "匹配唯一会话", type: "bool" },
+                        { k: "platforms", label: "生效平台（逗号分隔，空=全部）", type: "csv" },
+                    ],
+                },
+                {
+                    key: "cache_diag",
+                    title: "缓存诊断",
+                    fields: [
+                        { k: "detect_context_reset", label: "上下文重置检测", type: "bool" },
+                        { k: "detect_system_prompt_change", label: "system prompt 变更检测", type: "bool" },
+                        { k: "detect_tools_change", label: "工具定义变更检测", type: "bool" },
+                        { k: "detect_order_drift", label: "上下文顺序漂移检测", type: "bool" },
+                        { k: "cache_hit_rate_alert_threshold", label: "命中率告警阈值 (%)，0=不告警", type: "int" },
+                    ],
+                },
+                {
+                    key: "alerts",
+                    title: "告警",
+                    fields: [
+                        { k: "enabled", label: "启用超预算主动推送", type: "bool" },
+                        { k: "cooldown_seconds", label: "冷却时间（秒）", type: "int" },
+                        { k: "daily_report_time", label: "日报推送时间 (HH:MM，空=不推)", type: "str" },
+                        { k: "daily_report_to", label: "日报目标 UMO（逗号分隔）", type: "csv" },
+                    ],
+                },
+                {
+                    key: "prompt_optimizer",
+                    title: "提示词优化",
+                    fields: [
+                        { k: "enabled", label: "启用 /optimize", type: "bool" },
+                        { k: "provider_id", label: "改写 Provider ID（空=当前会话）", type: "str" },
+                        { k: "max_static_analysis_length", label: "静态分析最大长度（字符）", type: "int" },
+                    ],
+                },
+                {
+                    key: "attribution",
+                    title: "归因分析",
+                    fields: [
+                        { k: "enabled", label: "启用上下文注入归因", type: "bool" },
+                        { k: "sample_rate", label: "采样率 (%)，100=全采样", type: "int" },
+                    ],
+                },
+                {
+                    key: "schedule",
+                    title: "定时任务",
+                    fields: [
+                        { k: "enable_daily_report", label: "启用每日报告 CronJob", type: "bool" },
+                        { k: "retain_days", label: "历史保留天数（0=永不清理）", type: "int" },
+                    ],
+                },
+            ];
+
+            function valOf(sec, k) {
+                var v = sec === "_master" ? cfg[k] : (cfg[sec] || {})[k];
+                return v === undefined || v === null ? "" : v;
+            }
+
+            var html = "";
+            SECTIONS.forEach(function (sec) {
+                html += '<div class="panel"><h2>' + esc(sec.title) + "</h2>";
+                sec.fields.forEach(function (f) {
+                    var v = valOf(sec.key, f.k);
+                    var id = "sf-" + sec.key + "-" + f.k;
+                    html += '<div class="set-row">';
+                    if (f.type === "bool") {
+                        html +=
+                            '<label><input type="checkbox" class="set-input" data-sec="' +
+                            sec.key + '" data-k="' + f.k + '" data-type="bool"' +
+                            (v ? " checked" : "") + "> " + esc(f.label) + "</label>";
+                    } else if (f.type === "csv") {
+                        html +=
+                            '<label style="flex:1">' + esc(f.label) +
+                            ' <input type="text" class="set-input budget-input" data-sec="' +
+                            sec.key + '" data-k="' + f.k + '" data-type="csv" value="' +
+                            esc(Array.isArray(v) ? v.join(", ") : String(v)) +
+                            '" style="width:100%"></label>';
+                    } else {
+                        html +=
+                            '<label style="flex:1">' + esc(f.label) +
+                            ' <input type="' + (f.type === "int" ? "number" : "text") +
+                            '" class="set-input budget-input" data-sec="' + sec.key +
+                            '" data-k="' + f.k + '" data-type="' + f.type + '" value="' +
+                            esc(String(v)) + '" style="width:160px"></label>';
+                    }
+                    html += "</div>";
+                });
+                html += "</div>";
+            });
+
+            // 定价表（动态 map，用 JSON textarea）
             html +=
-                '<div class="panel"><h2>当前配置</h2><pre class="mono" style="white-space:pre-wrap;background:var(--panel-2);padding:10px;border-radius:6px">' +
-                esc(JSON.stringify(cfg, null, 2)) +
-                "</pre></div>";
+                '<div class="panel"><h2>定价表（USD / 百万 token）</h2>' +
+                '<div class="muted small" style="margin-bottom:6px">覆盖/新增模型单价，键=模型名，值含 input/input_cached/output/cache_creation。留空对象 {} 则只用内置默认价</div>' +
+                '<textarea id="set-pricing" class="mono" style="width:100%;height:160px">' +
+                esc(JSON.stringify(cfg.pricing || {}, null, 2)) +
+                "</textarea></div>";
+
+            // 手动操作
+            html +=
+                '<div class="panel"><h2>手动操作</h2><div class="row">' +
+                '<button class="btn" id="act-cleanup">清理过期数据</button>' +
+                '<button class="btn" id="act-report">推送日报</button>' +
+                "</div><div id='action-result' class='muted' style='margin-top:8px'></div></div>";
+
+            html +=
+                '<div class="row" style="align-items:center;gap:12px;margin-top:4px">' +
+                '<button class="btn primary" id="save-settings">保存（热生效）</button>' +
+                "<span id='save-result' class='muted'></span></div>";
+
             $("content").innerHTML = html;
+
+            // 回填文本值（避免属性引号注入）
+            document.querySelectorAll(".set-input[data-type='str'],.set-input[data-type='int']").forEach(function (el) {
+                el.value = valOf(el.dataset.sec, el.dataset.k) === "" ? "" : String(valOf(el.dataset.sec, el.dataset.k));
+            });
+
+            function collect() {
+                var body = {};
+                var setSec = function (sec) {
+                    if (sec === "_master") return body;
+                    body[sec] = body[sec] || {};
+                    return body[sec];
+                };
+                var nodes = document.querySelectorAll(".set-input");
+                for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    var sec = el.dataset.sec;
+                    var k = el.dataset.k;
+                    var t = el.dataset.type;
+                    var target = setSec(sec);
+                    if (t === "bool") target[k] = el.checked;
+                    else if (t === "int") target[k] = Math.max(0, parseInt(el.value, 10) || 0);
+                    else if (t === "csv") {
+                        target[k] = el.value
+                            .split(",")
+                            .map(function (s) { return s.trim(); })
+                            .filter(Boolean);
+                    } else target[k] = el.value;
+                }
+                // pricing
+                var prText = $("set-pricing").value || "{}";
+                try {
+                    body.pricing = JSON.parse(prText);
+                    if (typeof body.pricing !== "object" || body.pricing === null) body.pricing = {};
+                } catch (pe) {
+                    throw new Error("定价表 JSON 解析失败：" + pe.message);
+                }
+                return body;
+            }
+
+            $("save-settings").onclick = async function () {
+                var body;
+                try {
+                    body = collect();
+                } catch (ce) {
+                    $("save-result").textContent = "❌ " + ce.message;
+                    return;
+                }
+                $("save-result").textContent = "保存中…";
+                try {
+                    var res = await apiPost("actions/save_config", body);
+                    $("save-result").textContent =
+                        "✅ 已保存（" + ((res && res.saved) || []).join(", ") + "），立即生效";
+                    cfg = (res && res.config) || cfg;
+                } catch (e) {
+                    $("save-result").textContent = "❌ 保存失败：" + e.message;
+                }
+            };
 
             $("act-cleanup").onclick = async function () {
                 $("action-result").textContent = "执行中…";

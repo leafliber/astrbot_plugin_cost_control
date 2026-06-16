@@ -1,13 +1,13 @@
 {
   "enabled": {
-    "description": "是否启用本插件",
-    "hint": "总开关，关闭后所有钩子与命令均不生效",
+    "description": "启用本插件",
+    "hint": "总开关。其余所有详细配置（预算 / 单价 / 策略 / 阈值 / 时间等）请在「仪表盘 → 设置」页调整，支持热生效",
     "type": "bool",
     "default": true
   },
   "platforms": {
     "description": "生效平台列表",
-    "hint": "为空则全部平台生效；填写平台 ID 以限定作用范围",
+    "hint": "为空则全部平台生效。详细配置请在「仪表盘 → 设置」页调整",
     "type": "list",
     "default": [],
     "items": {
@@ -17,248 +17,83 @@
       "default": ""
     }
   },
-  "budgets": {
-    "description": "预算阈值配置",
-    "hint": "按会话/用户/模型/全局分别设置每日或每月的 token 上限，超出后按 over_limit_strategies 策略链处理",
-    "type": "object",
-    "default": {},
-    "items": {
-      "per_session_daily": {
-        "description": "单会话每日 token 上限",
-        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
-        "type": "int",
-        "default": 0
-      },
-      "per_user_daily": {
-        "description": "单用户每日 token 上限",
-        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
-        "type": "int",
-        "default": 0
-      },
-      "per_model_daily": {
-        "description": "单模型每日 token 上限",
-        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
-        "type": "int",
-        "default": 0
-      },
-      "global_daily": {
-        "description": "全局每日 token 上限",
-        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
-        "type": "int",
-        "default": 0
-      },
-      "global_monthly": {
-        "description": "全局每月 token 上限",
-        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
-        "type": "int",
-        "default": 0
-      }
-    }
-  },
-  "pricing": {
-    "description": "模型单价表（每百万 token 美元）",
-    "hint": "键为模型名，值为含 input/input_cached/output/cache_creation 的对象。内置常用模型默认价已生效；此处可覆盖或新增。WebUI 表单受限，高级配置可直接编辑插件 config.json",
-    "type": "object",
-    "default": {},
-    "items": {}
-  },
-  "over_limit_strategies": {
-    "description": "超限处理策略链（按序尝试）",
-    "hint": "可配多条、可排序：fallback_provider 按 provider_ids 列表逐个尝试备用 Provider；stop_llm 硬拦截。WebUI 表单能力有限，建议在仪表盘→预算页编辑（支持拖拽排序与多 Provider 列表）",
-    "type": "list",
-    "default": [],
-    "items": {
-      "description": "单条超限策略",
-      "hint": "一条动作 + 其参数",
-      "type": "object",
-      "default": {},
-      "items": {
-        "action": {
-          "description": "超限动作",
-          "hint": "fallback_provider 切换到备用 Provider（按 provider_ids 逐个尝试）；stop_llm 直接拦截",
-          "type": "string",
-          "default": "stop_llm",
-          "options": ["stop_llm", "fallback_provider"],
-          "option_labels": ["拦截 LLM 请求", "切换备用 Provider"]
-        },
-        "provider_ids": {
-          "description": "备用 Provider ID（逗号分隔）",
-          "hint": "fallback_provider 时按序逐个尝试的 Provider ID，多个用英文逗号分隔；如 a,b,c",
-          "type": "string",
-          "default": ""
-        },
-        "token_limit": {
-          "description": "发往备用 Provider 的 token 上限",
-          "hint": "截断历史上下文使其不超过此 token 数，0 表示不限制",
-          "type": "int",
-          "default": 0
-        },
-        "message": {
-          "description": "拦截文案",
-          "hint": "stop_llm 时的自定义提示文案，留空则用默认",
-          "type": "string",
-          "default": ""
-        },
-        "enabled": {
-          "description": "启用此策略",
-          "hint": "关闭后该条策略在链路中被跳过",
-          "type": "bool",
-          "default": true
-        }
-      }
-    }
-  },
-  "refresh_time": {
-    "description": "每日重置时间",
-    "hint": "格式 HH:MM，默认 00:00；按服务器本地时区计算每日窗口",
-    "type": "string",
-    "default": "00:00"
-  },
-  "match_unique_session": {
-    "description": "匹配唯一会话",
-    "hint": "开启后将按 (umo, session_id) 维度聚合，否则仅按 umo 聚合",
-    "type": "bool",
-    "default": false
-  },
-  "cache_diag": {
-    "description": "缓存破坏诊断配置",
-    "hint": "四类诊断开关与告警阈值",
-    "type": "object",
-    "default": {},
-    "items": {
-      "detect_context_reset": {
-        "description": "启用上下文重置检测",
-        "hint": "检测会话上下文是否被意外重置导致缓存全部失效",
-        "type": "bool",
-        "default": true
-      },
-      "detect_system_prompt_change": {
-        "description": "启用 system prompt 变更检测",
-        "hint": "检测 system prompt 在多轮间是否被修改",
-        "type": "bool",
-        "default": true
-      },
-      "detect_tools_change": {
-        "description": "启用工具定义变更检测",
-        "hint": "检测工具集合（tools）是否在多轮间变化",
-        "type": "bool",
-        "default": true
-      },
-      "detect_order_drift": {
-        "description": "启用上下文顺序漂移检测",
-        "hint": "检测消息顺序变化导致前缀不匹配",
-        "type": "bool",
-        "default": true
-      },
-      "cache_hit_rate_alert_threshold": {
-        "description": "缓存命中率告警阈值（百分比）",
-        "hint": "命中率低于此值则触发告警，0 表示不告警（默认关闭主动推送）",
-        "type": "int",
-        "default": 0
-      }
-    }
-  },
   "alerts": {
-    "description": "告警配置",
-    "hint": "主动推送与冷却相关设置",
+    "description": "告警功能开关",
+    "hint": "仅保留启用开关；冷却时间 / 推送时间 / 推送目标 等详细配置请在「仪表盘 → 设置」页调整",
     "type": "object",
     "default": {},
     "items": {
       "enabled": {
         "description": "启用超预算主动推送",
-        "hint": "开启后超预算时通过 notifier 主动通知用户",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "cache_diag": {
+    "description": "缓存诊断开关",
+    "hint": "仅保留四类检测开关；命中率告警阈值等详细配置请在「仪表盘 → 设置」页调整",
+    "type": "object",
+    "default": {},
+    "items": {
+      "detect_context_reset": {
+        "description": "上下文重置检测",
         "type": "bool",
         "default": true
       },
-      "cooldown_seconds": {
-        "description": "告警冷却时间（秒）",
-        "hint": "同一会话两次告警的最小间隔，避免刷屏",
-        "type": "int",
-        "default": 300
+      "detect_system_prompt_change": {
+        "description": "system prompt 变更检测",
+        "type": "bool",
+        "default": true
       },
-      "daily_report_time": {
-        "description": "每日报告推送时间",
-        "hint": "格式 HH:MM，留空则不推送日报",
-        "type": "string",
-        "default": "09:00"
+      "detect_tools_change": {
+        "description": "工具定义变更检测",
+        "type": "bool",
+        "default": true
       },
-      "daily_report_to": {
-        "description": "每日报告推送目标会话列表",
-        "hint": "UMO 列表（unified_msg_origin），日报会逐个推送给这些会话；为空则不主动推送",
-        "type": "list",
-        "default": [],
-        "items": {
-          "description": "目标会话 UMO",
-          "hint": "形如 aiocqhttp:GroupMessage:123456",
-          "type": "string",
-          "default": ""
-        }
+      "detect_order_drift": {
+        "description": "上下文顺序漂移检测",
+        "type": "bool",
+        "default": true
       }
     }
   },
   "prompt_optimizer": {
-    "description": "提示词优化器配置",
-    "hint": "静态分析与 LLM 改写相关设置",
+    "description": "提示词优化开关",
+    "hint": "仅保留启用开关；改写 Provider / 最大分析长度 等详细配置请在「仪表盘 → 设置」页调整",
     "type": "object",
     "default": {},
     "items": {
       "enabled": {
         "description": "启用提示词优化",
-        "hint": "开启后 /optimize 命令可用",
         "type": "bool",
         "default": true
-      },
-      "provider_id": {
-        "description": "改写使用的 Provider ID",
-        "hint": "留空则使用当前会话的 Provider",
-        "type": "string",
-        "default": ""
-      },
-      "max_static_analysis_length": {
-        "description": "静态分析最大 system prompt 长度（字符）",
-        "hint": "超过此长度的 system prompt 只做粗粒度分析",
-        "type": "int",
-        "default": 8000
       }
     }
   },
   "attribution": {
-    "description": "归因分析配置",
-    "hint": "上下文 token 估算与注入归因相关设置",
+    "description": "归因分析开关",
+    "hint": "仅保留启用开关；采样率等详细配置请在「仪表盘 → 设置」页调整",
     "type": "object",
     "default": {},
     "items": {
       "enabled": {
         "description": "启用上下文注入归因",
-        "hint": "开启后记录每次请求的上下文组成（system/tools/history/user）",
         "type": "bool",
         "default": true
-      },
-      "sample_rate": {
-        "description": "归因采样率（百分比）",
-        "hint": "为降低性能开销，按比例采样请求做归因，100 表示全采样",
-        "type": "int",
-        "default": 100
       }
     }
   },
   "schedule": {
-    "description": "定时任务配置",
-    "hint": "CronJob 注册与历史数据清理",
+    "description": "定时任务开关",
+    "hint": "仅保留日报开关；历史保留天数等详细配置请在「仪表盘 → 设置」页调整",
     "type": "object",
     "default": {},
     "items": {
       "enable_daily_report": {
         "description": "启用每日报告 CronJob",
-        "hint": "开启后在 alerts.daily_report_time 自动生成并推送到 alerts.daily_report_to（默认关闭，避免主动推送打扰）",
         "type": "bool",
         "default": false
-      },
-      "retain_days": {
-        "description": "历史数据保留天数",
-        "hint": "超过此天数的补充记录会被清理，0 表示永不清理",
-        "type": "int",
-        "default": 90
       }
     }
   }

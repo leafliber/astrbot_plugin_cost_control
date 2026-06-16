@@ -7,7 +7,10 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from cost_control.budget import (
+    BudgetMixin,
+    _groups_cost,
     check_dimensions,
+    check_dimensions_dual,
     day_window_start,
     month_window_start,
     resolve_tz,
@@ -15,6 +18,7 @@ from cost_control.budget import (
     truncate_contexts,
 )
 from cost_control.config import (
+    DEFAULT_PRICING,
     enabled_strategies,
     migrate_legacy_policy,
     normalize_strategy,
@@ -227,3 +231,121 @@ def test_truncate_contexts_keeps_recent_within_limit():
 def test_truncate_contexts_empty():
     assert truncate_contexts([], 100) == []
     assert truncate_contexts(None, 100) == []
+
+
+# ===== 预算双指标（token / cost） =====
+
+
+def test_check_dimensions_dual_token_exceeded():
+    r = check_dimensions_dual(
+        {"global_daily": 200}, {"global_daily": 0}, {"global_daily": 100}, {"global_daily": 0}
+    )
+    assert r["exceeded"] is True
+    assert r["dim"] == "global_daily"
+    assert r["metric"] == "token"
+    assert r["used"] == 200 and r["limit"] == 100
+
+
+def test_check_dimensions_dual_cost_exceeded():
+    r = check_dimensions_dual(
+        {"global_daily": 0}, {"global_daily": 6.0}, {"global_daily": 0}, {"global_daily": 5.0}
+    )
+    assert r["exceeded"] is True
+    assert r["metric"] == "cost"
+    assert r["limit"] == 5.0
+
+
+def test_check_dimensions_dual_both_token_wins():
+    # 同维 token 与 cost 都超 → 优先报 token
+    r = check_dimensions_dual(
+        {"global_daily": 200}, {"global_daily": 9.0}, {"global_daily": 100}, {"global_daily": 5.0}
+    )
+    assert r["metric"] == "token"
+
+
+def test_check_dimensions_dual_neither():
+    r = check_dimensions_dual(
+        {"global_daily": 50}, {"global_daily": 1.0}, {"global_daily": 100}, {"global_daily": 5.0}
+    )
+    assert r["exceeded"] is False
+    assert r["dim"] is None and r["metric"] is None
+
+
+def test_check_dimensions_dual_dim_priority():
+    # per_session（更局部）token 超 优先于 global cost 超
+    r = check_dimensions_dual(
+        {"per_session_daily": 200, "global_daily": 0},
+        {"per_session_daily": 0, "global_daily": 9.0},
+        {"per_session_daily": 100, "global_daily": 0},
+        {"per_session_daily": 0, "global_daily": 5.0},
+    )
+    assert r["dim"] == "per_session_daily"
+    assert r["metric"] == "token"
+
+
+def test_check_dimensions_dual_zero_limits_skipped():
+    r = check_dimensions_dual(
+        {"global_daily": 9999}, {"global_daily": 9999.0}, {"global_daily": 0}, {"global_daily": 0}
+    )
+    assert r["exceeded"] is False
+
+
+def test_groups_cost_multi_model():
+    groups = [
+        {
+            "key": "gpt-4o",
+            "token_input_other": 1_000_000,
+            "token_input_cached": 0,
+            "token_output": 0,
+        },
+        {
+            "key": "gpt-4o-mini",
+            "token_input_other": 1_000_000,
+            "token_input_cached": 0,
+            "token_output": 0,
+        },
+    ]
+    # gpt-4o 1M input = $2.5；gpt-4o-mini 1M input = $0.15 → 合计 $2.65
+    assert abs(_groups_cost(groups, DEFAULT_PRICING) - 2.65) < 1e-6
+
+
+def test_groups_cost_unpriced_zero():
+    groups = [
+        {
+            "key": "nonexistent-xyz",
+            "token_input_other": 1_000_000,
+            "token_input_cached": 0,
+            "token_output": 0,
+        },
+    ]
+    assert _groups_cost(groups, DEFAULT_PRICING) == 0.0
+
+
+def test_groups_cost_empty():
+    assert _groups_cost([], DEFAULT_PRICING) == 0.0
+
+
+class _BudgetStub(BudgetMixin):
+    """仅带 config 的 BudgetMixin 实例（测 get_budgets_cost，不触 DB/context）。"""
+
+
+def test_get_budgets_cost_defaults():
+    b = _BudgetStub()
+    b.cfg = {}
+    out = b.get_budgets_cost()
+    assert set(out.keys()) == {
+        "per_session_daily",
+        "per_user_daily",
+        "per_model_daily",
+        "global_daily",
+        "global_monthly",
+    }
+    assert all(v == 0.0 for v in out.values())
+
+
+def test_get_budgets_cost_override_and_bad():
+    b = _BudgetStub()
+    b.cfg = {"budgets_cost": {"global_daily": 5.5, "per_model_daily": "abc"}}
+    out = b.get_budgets_cost()
+    assert out["global_daily"] == 5.5
+    assert out["per_model_daily"] == 0.0  # 非法值跳过，保留默认 0.0

@@ -189,9 +189,9 @@ class AnalyticsMixin:
         """
         now = datetime.now(UTC)
         tz = resolve_tz(self.context)
-        refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+        refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
         start = report_window_start(window, now, tz, refresh)
-        pricing = get_pricing(getattr(self, "config", None))
+        pricing = get_pricing(getattr(self, "cfg", None))
 
         empty: dict[str, Any] = {
             "window": window,

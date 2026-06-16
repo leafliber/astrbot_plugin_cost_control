@@ -38,7 +38,16 @@ from datetime import datetime
 from typing import Any
 
 from .budget import resolve_tz
-from .config import get_config, migrate_legacy_policy, normalize_strategy
+from .config import (
+    CONFIG_DEFAULTS,
+    coerce_to_default_type,
+    deep_merge,
+    get_config,
+    migrate_legacy_policy,
+    normalize_strategy,
+    save_plugin_config,
+    switches_from_config,
+)
 
 PLUGIN_NAME = "astrbot_plugin_cost_control"
 
@@ -52,13 +61,17 @@ class WebApiMixin:
     # 兄弟 Mixin 提供。
     build_report: Any
     get_budgets: Any
+    get_budgets_cost: Any
     get_over_limit_strategies: Any
     query_usage: Any
     query_usage_grouped: Any
     query_supplements: Any
     query_usage_timeseries: Any
+    query_cache_events: Any
     cleanup_old_supplements: Any
     get_pricing: Any
+    get_data_dir: Any
+    register_cron: Any
     daily_report: Any
 
     def register_routes(self) -> None:
@@ -83,6 +96,7 @@ class WebApiMixin:
                     "明细二级聚合（按模型/会话）",
                 ),
                 (f"{prefix}/budgets", self.api_budgets, ["GET"], "预算配置与消耗"),
+                (f"{prefix}/providers", self.api_providers, ["GET"], "可用 Provider 列表"),
                 (f"{prefix}/cache", self.api_cache, ["GET"], "缓存命中率与诊断事件"),
                 (f"{prefix}/attribution", self.api_attribution, ["GET"], "归因报表"),
                 (f"{prefix}/pricing", self.api_pricing, ["GET"], "模型单价表"),
@@ -236,7 +250,7 @@ class WebApiMixin:
             window = self._param("window", "daily") or "daily"
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
-            refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
             cur_start, cur_end, prev_start, prev_end = compare_windows(window, now, tz, refresh)
             pricing = self.get_pricing()
 
@@ -420,12 +434,14 @@ class WebApiMixin:
         try:
             from datetime import UTC, datetime
 
-            from .budget import day_window_start, month_window_start, total_tokens
+            from .budget import _DIM_ORDER, day_window_start, month_window_start, total_tokens
 
             limits = self.get_budgets()
+            limits_cost = self.get_budgets_cost()
+            has_cost = any(float(limits_cost.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
-            refresh = str(get_config(getattr(self, "config", None), "refresh_time", "00:00"))
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
             d_start = day_window_start(refresh, now, tz)
             m_start = month_window_start(now, tz)
             day_usage = await self.query_usage(start=d_start)
@@ -433,50 +449,127 @@ class WebApiMixin:
             day_total = total_tokens(day_usage)
             month_total = total_tokens(month_usage)
 
-            def _dim(key: str, used: int, top_key: str = "", note: str = "") -> dict[str, Any]:
-                limit = int(limits.get(key, 0) or 0)
-                return {
-                    "limit": limit,
-                    "used": used,
-                    "ratio": round(used * 100.0 / limit, 1) if limit > 0 else 0.0,
-                    "exceeded": limit > 0 and used >= limit,
-                    "top_key": top_key,
-                    "note": note,
-                }
-
-            # per_session / per_user：本日消耗最多的会话（per_user 阶段2 退化为 umo 维度）
+            # 局部维度的代表值：今日消耗最多的会话 / 模型
             top_session = await self.query_usage_grouped(by="umo", start=d_start)
             top_session.sort(key=lambda r: total_tokens(r), reverse=True)
             ses_used = total_tokens(top_session[0]) if top_session else 0
             ses_key = str((top_session[0] or {}).get("key", "")) if top_session else ""
-            # per_model：本日消耗最多的模型
             top_model = await self.query_usage_grouped(by="model", start=d_start)
             top_model.sort(key=lambda r: total_tokens(r), reverse=True)
             mod_used = total_tokens(top_model[0]) if top_model else 0
             mod_key = str((top_model[0] or {}).get("key", "")) if top_model else ""
 
+            # 花费消耗（仅当配置了 cost 限额时计算，否则全 0；口径同 check_budget）
+            if has_cost:
+                from .budget import _groups_cost
+                from .cost import compute_cost_value
+
+                pricing = self.get_pricing()
+                day_cost = _groups_cost(
+                    await self.query_usage_grouped(by="model", start=d_start), pricing
+                )
+                month_cost = _groups_cost(
+                    await self.query_usage_grouped(by="model", start=m_start), pricing
+                )
+                ses_cost = (
+                    _groups_cost(
+                        await self.query_usage_grouped(by="model", umo=ses_key, start=d_start),
+                        pricing,
+                    )
+                    if ses_key
+                    else 0.0
+                )
+                mod_cost = (
+                    round(compute_cost_value(top_model[0], mod_key, pricing), 6)
+                    if top_model
+                    else 0.0
+                )
+            else:
+                day_cost = month_cost = ses_cost = mod_cost = 0.0
+
+            def _part(limit: Any, used: Any) -> dict[str, Any]:
+                limit = float(limit or 0)
+                used = float(used or 0)
+                return {
+                    "limit": limit,
+                    "used": used,
+                    "ratio": round(used * 100.0 / limit, 1) if limit > 0 else 0.0,
+                    "exceeded": limit > 0 and used >= limit,
+                }
+
+            def _dim_entry(
+                key: str, used_t: Any, used_c: Any, top_key: str = "", note: str = ""
+            ) -> dict[str, Any]:
+                return {
+                    "token": {
+                        **_part(limits.get(key, 0), used_t),
+                        "top_key": top_key,
+                        "note": note,
+                    },
+                    "cost": {
+                        **_part(limits_cost.get(key, 0), used_c),
+                        "top_key": top_key,
+                        "note": note,
+                    },
+                }
+
             return self._ok(
                 {
                     "limits": limits,
+                    "limits_cost": limits_cost,
                     "strategies": self.get_over_limit_strategies(),
                     "dimensions": {
-                        "global_daily": _dim("global_daily", day_total),
-                        "global_monthly": _dim("global_monthly", month_total),
-                        "per_session_daily": _dim(
-                            "per_session_daily", ses_used, ses_key, "今日消耗最多的会话"
+                        "global_daily": _dim_entry("global_daily", day_total, day_cost),
+                        "global_monthly": _dim_entry("global_monthly", month_total, month_cost),
+                        "per_session_daily": _dim_entry(
+                            "per_session_daily", ses_used, ses_cost, ses_key, "今日消耗最多的会话"
                         ),
-                        "per_user_daily": _dim(
+                        "per_user_daily": _dim_entry(
                             "per_user_daily",
                             ses_used,
+                            ses_cost,
                             ses_key,
                             "退化为会话维度（ProviderStat 无独立 user_id）",
                         ),
-                        "per_model_daily": _dim(
-                            "per_model_daily", mod_used, mod_key, "今日消耗最多的模型"
+                        "per_model_daily": _dim_entry(
+                            "per_model_daily", mod_used, mod_cost, mod_key, "今日消耗最多的模型"
                         ),
                     },
                 }
             )
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_providers(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /providers``：astrbot 当前配置的 Provider 列表（供策略编辑器下拉选）。
+
+        经 ``context.get_all_providers()`` 取全部 Provider，``.meta()`` 取
+        ``{id, model, type}``，按 id 去重。任一步异常兜空，绝不抛出。
+        """
+        try:
+            provs: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            try:
+                all_provs = self.context.get_all_providers()
+            except Exception:
+                all_provs = []
+            for p in all_provs or []:
+                try:
+                    meta = p.meta()
+                    pid = str(getattr(meta, "id", "") or "")
+                    if not pid or pid in seen:
+                        continue
+                    seen.add(pid)
+                    provs.append(
+                        {
+                            "id": pid,
+                            "model": str(getattr(meta, "model", "") or ""),
+                            "type": str(getattr(meta, "type", "") or ""),
+                        }
+                    )
+                except Exception:
+                    continue
+            return self._ok({"providers": provs})
         except Exception as e:
             return self._err(str(e))
 
@@ -506,14 +599,21 @@ class WebApiMixin:
             avg = round(sum(rates) / len(rates), 1) if rates else 0.0
 
             events: list[dict[str, Any]] = []
-            bucket = getattr(self, "_cache_events", None)
-            if isinstance(bucket, dict):
-                for umo_val, evs in bucket.items():
-                    for ev in evs or []:
-                        e = dict(ev)
-                        e.setdefault("umo", umo_val)
-                        events.append(e)
-            events = events[-50:]
+            try:
+                ev_rows = await self.query_cache_events(limit=50)
+                for r in ev_rows:
+                    created = getattr(r, "created_at", None)
+                    events.append(
+                        {
+                            "umo": getattr(r, "umo", "") or "",
+                            "type": getattr(r, "type", "") or "",
+                            "severity": getattr(r, "severity", "medium") or "medium",
+                            "detail": getattr(r, "detail", "") or "",
+                            "created_at": created.isoformat() if created else None,
+                        }
+                    )
+            except Exception:
+                events = []
             return self._ok(
                 {
                     "cache_hit_rate": avg,
@@ -602,7 +702,7 @@ class WebApiMixin:
     async def api_config(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /config``：当前插件配置（不含密钥，仅预算 / 单价 / 诊断等设置）。"""
         try:
-            cfg = getattr(self, "config", None) or {}
+            cfg = getattr(self, "cfg", None) or {}
             return self._ok(dict(cfg) if isinstance(cfg, dict) else {})
         except Exception as e:
             return self._err(str(e))
@@ -615,7 +715,7 @@ class WebApiMixin:
         try:
             from datetime import UTC, datetime, timedelta
 
-            sched = get_config(getattr(self, "config", None), "schedule", {}) or {}
+            sched = get_config(getattr(self, "cfg", None), "schedule", {}) or {}
             days = int(sched.get("retain_days", 0) or 0) if isinstance(sched, dict) else 0
             if days <= 0:
                 return self._ok({"deleted": 0, "message": "retain_days<=0，未清理"})
@@ -633,72 +733,47 @@ class WebApiMixin:
         except Exception as e:
             return self._err(str(e))
 
-    # 仅允许 WebUI 修改这两个顶层 key（白名单），防前端乱改 pricing/alerts 等。
-    _SAVE_BUDGET_KEYS = (
-        "per_session_daily",
-        "per_user_daily",
-        "per_model_daily",
-        "global_daily",
-        "global_monthly",
-    )
-
     def _validate_save_payload(self, body: Any) -> tuple[dict[str, Any] | None, str]:
-        """校验 save_config 请求体，返回合并后的配置或错误信息。
+        """校验 save_config 请求体，返回合并后的**全量**配置或错误信息。
 
-        ``self.config.save_config`` 是浅合并（整体替换顶层 key），故 budgets 必须含
-        5 个 key——缺失者从现有配置补齐，防覆盖丢字段。``over_limit_strategies`` 为
-        策略链数组，逐条过 :func:`normalize_strategy` 规范化后整体替换；兼容遗留
-        ``over_limit_policy`` 单对象（迁移为 1 元素列表）。
-        返回 ``(merged_or_None, error_msg)``；成功时 ``error_msg`` 为空串。
+        以当前 ``self.cfg`` 为底座，按 body 提供的 key 逐项强转校验
+        (:func:`coerce_to_default_type`)；``over_limit_strategies`` 逐条过
+        :func:`normalize_strategy`；``pricing`` 接受任意 dict；遗留
+        ``over_limit_policy`` 迁移为策略链。未知 key 忽略。返回 ``(full_cfg, err)``。
         """
         if not isinstance(body, dict):
             return None, "请求体必须是 JSON 对象"
-        cfg = getattr(self, "config", None) or {}
-        merged: dict[str, Any] = {}
-
-        if "budgets" in body:
-            sub = body.get("budgets")
-            if not isinstance(sub, dict):
-                return None, "budgets 必须是对象"
-            cur_budgets = cfg.get("budgets", {}) if isinstance(cfg, dict) else {}
-            if not isinstance(cur_budgets, dict):
-                cur_budgets = {}
-            out_b: dict[str, int] = {}
-            for k in self._SAVE_BUDGET_KEYS:
-                if k in sub:
-                    try:
-                        out_b[k] = max(0, int(sub[k]))
-                    except (TypeError, ValueError):
-                        return None, f"budgets.{k} 必须是整数"
-                else:
-                    try:
-                        out_b[k] = max(0, int(cur_budgets.get(k, 0) or 0))
-                    except (TypeError, ValueError):
-                        out_b[k] = 0
-            merged["budgets"] = out_b
-
-        if "over_limit_strategies" in body:
-            sub = body.get("over_limit_strategies")
-            if not isinstance(sub, list):
-                return None, "over_limit_strategies 必须是数组"
-            merged["over_limit_strategies"] = [normalize_strategy(s) for s in sub]
-        elif "over_limit_policy" in body:
-            # 遗留兼容：旧前端 / 旧调用仍发单对象 over_limit_policy → 迁移为策略链
-            migrated = migrate_legacy_policy(body.get("over_limit_policy"))
-            merged["over_limit_strategies"] = migrated if migrated else ([normalize_strategy({})])
-
-        if not merged:
-            return None, "未提供可更新的配置（仅支持 budgets / over_limit_strategies）"
-        return merged, ""
+        cur = getattr(self, "cfg", None)
+        out: dict[str, Any] = dict(cur) if isinstance(cur, dict) else {}
+        for k, v in body.items():
+            if k == "over_limit_strategies":
+                if not isinstance(v, list):
+                    return None, "over_limit_strategies 必须是数组"
+                out[k] = [normalize_strategy(s) for s in v]
+            elif k == "over_limit_policy":  # 遗留兼容
+                migrated = migrate_legacy_policy(v)
+                out["over_limit_strategies"] = migrated if migrated else [normalize_strategy({})]
+            elif k == "pricing":
+                if not isinstance(v, dict):
+                    return None, "pricing 必须是对象"
+                out[k] = {str(mk): p for mk, p in v.items() if isinstance(p, dict)}
+            elif k in CONFIG_DEFAULTS:
+                out[k] = coerce_to_default_type(v, CONFIG_DEFAULTS[k])
+            # else: 未知 key 忽略
+        if not any(k in body for k in (*CONFIG_DEFAULTS, "over_limit_policy")):
+            return None, "未提供可识别的配置项"
+        return out, ""
 
     async def api_action_save_config(self, **kwargs: Any) -> dict[str, Any]:
-        """``POST /actions/save_config``：保存预算 / 策略配置（热生效，无需重载）。
+        """``POST /actions/save_config``：保存配置（全量，热生效，无需重载）。
 
-        只接受白名单顶层 key（``budgets`` / ``over_limit_strategies``），类型校验 +
-        规范化后调用 ``self.config.save_config(merged)``——同步更新内存 + 落盘
-        ``data/config/<plugin>_config.json``，立即对后续 ``check_budget`` 生效。
+        校验 → 写插件自有 ``config.json``（持久，不被 AstrBot 裁剪）→ 重建
+        ``self.cfg``（立即对后续读取生效）→ 开关同步 ``self.config`` + ``save_config``
+        （持久到 ``<plugin>_config.json``，self.config 仅含开关故无裁剪噪音）→
+        schedule/alerts 变更则重注册 CronJob。
         """
         try:
+            from astrbot import logger
             from quart import request
 
             try:
@@ -709,7 +784,26 @@ class WebApiMixin:
             if err:
                 return self._err(err)
             assert merged is not None
-            self.config.save_config(merged)
-            return self._ok({"saved": list(merged.keys()), "config": merged})
+            changed = [k for k in (body or {}) if k in CONFIG_DEFAULTS or k == "over_limit_policy"]
+            # 1. 写插件自有配置文件（持久）
+            data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
+            try:
+                save_plugin_config(data_dir, merged)
+            except Exception as e:
+                return self._err(f"写入配置文件失败：{e}")
+            # 2. 重建 self.cfg（热；merged 已含页面编辑值）
+            self.cfg = deep_merge(CONFIG_DEFAULTS, merged)
+            # 3. 开关持久化到 <plugin>_config.json（self.config 仅含开关 → 无噪音）
+            try:
+                self.config.save_config(switches_from_config(merged))
+            except Exception as e:
+                logger.warning("[cost_control] 开关持久化失败（不影响热生效）: %s", e)
+            # 4. schedule/alerts 变更 → 重注册 cron（幂等）
+            if any(k in changed for k in ("schedule", "alerts")):
+                try:
+                    await self.register_cron()
+                except Exception as e:
+                    logger.warning("[cost_control] CronJob 重注册失败: %s", e)
+            return self._ok({"saved": changed, "config": self.cfg})
         except Exception as e:
             return self._err(str(e))

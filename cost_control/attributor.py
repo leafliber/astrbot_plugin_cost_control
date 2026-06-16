@@ -140,7 +140,7 @@ class AttributorMixin:
             self._last_sp = {}
 
     def _attribution_enabled(self) -> bool:
-        cfg = get_config(getattr(self, "config", None), "attribution", {}) or {}
+        cfg = get_config(getattr(self, "cfg", None), "attribution", {}) or {}
         return bool(cfg.get("enabled", True)) if isinstance(cfg, dict) else True
 
     def _attribution_sampled(self, req: Any) -> bool:
@@ -148,7 +148,7 @@ class AttributorMixin:
 
         无随机源（确定性采样）：用 ``id(req) % 100 < rate`` 近似，可复现。
         """
-        cfg = get_config(getattr(self, "config", None), "attribution", {}) or {}
+        cfg = get_config(getattr(self, "cfg", None), "attribution", {}) or {}
         rate = int(cfg.get("sample_rate", 100) or 0) if isinstance(cfg, dict) else 100
         if rate >= 100:
             return True

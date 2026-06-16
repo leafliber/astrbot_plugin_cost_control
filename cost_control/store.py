@@ -67,6 +67,28 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     )
 
 
+class CacheEvent(SQLModel, table=True):  # type: ignore[call-arg]
+    """缓存破坏诊断事件（落库，重载不丢）。
+
+    由 ``CacheDiagMixin.run_cache_diag`` 在检测到上下文重置 / system prompt 变更 /
+    工具变更 / 顺序漂移 时写入。
+    """
+
+    __tablename__ = "cache_events"
+    # 热重载安全（同 CostSupplement）。
+    __table_args__ = {"extend_existing": True}
+
+    id: int | None = Field(default=None, primary_key=True)
+    umo: str = Field(index=True)
+    type: str = Field(index=True)
+    severity: str = Field(default="medium")
+    detail: str = Field(default="")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        index=True,
+    )
+
+
 class StoreMixin:
     """补充表持久化与复用 ``Preference`` 的 Mixin。"""
 
@@ -98,13 +120,16 @@ class StoreMixin:
             class_=AsyncSession,
             expire_on_commit=False,
         )
-        # 仅创建 CostSupplement 表，避免把 astrbot 全局 SQLModel.metadata 的其它表
+        # 仅创建本插件自有表，避免把 astrbot 全局 SQLModel.metadata 的其它表
         # 一并建进独立库。
         async with self._engine.begin() as conn:
             await conn.run_sync(
                 lambda sync_conn: SQLModel.metadata.create_all(
                     sync_conn,
-                    tables=[CostSupplement.__table__],  # type: ignore[attr-defined]
+                    tables=[
+                        CostSupplement.__table__,  # type: ignore[attr-defined]
+                        CacheEvent.__table__,  # type: ignore[attr-defined]
+                    ],
                     checkfirst=True,
                 )
             )
@@ -190,17 +215,57 @@ class StoreMixin:
             return []
 
     async def cleanup_old_supplements(self, before: datetime) -> int:
-        """删除 ``created_at`` 早于 before 的补充记录，返回删除条数（失败返回 0）。"""
+        """删除 ``created_at`` 早于 before 的补充记录与缓存事件，返回删除条数（失败返回 0）。"""
         try:
             maker = await self._ensure_session_maker()
             async with maker() as session:
-                result = await session.execute(
+                n = 0
+                r1 = await session.execute(
                     delete(CostSupplement).where(CostSupplement.created_at < before)  # type: ignore[arg-type]
                 )
+                n += int(r1.rowcount or 0)
+                r2 = await session.execute(
+                    delete(CacheEvent).where(CacheEvent.created_at < before)  # type: ignore[arg-type]
+                )
+                n += int(r2.rowcount or 0)
                 await session.commit()
-                return int(result.rowcount or 0)
+                return n
         except Exception:
             return 0
+
+    async def save_cache_event(self, record: dict[str, Any]) -> None:
+        """保存一条缓存诊断事件（``run_cache_diag`` 检测到破坏时调用）。"""
+        row = CacheEvent(
+            umo=record.get("umo", "") or "",
+            type=str(record.get("type", "") or ""),
+            severity=str(record.get("severity", "medium") or "medium"),
+            detail=str(record.get("detail", "") or ""),
+            created_at=record.get("created_at") or datetime.now(UTC),
+        )
+        maker = await self._ensure_session_maker()
+        async with maker() as session:
+            session.add(row)
+            await session.commit()
+
+    async def query_cache_events(
+        self,
+        *,
+        umo: str | None = None,
+        limit: int = 50,
+    ) -> list[CacheEvent]:
+        """查询缓存诊断事件（最新优先，失败返回空列表）。"""
+        stmt = select(CacheEvent)
+        if umo:
+            stmt = stmt.where(CacheEvent.umo == umo)
+        order_col = getattr(CacheEvent, "created_at").desc()
+        stmt = stmt.order_by(order_col).limit(limit)  # type: ignore[call-overload]
+        try:
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                result = await session.execute(stmt)
+                return list(result.scalars().all())
+        except Exception:
+            return []
 
     # ===== Preference 封装（复用 AstrBot 主库，存告警冷却 / 计数等跨会话状态） =====
 
