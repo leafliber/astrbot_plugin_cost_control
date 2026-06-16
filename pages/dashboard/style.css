@@ -594,3 +594,155 @@ code {
     border-bottom: none;
     background: var(--panel-2);
 }
+
+/* ===== 超限策略链编辑器 ===== */
+.strategy-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.strategy-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+}
+
+.strategy-card.is-disabled {
+    opacity: 0.55;
+}
+
+.strategy-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.strategy-idx {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.strategy-head select {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+
+.s-enabled {
+    font-size: 12px;
+    color: var(--text-dim);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.strategy-move {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 4px;
+}
+
+.move-btn {
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text-dim);
+    border-radius: 5px;
+    width: 26px;
+    height: 26px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+}
+
+.move-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.move-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.move-btn.del {
+    color: var(--bad);
+}
+
+.move-btn.del:hover:not(:disabled) {
+    border-color: var(--bad);
+    color: var(--bad);
+}
+
+.strategy-field {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.field-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.field-row input[type="text"],
+.field-row input[type="number"] {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+
+.provider-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.provider-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--accent-weak);
+    color: var(--accent);
+    border-radius: 12px;
+    padding: 2px 4px 2px 10px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.tag-del {
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 50%;
+}
+
+.tag-del:hover {
+    color: var(--bad);
+}

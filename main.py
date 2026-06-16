@@ -17,7 +17,7 @@ iscoroutinefunction(handler)`` ——故这些钩子 handler **必须是 corouti
 from __future__ import annotations
 
 from astrbot import logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 
@@ -87,28 +87,23 @@ class Main(
         """LLM 请求前（最高优先级）：预算硬拦截 + 归因初始快照。
 
         必须为 coroutine（``call_event_hook`` 的 ``iscoroutinefunction`` assert），
-        **不能 yield**。超限时 ``event.stop_event()`` 中止后续 LLM 调用，并用
-        ``event.send`` 返回提示。归因初始快照仅在未超限时记录。
-        异常一律降级放行，绝不阻断主流程。
+        **不能 yield**。超限时委托 ``apply_over_limit_chain`` 按策略链处理
+        （fallback_provider 逐个尝试备用 Provider，或 stop_llm 拦截）。归因初始
+        快照仅在未超限（或链路未处理）时记录。异常一律降级放行，绝不阻断主流程。
         """
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             model = getattr(req, "model", None) or None
             result = await self.check_budget(umo, model)
             if result.get("exceeded"):
-                policy = result.get("policy") or {}
-                msg = (
-                    f"⏸ 已超出预算（{result.get('dim')}）："
-                    f"用 {result.get('used')} / 限 {result.get('limit')} token"
-                )
-                if policy.get("action", "stop_llm") != "stop_llm":
-                    msg += "\n（fallback 策略暂未启用，已拦截）"
-                event.stop_event()
+                strategies = result.get("strategies") or []
                 try:
-                    await event.send(MessageChain().message(msg))
+                    handled = await self.apply_over_limit_chain(event, req, result, strategies)
                 except Exception as e:
-                    logger.warning("[cost_control] 超限提示发送失败: %s", e)
-                return
+                    logger.warning("[cost_control] 超限策略链执行失败: %s", e)
+                    handled = False
+                if handled:
+                    return
         except Exception as e:
             logger.warning("[cost_control] 预算检查失败: %s", e)
         # 阶段 3：归因初始快照（head，所有插件执行前；采样在 record_initial_context 内判定）

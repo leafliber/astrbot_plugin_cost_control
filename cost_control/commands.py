@@ -36,6 +36,7 @@ class CommandsMixin:
     query_usage_grouped: Any
     query_supplements: Any
     get_budgets: Any
+    get_over_limit_strategies: Any
     check_budget: Any
     consume_last_injection: Any
     last_system_prompt: Any
@@ -92,6 +93,19 @@ class CommandsMixin:
                     any_cfg = True
             if not any_cfg:
                 lines.append("  （未配置任何预算）")
+            # 超限策略链摘要（按序）
+            strategies = self.get_over_limit_strategies()
+            if strategies:
+                parts = []
+                for idx, s in enumerate(strategies, 1):
+                    act = s.get("action")
+                    tag = "" if s.get("enabled", True) else "[禁用]"
+                    if act == "fallback_provider":
+                        pids = s.get("provider_ids") or []
+                        parts.append(f"{idx}.切换备用{pids}{tag}")
+                    else:
+                        parts.append(f"{idx}.拦截{tag}")
+                lines.append("🧭 超限策略：" + " → ".join(parts))
             if result.get("exceeded"):
                 lines.append(
                     f"⚠️ 已超限：{result.get('dim')}（用 {result.get('used')} / "

@@ -19,37 +19,37 @@
   },
   "budgets": {
     "description": "预算阈值配置",
-    "hint": "按会话/用户/模型/全局分别设置每日或每月的 token 上限，超出后按 over_limit_policy 处理",
+    "hint": "按会话/用户/模型/全局分别设置每日或每月的 token 上限，超出后按 over_limit_strategies 策略链处理",
     "type": "object",
     "default": {},
     "items": {
       "per_session_daily": {
         "description": "单会话每日 token 上限",
-        "hint": "超出则触发 over_limit_policy，0 表示不限制",
+        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
         "type": "int",
         "default": 0
       },
       "per_user_daily": {
         "description": "单用户每日 token 上限",
-        "hint": "超出则触发 over_limit_policy，0 表示不限制",
+        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
         "type": "int",
         "default": 0
       },
       "per_model_daily": {
         "description": "单模型每日 token 上限",
-        "hint": "超出则触发 over_limit_policy，0 表示不限制",
+        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
         "type": "int",
         "default": 0
       },
       "global_daily": {
         "description": "全局每日 token 上限",
-        "hint": "超出则触发 over_limit_policy，0 表示不限制",
+        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
         "type": "int",
         "default": 0
       },
       "global_monthly": {
         "description": "全局每月 token 上限",
-        "hint": "超出则触发 over_limit_policy，0 表示不限制",
+        "hint": "超出则按 over_limit_strategies 策略链处理，0 表示不限制",
         "type": "int",
         "default": 0
       }
@@ -62,37 +62,49 @@
     "default": {},
     "items": {}
   },
-  "over_limit_policy": {
-    "description": "超限处理策略",
-    "hint": "预算超限时执行的动作",
-    "type": "object",
-    "default": {},
+  "over_limit_strategies": {
+    "description": "超限处理策略链（按序尝试）",
+    "hint": "可配多条、可排序：fallback_provider 按 provider_ids 列表逐个尝试备用 Provider；stop_llm 硬拦截。WebUI 表单能力有限，建议在仪表盘→预算页编辑（支持拖拽排序与多 Provider 列表）",
+    "type": "list",
+    "default": [],
     "items": {
-      "action": {
-        "description": "超限动作",
-        "hint": "stop_llm 直接拦截；fallback_provider 切换到备用 provider",
-        "type": "string",
-        "default": "stop_llm",
-        "options": ["stop_llm", "fallback_provider"],
-        "option_labels": ["拦截 LLM 请求", "切换备用 Provider"]
-      },
-      "fallback_provider_id": {
-        "description": "备用 Provider ID",
-        "hint": "action=fallback_provider 时使用的 Provider ID",
-        "type": "string",
-        "default": ""
-      },
-      "fallback_token_limit": {
-        "description": "备用 Provider token 上限",
-        "hint": "切换到备用 provider 后允许的最大 token 数，0 表示不限制",
-        "type": "int",
-        "default": 0
-      },
-      "block_wake_words_after_limit": {
-        "description": "超限后屏蔽唤醒词",
-        "hint": "开启后，超限会话将不再响应 LLM 唤醒词（仅命令可用）",
-        "type": "bool",
-        "default": false
+      "description": "单条超限策略",
+      "hint": "一条动作 + 其参数",
+      "type": "object",
+      "default": {},
+      "items": {
+        "action": {
+          "description": "超限动作",
+          "hint": "fallback_provider 切换到备用 Provider（按 provider_ids 逐个尝试）；stop_llm 直接拦截",
+          "type": "string",
+          "default": "stop_llm",
+          "options": ["stop_llm", "fallback_provider"],
+          "option_labels": ["拦截 LLM 请求", "切换备用 Provider"]
+        },
+        "provider_ids": {
+          "description": "备用 Provider ID（逗号分隔）",
+          "hint": "fallback_provider 时按序逐个尝试的 Provider ID，多个用英文逗号分隔；如 a,b,c",
+          "type": "string",
+          "default": ""
+        },
+        "token_limit": {
+          "description": "发往备用 Provider 的 token 上限",
+          "hint": "截断历史上下文使其不超过此 token 数，0 表示不限制",
+          "type": "int",
+          "default": 0
+        },
+        "message": {
+          "description": "拦截文案",
+          "hint": "stop_llm 时的自定义提示文案，留空则用默认",
+          "type": "string",
+          "default": ""
+        },
+        "enabled": {
+          "description": "启用此策略",
+          "hint": "关闭后该条策略在链路中被跳过",
+          "type": "bool",
+          "default": true
+        }
       }
     }
   },

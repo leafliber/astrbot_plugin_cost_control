@@ -901,7 +901,6 @@
 
     function renderBudgets(r) {
         var limits = r.limits || {};
-        var policy = r.policy || {};
         var dims = r.dimensions || {};
         var dimMeta = [
             ["per_session_daily", "单会话每日"],
@@ -950,27 +949,13 @@
         });
         html += "</tbody></table></div>";
 
-        // 策略
+        // 策略链容器（由 renderStrategies 动态填充）
         html +=
-            '<div class="panel"><h2>超限处理策略</h2><div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">' +
-            "<label>动作 <select id='p-action' style='width:auto'>" +
-            '<option value="stop_llm"' +
-            (policy.action === "stop_llm" ? " selected" : "") +
-            ">拦截 LLM 请求</option>" +
-            '<option value="fallback_provider"' +
-            (policy.action === "fallback_provider" ? " selected" : "") +
-            ">切换备用 Provider</option>" +
-            "</select></label>" +
-            "<label>备用 Provider ID <input id='p-fallback_provider_id' value='" +
-            esc(policy.fallback_provider_id || "") +
-            "'></label>" +
-            "<label>备用 token 上限 <input type='number' min='0' id='p-fallback_token_limit' value='" +
-            (policy.fallback_token_limit || 0) +
-            "' style='width:100px'></label>" +
-            "<label><input type='checkbox' id='p-block_wake'" +
-            (policy.block_wake_words_after_limit ? " checked" : "") +
-            "> 超限后屏蔽唤醒词</label>" +
-            "</div></div>";
+            '<div class="panel"><h2>超限处理策略（按序尝试）</h2>' +
+            '<div class="muted small" style="margin-bottom:8px">超限时从上到下依次求值：<b>切换备用 Provider</b> 按其列表逐个尝试，首个成功即返回响应；全部失败或遇到 <b>拦截</b> 则终止。</div>' +
+            '<div id="strategy-list"></div>' +
+            '<button class="btn" id="add-strategy" style="margin-top:8px">+ 添加策略</button>' +
+            "</div>";
 
         html +=
             '<div class="row" style="align-items:center;gap:12px;margin-top:4px">' +
@@ -979,15 +964,194 @@
 
         $("content").innerHTML = html;
 
+        // 策略链状态（可变，编辑后整块重渲染）
+        var strategies = (r.strategies || []).map(function (s) {
+            return {
+                action: s.action || "stop_llm",
+                provider_ids: Array.isArray(s.provider_ids)
+                    ? s.provider_ids.slice()
+                    : [],
+                token_limit: s.token_limit || 0,
+                message: s.message || "",
+                enabled: s.enabled !== false,
+            };
+        });
+
+        function eachSel(sel, fn) {
+            var nodes = document.querySelectorAll(sel);
+            for (var k = 0; k < nodes.length; k++) fn(nodes[k]);
+        }
+
+        function renderStrategies() {
+            var box = $("strategy-list");
+            if (!box) return;
+            if (!strategies.length) {
+                box.innerHTML =
+                    '<div class="muted small">暂无策略（超限时默认拦截）</div>';
+                return;
+            }
+            var h = "";
+            strategies.forEach(function (s, i) {
+                var fb = s.action === "fallback_provider";
+                h +=
+                    '<div class="strategy-card' +
+                    (s.enabled ? "" : " is-disabled") +
+                    '">';
+                h += '<div class="strategy-head">';
+                h += '<span class="strategy-idx">' + (i + 1) + "</span>";
+                h += '<select class="s-action" data-i="' + i + '">';
+                h +=
+                    '<option value="stop_llm"' +
+                    (fb ? "" : " selected") +
+                    ">拦截 LLM 请求</option>";
+                h +=
+                    '<option value="fallback_provider"' +
+                    (fb ? " selected" : "") +
+                    ">切换备用 Provider</option>";
+                h += "</select>";
+                h +=
+                    '<label class="s-enabled"><input type="checkbox" class="s-enabled-cb" data-i="' +
+                    i +
+                    '"' +
+                    (s.enabled ? " checked" : "") +
+                    "> 启用</label>";
+                h += '<span class="strategy-move">';
+                h +=
+                    '<button type="button" class="move-btn" data-dir="up" data-i="' +
+                    i +
+                    '"' +
+                    (i === 0 ? " disabled" : "") +
+                    ">↑</button>";
+                h +=
+                    '<button type="button" class="move-btn" data-dir="down" data-i="' +
+                    i +
+                    '"' +
+                    (i === strategies.length - 1 ? " disabled" : "") +
+                    ">↓</button>";
+                h +=
+                    '<button type="button" class="move-btn del" data-dir="del" data-i="' +
+                    i +
+                    '">✕</button>';
+                h += "</span></div>"; // head
+                h += '<div class="strategy-field">';
+                if (fb) {
+                    h +=
+                        '<div class="field-row"><span class="muted small">备用 Provider（按序尝试）</span></div>';
+                    h += '<div class="provider-tags">';
+                    s.provider_ids.forEach(function (pid, j) {
+                        h +=
+                            '<span class="provider-tag">' +
+                            esc(pid) +
+                            '<button type="button" class="tag-del" data-i="' +
+                            i +
+                            '" data-j="' +
+                            j +
+                            '">✕</button></span>';
+                    });
+                    if (!s.provider_ids.length)
+                        h +=
+                            '<span class="muted small">（空，此策略将被跳过）</span>';
+                    h += "</div>";
+                    h +=
+                        '<div class="field-row"><input type="text" class="pid-input" data-i="' +
+                        i +
+                        '" placeholder="输入 Provider ID 后回车添加"></div>';
+                    h +=
+                        '<div class="field-row"><label>token 上限 <input type="number" min="0" class="s-token" data-i="' +
+                        i +
+                        '" value="' +
+                        (s.token_limit || 0) +
+                        '" style="width:100px"> <span class="muted small">截断历史，0=不限</span></label></div>';
+                } else {
+                    // 文本值由 JS 回填（esc 不转义引号，避免属性注入）
+                    h +=
+                        '<div class="field-row"><label>拦截文案 <input type="text" class="s-message" data-i="' +
+                        i +
+                        '" style="flex:1" placeholder="留空=默认文案"></label></div>';
+                }
+                h += "</div></div>"; // field + card
+            });
+            box.innerHTML = h;
+            eachSel(".s-message", function (el) {
+                el.value = strategies[+el.dataset.i].message || "";
+            });
+            wireStrategyEvents();
+        }
+
+        function wireStrategyEvents() {
+            eachSel(".s-action", function (el) {
+                el.onchange = function () {
+                    strategies[+el.dataset.i].action = el.value;
+                    renderStrategies();
+                };
+            });
+            eachSel(".s-enabled-cb", function (el) {
+                el.onchange = function () {
+                    strategies[+el.dataset.i].enabled = el.checked;
+                    renderStrategies();
+                };
+            });
+            eachSel(".move-btn", function (el) {
+                el.onclick = function () {
+                    var i = +el.dataset.i;
+                    var dir = el.dataset.dir;
+                    if (dir === "del") {
+                        strategies.splice(i, 1);
+                    } else if (dir === "up" && i > 0) {
+                        strategies.splice(i - 1, 2, strategies[i], strategies[i - 1]);
+                    } else if (dir === "down" && i < strategies.length - 1) {
+                        strategies.splice(i, 2, strategies[i + 1], strategies[i]);
+                    }
+                    renderStrategies();
+                };
+            });
+            eachSel(".tag-del", function (el) {
+                el.onclick = function () {
+                    strategies[+el.dataset.i].provider_ids.splice(+el.dataset.j, 1);
+                    renderStrategies();
+                };
+            });
+            eachSel(".pid-input", function (el) {
+                el.onkeydown = function (e) {
+                    if (e.key === "Enter" || e.keyCode === 13) {
+                        e.preventDefault();
+                        var v = el.value.trim();
+                        if (v) {
+                            strategies[+el.dataset.i].provider_ids.push(v);
+                            renderStrategies();
+                        }
+                    }
+                };
+            });
+            eachSel(".s-token", function (el) {
+                el.onchange = function () {
+                    strategies[+el.dataset.i].token_limit = +el.value || 0;
+                };
+            });
+            eachSel(".s-message", function (el) {
+                el.onchange = function () {
+                    strategies[+el.dataset.i].message = el.value;
+                };
+            });
+        }
+
+        renderStrategies();
+
+        $("add-strategy").onclick = function () {
+            strategies.push({
+                action: "stop_llm",
+                provider_ids: [],
+                token_limit: 0,
+                message: "",
+                enabled: true,
+            });
+            renderStrategies();
+        };
+
         $("save-budgets").onclick = async function () {
             var body = {
                 budgets: {},
-                over_limit_policy: {
-                    action: $("p-action").value,
-                    fallback_provider_id: $("p-fallback_provider_id").value.trim(),
-                    fallback_token_limit: +$("p-fallback_token_limit").value || 0,
-                    block_wake_words_after_limit: $("p-block_wake").checked,
-                },
+                over_limit_strategies: strategies,
             };
             var inputs = document.querySelectorAll(".budget-input");
             for (var i = 0; i < inputs.length; i++) {

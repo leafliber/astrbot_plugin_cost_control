@@ -12,6 +12,12 @@ from cost_control.budget import (
     month_window_start,
     resolve_tz,
     total_tokens,
+    truncate_contexts,
+)
+from cost_control.config import (
+    enabled_strategies,
+    migrate_legacy_policy,
+    normalize_strategy,
 )
 from cost_control.schedule import hhmm_to_cron
 
@@ -111,3 +117,113 @@ def test_resolve_tz_fallback_on_missing_or_bad():
     assert resolve_tz(_FakeCtx({})) == ZoneInfo("Asia/Shanghai")
     assert resolve_tz(_FakeCtx({"timezone": "bogus/zone"})) == ZoneInfo("Asia/Shanghai")
     assert resolve_tz(None) == ZoneInfo("Asia/Shanghai")
+
+
+# ===== 超限策略链纯函数 =====
+
+
+def test_normalize_strategy_valid():
+    s = normalize_strategy(
+        {
+            "action": "fallback_provider",
+            "provider_ids": ["p1", "p2"],
+            "token_limit": 1000,
+            "message": "x",
+            "enabled": False,
+        }
+    )
+    assert s["action"] == "fallback_provider"
+    assert s["provider_ids"] == ["p1", "p2"]
+    assert s["token_limit"] == 1000
+    assert s["message"] == "x"
+    assert s["enabled"] is False
+
+
+def test_normalize_strategy_non_dict_defaults_stop():
+    s = normalize_strategy("garbage")
+    assert s["action"] == "stop_llm"
+    assert s["provider_ids"] == []
+    assert s["token_limit"] == 0
+    assert s["enabled"] is True
+
+
+def test_normalize_strategy_invalid_action_falls_back():
+    s = normalize_strategy({"action": "bogus"})
+    assert s["action"] == "stop_llm"
+
+
+def test_normalize_strategy_provider_ids_from_string():
+    assert normalize_strategy({"provider_ids": "a, b ,c"})["provider_ids"] == ["a", "b", "c"]
+
+
+def test_normalize_strategy_provider_ids_from_list():
+    assert normalize_strategy({"provider_ids": ["x", 1, "", "  "]})["provider_ids"] == ["x", "1"]
+
+
+def test_normalize_strategy_token_limit_bad_to_zero():
+    assert normalize_strategy({"token_limit": "abc"})["token_limit"] == 0
+    assert normalize_strategy({"token_limit": -5})["token_limit"] == 0
+
+
+def test_migrate_legacy_policy_fallback():
+    out = migrate_legacy_policy(
+        {
+            "action": "fallback_provider",
+            "fallback_provider_id": "p1",
+            "fallback_token_limit": 2000,
+        }
+    )
+    assert len(out) == 1
+    assert out[0]["action"] == "fallback_provider"
+    assert out[0]["provider_ids"] == ["p1"]
+    assert out[0]["token_limit"] == 2000
+
+
+def test_migrate_legacy_policy_fallback_no_id():
+    out = migrate_legacy_policy({"action": "fallback_provider"})
+    assert out[0]["provider_ids"] == []
+
+
+def test_migrate_legacy_policy_stop():
+    out = migrate_legacy_policy({"action": "stop_llm"})
+    assert len(out) == 1
+    assert out[0]["action"] == "stop_llm"
+
+
+def test_migrate_legacy_policy_empty():
+    assert migrate_legacy_policy({}) == []
+    assert migrate_legacy_policy(None) == []
+
+
+def test_enabled_strategies_filters_and_preserves_order():
+    raw = [
+        {"action": "fallback_provider", "provider_ids": ["a"], "enabled": True},
+        {"action": "stop_llm", "enabled": False},  # 禁用 → 过滤
+        {"action": "stop_llm", "enabled": True},
+    ]
+    out = enabled_strategies(raw)
+    assert [s["action"] for s in out] == ["fallback_provider", "stop_llm"]
+    assert out[0]["provider_ids"] == ["a"]
+
+
+def test_enabled_strategies_non_list():
+    assert enabled_strategies(None) == []
+    assert enabled_strategies("nope") == []
+
+
+def test_truncate_contexts_no_limit_returns_all():
+    ctx = ["a", "b", "c"]
+    assert truncate_contexts(ctx, 0) == ["a", "b", "c"]
+
+
+def test_truncate_contexts_keeps_recent_within_limit():
+    # 每条约 100 token（400 ASCII 字符 × 0.25）
+    a, b, c = "a" * 400, "b" * 400, "c" * 400
+    out = truncate_contexts([a, b, c], 250)
+    # 总 300 > 250，保留最近两条（b、c），原序
+    assert out == [b, c]
+
+
+def test_truncate_contexts_empty():
+    assert truncate_contexts([], 100) == []
+    assert truncate_contexts(None, 100) == []

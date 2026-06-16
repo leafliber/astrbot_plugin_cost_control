@@ -92,12 +92,11 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "global_monthly": 0,
     },
     "pricing": {},  # 用户自定义覆盖 DEFAULT_PRICING；为空时只用默认表
-    "over_limit_policy": {
-        "action": "stop_llm",
-        "fallback_provider_id": "",
-        "fallback_token_limit": 0,
-        "block_wake_words_after_limit": False,
-    },
+    # 超限处理策略链（有序列表）：超限时按序求值。fallback_provider 按
+    # provider_ids 列表逐个尝试备用 Provider；stop_llm 硬拦截。详见 budget.py。
+    "over_limit_strategies": [
+        {"action": "stop_llm", "message": "", "enabled": True},
+    ],
     "refresh_time": "00:00",
     "match_unique_session": False,
     "cache_diag": {
@@ -127,6 +126,110 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "retain_days": 90,
     },
 }
+
+
+# 超限策略合法动作白名单。
+_VALID_STRATEGY_ACTIONS = ("fallback_provider", "stop_llm")
+
+
+def normalize_strategy(raw: Any) -> dict[str, Any]:
+    """规范化单条超限策略（纯函数，非法值一律兜底，绝不抛异常）。
+
+    返回形如 ``{"action","provider_ids","token_limit","message","enabled"}`` 的 dict。
+    非法 / 缺失 action → ``"stop_llm"``；``provider_ids`` 容错为 ``list[str]``
+    （接受单字符串、逗号分隔串、列表）。
+
+    Args:
+        raw: 原始策略对象（通常来自用户配置或前端）。
+
+    Returns:
+        规范化后的策略 dict。
+    """
+    if not isinstance(raw, dict):
+        return {
+            "action": "stop_llm",
+            "provider_ids": [],
+            "token_limit": 0,
+            "message": "",
+            "enabled": True,
+        }
+    action = str(raw.get("action") or "").strip()
+    if action not in _VALID_STRATEGY_ACTIONS:
+        action = "stop_llm"
+    pids_raw = raw.get("provider_ids")
+    pids: list[str] = []
+    if isinstance(pids_raw, str):
+        pids = [p.strip() for p in pids_raw.split(",") if p.strip()]
+    elif isinstance(pids_raw, (list, tuple)):
+        for p in pids_raw:
+            s = str(p).strip()
+            if s:
+                pids.append(s)
+    try:
+        token_limit = max(0, int(raw.get("token_limit", 0) or 0))
+    except (TypeError, ValueError):
+        token_limit = 0
+    message = str(raw.get("message", "") or "")
+    enabled = bool(raw.get("enabled", True))
+    return {
+        "action": action,
+        "provider_ids": pids,
+        "token_limit": token_limit,
+        "message": message,
+        "enabled": enabled,
+    }
+
+
+def migrate_legacy_policy(policy: Any) -> list[dict[str, Any]]:
+    """把遗留的单对象 ``over_limit_policy`` 迁移为 1 元素策略列表（纯函数）。
+
+    ``action=="fallback_provider"`` 时保留原 ``fallback_provider_id`` →
+    ``provider_ids``、``fallback_token_limit`` → ``token_limit``；其余（含
+    ``stop_llm``）迁移为单条 ``stop_llm`` 策略。空 / 非对象返回 ``[]``。
+    """
+    if not isinstance(policy, dict) or not policy:
+        return []
+    action = str(policy.get("action") or "").strip()
+    if action == "fallback_provider":
+        pid = str(policy.get("fallback_provider_id", "") or "").strip()
+        try:
+            tl = max(0, int(policy.get("fallback_token_limit", 0) or 0))
+        except (TypeError, ValueError):
+            tl = 0
+        return [
+            {
+                "action": "fallback_provider",
+                "provider_ids": [pid] if pid else [],
+                "token_limit": tl,
+                "message": "",
+                "enabled": True,
+            }
+        ]
+    return [
+        {
+            "action": "stop_llm",
+            "provider_ids": [],
+            "token_limit": 0,
+            "message": "",
+            "enabled": True,
+        }
+    ]
+
+
+def enabled_strategies(strategies: Any) -> list[dict[str, Any]]:
+    """返回已启用且 action 合法的策略（保持原顺序，纯函数）。
+
+    输入先逐条过 :func:`normalize_strategy`（保证字段齐全 / 合法），
+    再过滤 ``enabled`` 为假者。
+    """
+    if not isinstance(strategies, (list, tuple)):
+        return []
+    out: list[dict[str, Any]] = []
+    for s in strategies:
+        n = normalize_strategy(s)
+        if n["enabled"] and n["action"] in _VALID_STRATEGY_ACTIONS:
+            out.append(n)
+    return out
 
 
 def get_config(config: dict[str, Any] | None, key: str, default: Any = None) -> Any:

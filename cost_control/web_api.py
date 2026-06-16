@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import Any
 
 from .budget import resolve_tz
-from .config import get_config
+from .config import get_config, migrate_legacy_policy, normalize_strategy
 
 PLUGIN_NAME = "astrbot_plugin_cost_control"
 
@@ -52,7 +52,7 @@ class WebApiMixin:
     # 兄弟 Mixin 提供。
     build_report: Any
     get_budgets: Any
-    get_over_limit_policy: Any
+    get_over_limit_strategies: Any
     query_usage: Any
     query_usage_grouped: Any
     query_supplements: Any
@@ -458,7 +458,7 @@ class WebApiMixin:
             return self._ok(
                 {
                     "limits": limits,
-                    "policy": self.get_over_limit_policy(),
+                    "strategies": self.get_over_limit_strategies(),
                     "dimensions": {
                         "global_daily": _dim("global_daily", day_total),
                         "global_monthly": _dim("global_monthly", month_total),
@@ -641,18 +641,14 @@ class WebApiMixin:
         "global_daily",
         "global_monthly",
     )
-    _SAVE_POLICY_KEYS = (
-        "action",
-        "fallback_provider_id",
-        "fallback_token_limit",
-        "block_wake_words_after_limit",
-    )
 
     def _validate_save_payload(self, body: Any) -> tuple[dict[str, Any] | None, str]:
         """校验 save_config 请求体，返回合并后的配置或错误信息。
 
         ``self.config.save_config`` 是浅合并（整体替换顶层 key），故 budgets 必须含
-        5 个 key、policy 必须含 4 个 key——缺失者从现有配置补齐，防覆盖丢字段。
+        5 个 key——缺失者从现有配置补齐，防覆盖丢字段。``over_limit_strategies`` 为
+        策略链数组，逐条过 :func:`normalize_strategy` 规范化后整体替换；兼容遗留
+        ``over_limit_policy`` 单对象（迁移为 1 元素列表）。
         返回 ``(merged_or_None, error_msg)``；成功时 ``error_msg`` 为空串。
         """
         if not isinstance(body, dict):
@@ -681,44 +677,25 @@ class WebApiMixin:
                         out_b[k] = 0
             merged["budgets"] = out_b
 
-        if "over_limit_policy" in body:
-            sub = body.get("over_limit_policy")
-            if not isinstance(sub, dict):
-                return None, "over_limit_policy 必须是对象"
-            cur_policy = cfg.get("over_limit_policy", {}) if isinstance(cfg, dict) else {}
-            if not isinstance(cur_policy, dict):
-                cur_policy = {}
-            out_p: dict[str, Any] = {}
-            for k in self._SAVE_POLICY_KEYS:
-                if k in sub:
-                    v = sub[k]
-                    if k == "action":
-                        v = str(v) if v is not None else "stop_llm"
-                        if v not in ("stop_llm", "fallback_provider"):
-                            return None, "action 必须是 stop_llm 或 fallback_provider"
-                        out_p[k] = v
-                    elif k == "fallback_provider_id":
-                        out_p[k] = str(v or "")
-                    elif k == "fallback_token_limit":
-                        try:
-                            out_p[k] = max(0, int(v))
-                        except (TypeError, ValueError):
-                            return None, "fallback_token_limit 必须是整数"
-                    elif k == "block_wake_words_after_limit":
-                        out_p[k] = bool(v)
-                else:
-                    out_p[k] = cur_policy.get(k)
-            merged["over_limit_policy"] = out_p
+        if "over_limit_strategies" in body:
+            sub = body.get("over_limit_strategies")
+            if not isinstance(sub, list):
+                return None, "over_limit_strategies 必须是数组"
+            merged["over_limit_strategies"] = [normalize_strategy(s) for s in sub]
+        elif "over_limit_policy" in body:
+            # 遗留兼容：旧前端 / 旧调用仍发单对象 over_limit_policy → 迁移为策略链
+            migrated = migrate_legacy_policy(body.get("over_limit_policy"))
+            merged["over_limit_strategies"] = migrated if migrated else ([normalize_strategy({})])
 
         if not merged:
-            return None, "未提供可更新的配置（仅支持 budgets / over_limit_policy）"
+            return None, "未提供可更新的配置（仅支持 budgets / over_limit_strategies）"
         return merged, ""
 
     async def api_action_save_config(self, **kwargs: Any) -> dict[str, Any]:
         """``POST /actions/save_config``：保存预算 / 策略配置（热生效，无需重载）。
 
-        只接受白名单顶层 key（``budgets`` / ``over_limit_policy``），类型校验 + 补齐
-        缺失 key 后调用 ``self.config.save_config(merged)``——同步更新内存 + 落盘
+        只接受白名单顶层 key（``budgets`` / ``over_limit_strategies``），类型校验 +
+        规范化后调用 ``self.config.save_config(merged)``——同步更新内存 + 落盘
         ``data/config/<plugin>_config.json``，立即对后续 ``check_budget`` 生效。
         """
         try:
