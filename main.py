@@ -74,7 +74,7 @@ class Main(
         schema 仅保留开关。
         """
         try:
-            from .config import (
+            from .cost_control.config import (
                 CONFIG_DEFAULTS,
                 deep_merge,
                 load_plugin_config,
@@ -90,7 +90,7 @@ class Main(
             )
         except Exception as e:
             logger.warning("[cost_control] 加载运行时配置失败，使用默认值: %s", e)
-            from .config import CONFIG_DEFAULTS
+            from .cost_control.config import CONFIG_DEFAULTS
 
             self.cfg = dict(CONFIG_DEFAULTS)
         try:
