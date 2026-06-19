@@ -609,6 +609,8 @@ class WebApiMixin:
                             "type": getattr(r, "type", "") or "",
                             "severity": getattr(r, "severity", "medium") or "medium",
                             "detail": getattr(r, "detail", "") or "",
+                            "before": getattr(r, "before", None),
+                            "after": getattr(r, "after", None),
                             "created_at": created.isoformat() if created else None,
                         }
                     )

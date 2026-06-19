@@ -794,3 +794,68 @@ code {
     align-items: center;
     gap: 6px;
 }
+
+/* ===== 缓存诊断：可展开事件行 ===== */
+.cache-events td {
+    vertical-align: top;
+}
+
+.cache-event-row {
+    cursor: pointer;
+}
+
+.cache-event-row .toggle {
+    text-align: right;
+    color: var(--text-dim);
+    width: 1.5em;
+    user-select: none;
+}
+
+.cache-evt-title {
+    font-weight: 600;
+}
+
+.cache-event-detail > td {
+    background: var(--panel-2);
+    padding: 12px 14px;
+}
+
+.diff-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 8px;
+}
+
+.diff-row {
+    display: grid;
+    grid-template-columns: 84px auto 14px auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.diff-label {
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.diff-before,
+.diff-after {
+    font-size: 12px;
+}
+
+.diff-arrow {
+    color: var(--text-dim);
+    text-align: center;
+}
+
+.diff-changed .diff-before,
+.diff-changed .diff-after {
+    color: var(--warn);
+    font-weight: 600;
+}
+
+.diff-tip {
+    font-size: 13px;
+    margin-bottom: 4px;
+}

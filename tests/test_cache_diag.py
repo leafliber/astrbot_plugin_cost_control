@@ -72,6 +72,30 @@ def test_diagnose_flags_disable():
     assert "context_reset" not in types
 
 
+def test_diagnose_includes_before_after():
+    last = _sig(8, system_hash="a", tools_hash="x")
+    cur = _sig(3, system_hash="a", tools_hash="x")  # 触发 context_reset
+    evs = diagnose_changes(cur, last, {})
+    reset = next(e for e in evs if e["type"] == "context_reset")
+    # 裁剪后的前后签名落库，便于前端结构化对比
+    assert reset["before"] == {
+        "history_len": 8,
+        "system_hash": "a",
+        "tools_hash": "x",
+        "contexts_count": 8,
+    }
+    assert reset["after"]["history_len"] == 3
+    assert reset["after"]["contexts_count"] == 3
+
+
+def test_diagnose_order_drift_has_diverge():
+    last = _sig(3, hashes=["a", "b", "c"])
+    cur = _sig(4, hashes=["a", "b", "d", "e"])  # 下标 2 开始分歧
+    evs = diagnose_changes(cur, last, {})
+    drift = next(e for e in evs if e["type"] == "order_drift")
+    assert drift["after"]["first_diverge_at"] == 2
+
+
 # ===== CacheEvent 落库（集成，内存 sqlite，不依赖 StarTools/真实 astrbot） =====
 
 
@@ -94,7 +118,24 @@ async def test_cache_event_save_query():
     store._session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     await store.save_cache_event(
-        {"umo": "s1", "type": "context_reset", "severity": "high", "detail": "重置"}
+        {
+            "umo": "s1",
+            "type": "context_reset",
+            "severity": "high",
+            "detail": "重置",
+            "before": {
+                "history_len": 8,
+                "system_hash": "a",
+                "tools_hash": "x",
+                "contexts_count": 8,
+            },
+            "after": {
+                "history_len": 3,
+                "system_hash": "a",
+                "tools_hash": "x",
+                "contexts_count": 3,
+            },
+        }
     )
     await store.save_cache_event(
         {"umo": "s1", "type": "tools_change", "severity": "medium", "detail": "工具变"}
@@ -106,6 +147,10 @@ async def test_cache_event_save_query():
     by_s1 = await store.query_cache_events(umo="s1", limit=10)
     assert len(by_s1) == 2
     assert all(getattr(r, "umo") == "s1" for r in by_s1)
+    # before/after 结构化字段正确落库并可查回
+    reset_row = next(r for r in by_s1 if getattr(r, "type") == "context_reset")
+    assert reset_row.before["history_len"] == 8
+    assert reset_row.after["history_len"] == 3
 
     all_rows = await store.query_cache_events(limit=10)
     assert len(all_rows) == 3

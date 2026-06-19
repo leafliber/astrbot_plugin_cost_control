@@ -40,6 +40,21 @@ def _hash_text(s: Any) -> str:
         return ""
 
 
+def _summarize(sig: dict[str, Any]) -> dict[str, Any]:
+    """把上下文签名裁剪为紧凑、可对比的结构（纯函数）。
+
+    不保留完整 ``contexts_hashes`` 列表（可能很长且对展示无价值），只取长度。
+    输出供 ``CacheEvent.before/after`` 落库，前端做结构化前后对比展示。
+    """
+    hashes = list(sig.get("contexts_hashes", []) or [])
+    return {
+        "history_len": int(sig.get("history_len", 0) or 0),
+        "system_hash": str(sig.get("system_hash", "") or ""),
+        "tools_hash": str(sig.get("tools_hash", "") or ""),
+        "contexts_count": len(hashes),
+    }
+
+
 def hit_rate(
     cache_read: int | None,
     input_other: int | None,
@@ -74,9 +89,14 @@ def diagnose_changes(
             ``detect_order_drift``，缺省视为 True。
 
     Returns:
-        事件列表，每项 ``{"type", "severity", "detail"}``；无问题返回空。
+        事件列表，每项 ``{"type", "severity", "detail", "before", "after"}``；
+        ``before``/``after`` 为裁剪后的上一轮 / 本轮上下文签名（见
+        :func:`_summarize`），供前端做结构化前后对比展示；``order_drift`` 的
+        ``after`` 额外含 ``first_diverge_at``（首个不一致下标）。无问题返回空。
     """
     events: list[dict[str, Any]] = []
+    before = _summarize(last)
+    after = _summarize(current)
 
     def on(name: str) -> bool:
         return bool(flags.get(name, True))
@@ -90,6 +110,8 @@ def diagnose_changes(
                     "type": "context_reset",
                     "severity": "high",
                     "detail": f"历史长度骤降 {last_len} → {cur_len}，缓存大概率全失效",
+                    "before": before,
+                    "after": after,
                 }
             )
 
@@ -101,6 +123,8 @@ def diagnose_changes(
                         "type": "system_prompt_change",
                         "severity": "high",
                         "detail": "system prompt 内容变化，前缀缓存失效",
+                        "before": before,
+                        "after": after,
                     }
                 )
 
@@ -113,6 +137,8 @@ def diagnose_changes(
                         "type": "tools_change",
                         "severity": "medium",
                         "detail": "工具定义变化，破坏缓存键",
+                        "before": before,
+                        "after": after,
                     }
                 )
 
@@ -122,11 +148,19 @@ def diagnose_changes(
         if last_hashes and len(cur_hashes) >= len(last_hashes):
             # 正常追加：本轮前 len(last) 条应与上一轮完全一致
             if cur_hashes[: len(last_hashes)] != last_hashes:
+                # 找首个不一致下标，供前端精确定位漂移位置
+                diverge = 0
+                for i, h in enumerate(last_hashes):
+                    if i >= len(cur_hashes) or cur_hashes[i] != h:
+                        diverge = i
+                        break
                 events.append(
                     {
                         "type": "order_drift",
                         "severity": "medium",
                         "detail": "历史消息顺序或内容漂移，前缀缓存失效",
+                        "before": before,
+                        "after": {**after, "first_diverge_at": diverge},
                     }
                 )
 
@@ -205,6 +239,8 @@ class CacheDiagMixin:
                             "type": ev.get("type", ""),
                             "severity": ev.get("severity", "medium"),
                             "detail": ev.get("detail", ""),
+                            "before": ev.get("before"),
+                            "after": ev.get("after"),
                         }
                     )
                 except Exception:

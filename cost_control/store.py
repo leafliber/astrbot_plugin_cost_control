@@ -83,6 +83,11 @@ class CacheEvent(SQLModel, table=True):  # type: ignore[call-arg]
     type: str = Field(index=True)
     severity: str = Field(default="medium")
     detail: str = Field(default="")
+    # 上一轮 / 本轮裁剪后的上下文签名（history_len / system_hash / tools_hash /
+    # contexts_count；order_drift 的 after 额外含 first_diverge_at）。供前端做
+    # 结构化前后对比展示（替代仅一句 detail 文案）。
+    before: dict[str, Any] | None = Field(default=None, sa_type=JSON)
+    after: dict[str, Any] | None = Field(default=None, sa_type=JSON)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         index=True,
@@ -240,6 +245,8 @@ class StoreMixin:
             type=str(record.get("type", "") or ""),
             severity=str(record.get("severity", "medium") or "medium"),
             detail=str(record.get("detail", "") or ""),
+            before=record.get("before"),
+            after=record.get("after"),
             created_at=record.get("created_at") or datetime.now(UTC),
         )
         maker = await self._ensure_session_maker()

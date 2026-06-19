@@ -1260,6 +1260,89 @@
     }
 
     // ===== 缓存 / 归因 / 定价 / 设置（沿用既有实现） =====
+    // 缓存破坏事件类型元数据：标题 + 处置建议（渲染与文案分离）。
+    var CACHE_EVENT_META = {
+        context_reset: {
+            title: "上下文重置",
+            tip: "检查上下文是否被截断 / 会话被重置 / 历史被清空",
+        },
+        system_prompt_change: {
+            title: "system 变更",
+            tip: "稳定 system prompt，避免每轮改动前缀导致缓存失效",
+        },
+        tools_change: {
+            title: "工具定义变更",
+            tip: "保持 func_tool 集合稳定，避免增删工具破坏缓存键",
+        },
+        order_drift: {
+            title: "顺序漂移",
+            tip: "避免重排或改写历史消息，保持追加式增长",
+        },
+    };
+
+    function cacheEvtMeta(t) {
+        return (
+            CACHE_EVENT_META[t] || { title: t || "?", tip: "" }
+        );
+    }
+
+    function cacheDiffText(type, b, a) {
+        b = b || {};
+        a = a || {};
+        function nz(v) {
+            return v != null ? v : "-";
+        }
+        if (type === "context_reset")
+            return "历史 " + nz(b.history_len) + " → " + nz(a.history_len);
+        if (type === "system_prompt_change")
+            return "system " + (b.system_hash || "-") + " → " + (a.system_hash || "-");
+        if (type === "tools_change")
+            return "tools " + (b.tools_hash || "-") + " → " + (a.tools_hash || "-");
+        if (type === "order_drift") return "首个分歧 #" + nz(a.first_diverge_at);
+        return "";
+    }
+
+    function cacheDetailHtml(ev, m) {
+        var b = ev.before || {};
+        var a = ev.after || {};
+        function row(label, bv, av) {
+            var changed = String(bv) !== String(av);
+            return (
+                '<div class="diff-row' +
+                (changed ? " diff-changed" : "") +
+                '"><span class="diff-label">' +
+                esc(label) +
+                '</span><span class="diff-before mono">' +
+                esc(bv != null ? bv : "-") +
+                '</span><span class="diff-arrow">→</span><span class="diff-after mono">' +
+                esc(av != null ? av : "-") +
+                "</span></div>"
+            );
+        }
+        var out =
+            '<div class="diff-grid">' +
+            row("历史长度", b.history_len, a.history_len) +
+            row("system hash", b.system_hash, a.system_hash) +
+            row("tools hash", b.tools_hash, a.tools_hash);
+        if (ev.type === "order_drift" && a.first_diverge_at != null) {
+            out +=
+                '<div class="diff-row diff-changed"><span class="diff-label">首个分歧</span>' +
+                '<span class="diff-before mono"></span><span class="diff-arrow"></span>' +
+                '<span class="diff-after mono">#' +
+                esc(a.first_diverge_at) +
+                "</span></div>";
+        }
+        out += "</div>";
+        if (m.tip)
+            out +=
+                '<div class="diff-tip"><strong>处置建议：</strong>' +
+                esc(m.tip) +
+                "</div>";
+        if (ev.detail)
+            out += '<div class="muted small">' + esc(ev.detail) + "</div>";
+        return out;
+    }
+
     async function loadCache() {
         setLoading();
         try {
@@ -1291,29 +1374,61 @@
                 html += '<div class="empty">未检测到缓存破坏事件</div>';
             } else {
                 html +=
-                    '<table><thead><tr><th>类型</th><th>严重度</th><th>会话</th><th>详情</th></tr></thead><tbody>';
-                events
-                    .slice()
-                    .reverse()
-                    .forEach(function (ev) {
-                        var sev = (ev.severity || "low").toLowerCase();
-                        html +=
-                            "<tr><td>" +
-                            esc(ev.type || "?") +
-                            '</td><td><span class="tag sev-' +
-                            sev +
-                            '">' +
-                            esc(ev.severity || "-") +
-                            "</span></td><td class='mono'>" +
-                            esc(ev.umo || "-") +
-                            "</td><td>" +
-                            esc(ev.detail || "") +
-                            "</td></tr>";
-                    });
+                    '<table class="cache-events"><thead><tr><th>类型</th><th>严重度</th>' +
+                    "<th>会话</th><th>时间</th><th>前后变化</th><th></th></tr></thead><tbody>";
+                events.forEach(function (ev, i) {
+                    var sev = (ev.severity || "low").toLowerCase();
+                    var m = cacheEvtMeta(ev.type);
+                    var diff = cacheDiffText(ev.type, ev.before, ev.after);
+                    html +=
+                        '<tr class="cache-event-row" data-idx="' +
+                        i +
+                        '"><td><span class="cache-evt-title">' +
+                        esc(m.title) +
+                        '</span><div class="muted small">' +
+                        esc(ev.type || "") +
+                        '</div></td><td><span class="tag sev-' +
+                        sev +
+                        '">' +
+                        esc(ev.severity || "-") +
+                        '</span></td><td class="mono" title="' +
+                        esc(ev.umo || "") +
+                        '">' +
+                        esc(ev.umo || "-") +
+                        '</td><td class="nowrap">' +
+                        shortTime(ev.created_at) +
+                        '</td><td class="mono small">' +
+                        esc(diff) +
+                        '</td><td class="toggle">▶</td></tr>';
+                    html +=
+                        '<tr class="cache-event-detail" data-detail="' +
+                        i +
+                        '" hidden><td colspan="6">' +
+                        cacheDetailHtml(ev, m) +
+                        "</td></tr>";
+                });
                 html += "</tbody></table>";
             }
             html += "</div>";
             $("content").innerHTML = html;
+            var rows = document.querySelectorAll(".cache-event-row");
+            Array.prototype.forEach.call(rows, function (row) {
+                row.addEventListener("click", function () {
+                    var idx = row.getAttribute("data-idx");
+                    var detail = document.querySelector(
+                        '.cache-event-detail[data-detail="' + idx + '"]'
+                    );
+                    var toggle = row.querySelector(".toggle");
+                    if (!detail) return;
+                    if (detail.hasAttribute("hidden")) {
+                        detail.removeAttribute("hidden");
+                        if (toggle) toggle.textContent = "▼";
+                    } else {
+                        detail.setAttribute("hidden", "");
+                        if (toggle) toggle.textContent = "▶";
+                    }
+                });
+            });
         } catch (e) {
             setError("加载缓存诊断失败：" + esc(e.message));
         }
