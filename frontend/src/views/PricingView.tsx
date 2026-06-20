@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { fmtNum } from "../lib/format";
@@ -101,7 +101,7 @@ export function PricingView() {
     }
   };
 
-  const defaultKeys = useMemo(() => Object.keys(defaults).sort(), [defaults]);
+  const defaultKeys = Object.keys(defaults).sort();
 
   return (
     <div>
