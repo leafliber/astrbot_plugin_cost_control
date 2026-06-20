@@ -48,6 +48,7 @@ from .config import (
     save_plugin_config,
     switches_from_config,
 )
+from .default_pricing import DEFAULT_PRICING
 
 PLUGIN_NAME = "astrbot_plugin_cost_control"
 
@@ -665,12 +666,16 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_pricing(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /pricing``：模型单价表 + 有用量但未定价的模型告警。
+        """``GET /pricing``：模型单价表 + 有用量但未定价的模型告警 + 内置默认表。
 
-        返回 ``{pricing: {model: prices}, unpriced: [{model, tokens, count}]}``。
-        ``unpriced`` 取全量历史（``query_usage_grouped(by="model")``）中
-        :func:`cost.match_pricing` 匹配不到单价的模型——这些模型的成本被计为 0，
-        会使整体成本统计偏低，需提示用户补单价。附 token 量表明失真影响范围。
+        返回 ``{pricing, unpriced, defaults}``：
+
+        - ``pricing``：生效表（内置默认 ⊕ 用户 ``pricing`` 配置覆盖）。
+        - ``defaults``：内置出厂默认单价（``DEFAULT_PRICING``，参考 OpenRouter），
+          供前端折叠区只读展示与「重置为默认」基准。
+        - ``unpriced``：全量历史（``query_usage_grouped(by="model")``）中
+          :func:`cost.match_pricing` 匹配不到单价的模型——这些模型的成本被计为 0，
+          会使整体成本统计偏低，需提示用户补单价。附 token 量表明失真影响范围。
         """
         try:
             from .cost import match_pricing
@@ -697,7 +702,7 @@ class WebApiMixin:
                 unpriced.sort(key=lambda x: x["tokens"], reverse=True)
             except Exception:
                 pass  # 用量查询失败不阻断定价表展示
-            return self._ok({"pricing": pricing, "unpriced": unpriced})
+            return self._ok({"pricing": pricing, "unpriced": unpriced, "defaults": DEFAULT_PRICING})
         except Exception as e:
             return self._err(str(e))
 

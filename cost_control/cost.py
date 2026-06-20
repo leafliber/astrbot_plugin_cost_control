@@ -18,17 +18,35 @@ def match_pricing(
     model: str | None,
     pricing: dict[str, dict[str, float]],
 ) -> dict[str, float] | None:
-    """按模型名匹配单价表。精确匹配优先，否则取最长公共前缀（处理带日期后缀的模型名）。
+    """按模型名匹配单价表（精确 > 前缀 > 关键词模糊，均大小写不敏感）。
 
-    例如模型 ``claude-sonnet-4-5-20250929`` 会匹配到 ``claude-sonnet-4-5``。
+    逐级回退，每级取**最长候选**（最具体的 key 优先），命中即返回：
+
+    1. **精确匹配**（原名）；
+    2. **前缀匹配**：``model`` 以某单价 key 开头——处理带日期 / 版本后缀的模型名
+       （如 ``claude-sonnet-4-5-20250929`` → ``claude-sonnet-4-5``）；
+    3. **关键词模糊**：``model`` 包含某单价 key 作为子串——让实际调用中的变体名
+       命中内置预设（如厂商前缀 ``provider/qwen-max``、带后缀 ``qwen-max-20241115``、
+       大小写差异 ``GLM-4.5``）。
+
+    Args:
+        model: 实际模型名（可能带厂商前缀、版本 / 日期后缀、变体）。
+        pricing: 单价表（``get_pricing`` 返回）。
+
+    Returns:
+        匹配到的单价 dict，或 ``None``（无任何匹配）。
     """
     if not model:
         return None
     if model in pricing:
         return pricing[model]
-    candidates = [name for name in pricing if model.startswith(name)]
+    ml = model.lower()
+    candidates = [name for name in pricing if ml.startswith(name.lower())]
+    if not candidates:
+        # 关键词模糊：模型名包含单价 key（子串，大小写不敏感）
+        candidates = [name for name in pricing if name.lower() in ml]
     if candidates:
-        candidates.sort(key=len, reverse=True)
+        candidates.sort(key=len, reverse=True)  # 最长（最具体）优先
         return pricing[candidates[0]]
     return None
 

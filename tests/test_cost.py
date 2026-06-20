@@ -26,6 +26,26 @@ def test_match_pricing_empty():
     assert match_pricing(None, DEFAULT_PRICING) is None
 
 
+def test_match_pricing_keyword_substring():
+    # 实际调用名带厂商前缀 / 变体后缀，前缀匹配不到时靠关键词子串模糊命中预设
+    prices = match_pricing("dashscope/qwen3-max-20241115", DEFAULT_PRICING)
+    assert prices is not None
+    assert prices["input"] == 0.78
+
+
+def test_match_pricing_case_insensitive():
+    # 大小写不敏感：精确 / 前缀 / 子串各级均支持
+    assert match_pricing("QWEN3-MAX", DEFAULT_PRICING)["input"] == 0.78
+    assert match_pricing("GLM-4.5", DEFAULT_PRICING)["input"] == 0.6
+
+
+def test_match_pricing_longest_wins():
+    # 多个 key 同时命中时取最长（最具体）：gpt-4o-mini 优先于 gpt-4o
+    prices = match_pricing("gpt-4o-mini-2024-07-18", DEFAULT_PRICING)
+    assert prices is not None
+    assert prices["input"] == 0.15
+
+
 def test_compute_cost_basic_input():
     usage = {"token_input_other": 1_000_000, "token_input_cached": 0, "token_output": 0}
     cost = compute_cost_value(usage, "gpt-4o", DEFAULT_PRICING)
@@ -38,9 +58,10 @@ def test_compute_cost_mixed():
         "token_input_cached": 1_000_000,
         "token_output": 500_000,
     }
-    cost = compute_cost_value(usage, "gpt-4o", DEFAULT_PRICING)
-    # 1M*2.5 + 1M*1.25 + 0.5M*10 = 2.5 + 1.25 + 5.0 = 8.75
-    assert abs(cost - 8.75) < 1e-9
+    # gpt-4o-mini: input 0.15 / cached 0.075 / output 0.6
+    cost = compute_cost_value(usage, "gpt-4o-mini", DEFAULT_PRICING)
+    # 1M*0.15 + 1M*0.075 + 0.5M*0.6 = 0.15 + 0.075 + 0.30 = 0.525
+    assert abs(cost - 0.525) < 1e-9
 
 
 def test_compute_cost_unknown_model():

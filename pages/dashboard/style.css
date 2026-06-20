@@ -79,6 +79,10 @@ h1 {
     overflow: hidden;
 }
 
+.window-switch[hidden] {
+    display: none;
+}
+
 .win-btn {
     border: none;
     background: transparent;
@@ -858,4 +862,8 @@ code {
 .diff-tip {
     font-size: 13px;
     margin-bottom: 4px;
+}
+
+.pr-suggest-item:hover {
+    background: rgba(127, 127, 127, 0.14);
 }

@@ -1,7 +1,9 @@
 """配置读取辅助。
 
-提供模块级的 ``get_config`` / ``get_config`` 函数与 ``CONFIG_DEFAULTS``、
-``DEFAULT_PRICING`` 字典，供各 Mixin 统一读取 ``self.cfg``（merged 配置）。
+提供模块级的 ``get_config`` / ``get_pricing`` 函数与 ``CONFIG_DEFAULTS`` 字典，
+供各 Mixin 统一读取 ``self.cfg``（merged 配置）。内置默认单价表 ``DEFAULT_PRICING``
+定义在 :mod:`cost_control.default_pricing`（便于单独更新），此处 re-export 以保持
+``cost_control.config.DEFAULT_PRICING`` 访问路径不变。
 不做成 Mixin，避免污染 ``Main`` 的继承链。
 
 由于 AstrBot 重载时会裁剪 ``_conf_schema.json`` 之外的配置键（``check_config_integrity``），
@@ -18,73 +20,7 @@ import json
 import os
 from typing import Any
 
-# 内置常见模型的默认定价（USD / 百万 token）。
-# 字段含义：
-#   input          —— 非缓存输入 token（对应 ProviderStat.token_input_other）
-#   input_cached   —— 缓存命中输入 token（对应 ProviderStat.token_input_cached）
-#   output         —— 输出 token（对应 ProviderStat.token_output）
-#   cache_creation —— 缓存写入 token（Anthropic 原生字段，从 raw_completion 解析）
-# 价格随 provider 政策变动，用户可在 _conf_schema.json 的 pricing 项覆盖或新增。
-DEFAULT_PRICING: dict[str, dict[str, float]] = {
-    "claude-sonnet-4-5": {
-        "input": 3.0,
-        "input_cached": 0.3,
-        "output": 15.0,
-        "cache_creation": 3.75,
-    },
-    "claude-sonnet-4-5-20250929": {
-        "input": 3.0,
-        "input_cached": 0.3,
-        "output": 15.0,
-        "cache_creation": 3.75,
-    },
-    "claude-opus-4": {
-        "input": 15.0,
-        "input_cached": 1.5,
-        "output": 75.0,
-        "cache_creation": 18.75,
-    },
-    "claude-haiku-4-5": {
-        "input": 1.0,
-        "input_cached": 0.1,
-        "output": 5.0,
-        "cache_creation": 1.25,
-    },
-    "claude-3-5-sonnet": {
-        "input": 3.0,
-        "input_cached": 0.3,
-        "output": 15.0,
-        "cache_creation": 3.75,
-    },
-    "gpt-4o": {"input": 2.5, "input_cached": 1.25, "output": 10.0, "cache_creation": 2.5},
-    "gpt-4o-mini": {"input": 0.15, "input_cached": 0.075, "output": 0.6, "cache_creation": 0.15},
-    "gpt-4.1": {"input": 2.0, "input_cached": 0.5, "output": 8.0, "cache_creation": 2.0},
-    "gpt-4.1-mini": {"input": 0.4, "input_cached": 0.1, "output": 1.6, "cache_creation": 0.4},
-    "deepseek-chat": {
-        "input": 0.27,
-        "input_cached": 0.07,
-        "output": 1.1,
-        "cache_creation": 0.27,
-    },
-    "deepseek-reasoner": {
-        "input": 0.55,
-        "input_cached": 0.14,
-        "output": 2.19,
-        "cache_creation": 0.55,
-    },
-    "gemini-2.5-pro": {
-        "input": 1.25,
-        "input_cached": 0.31,
-        "output": 10.0,
-        "cache_creation": 1.25,
-    },
-    "gemini-2.5-flash": {
-        "input": 0.3,
-        "input_cached": 0.075,
-        "output": 2.5,
-        "cache_creation": 0.3,
-    },
-}
+from .default_pricing import DEFAULT_PRICING
 
 # 配置默认值。键名与 ``_conf_schema.json`` 的顶层项一一对应。
 # object 类型的配置项用嵌套 dict 表示默认值。

@@ -674,7 +674,6 @@
         var range = recordsRangeParams();
         var body =
             renderRecordsToolbar() +
-            '<div id="rec-body" class="loading">加载中…</div>' +
             '<div class="panel agg-panel"><div class="agg-head"><h2 style="margin:0">交叉聚合</h2>' +
             '<span class="agg-switch"><button class="agg-btn ' +
             (aggMode === "model" ? "active" : "") +
@@ -682,9 +681,25 @@
             '<button class="agg-btn ' +
             (aggMode === "umo" ? "active" : "") +
             '" data-agg="umo">按会话</button></span></div>' +
-            '<div id="rec-agg" class="loading">加载聚合…</div></div>';
+            '<div id="rec-agg" class="loading">加载聚合…</div></div>' +
+            '<div id="rec-body" class="loading">加载中…</div>';
         $("content").innerHTML = body;
         bindRecordsToolbar();
+        // 聚合
+        try {
+            var agg = await api("records/aggregate", {
+                by: aggMode,
+                umo: recordsFilter.umo,
+                provider: recordsFilter.provider,
+                model: recordsFilter.model,
+                start: range.start,
+                end: range.end,
+            });
+            renderRecordsAgg(agg);
+        } catch (e) {
+            $("rec-agg").innerHTML =
+                '<div class="muted">聚合失败：' + esc(e.message) + "</div>";
+        }
         // 明细
         try {
             var rows = await api("records", {
@@ -701,21 +716,6 @@
         } catch (e) {
             $("rec-body").innerHTML =
                 '<div class="error">加载失败：' + esc(e.message) + "</div>";
-        }
-        // 聚合
-        try {
-            var agg = await api("records/aggregate", {
-                by: aggMode,
-                umo: recordsFilter.umo,
-                provider: recordsFilter.provider,
-                model: recordsFilter.model,
-                start: range.start,
-                end: range.end,
-            });
-            renderRecordsAgg(agg);
-        } catch (e) {
-            $("rec-agg").innerHTML =
-                '<div class="muted">聚合失败：' + esc(e.message) + "</div>";
         }
     }
 
@@ -1549,13 +1549,14 @@
             var data = await api("pricing");
             var pricing = (data && data.pricing) || {};
             var unpriced = (data && data.unpriced) || [];
+            var defaults = (data && data.defaults) || {};
             var keys = Object.keys(pricing).sort();
             var html = "";
             if (unpriced.length) {
                 html +=
                     '<div class="panel alert-panel"><h2>未定价模型告警</h2>' +
                     '<div class="alert-body">以下模型有用量但未配置单价，其成本被计为 <strong>$0</strong>，' +
-                    "会导致成本统计偏低。请在插件配置的 <code>pricing</code> 项补充单价。</div>" +
+                    "会导致成本统计偏低。请在下方定价表补充单价。</div>" +
                     '<table><thead><tr><th>模型</th><th>用量 token</th><th>调用</th></tr></thead><tbody>';
                 unpriced.forEach(function (u) {
                     html +=
@@ -1569,34 +1570,233 @@
                 });
                 html += "</tbody></table></div>";
             }
-            if (!keys.length) {
-                html += '<div class="empty">暂无定价数据</div>';
-            } else {
+            // 可编辑定价表（主区）：展示生效表（默认 ⊕ 用户覆盖），全部可改
+            html +=
+                '<div class="panel"><h2>模型定价</h2>' +
+                '<div class="muted small" style="margin-bottom:8px">单位 USD / 百万 token。修改后点「保存」即时热生效；某项留空表示沿用默认值（不覆盖）。</div>' +
+                '<div class="row" style="gap:8px;margin-bottom:8px">' +
+                '<button class="btn" id="pr-add">+ 添加模型</button>' +
+                '<button class="btn" id="pr-reset" title="清空自定义定价，恢复内置默认">重置为内置默认</button></div>' +
+                '<div style="margin-bottom:8px">' +
+                '<input id="pr-search" class="budget-input" placeholder="搜索内置预设快速填充（输入 qwen / glm / doubao 等关键词）" style="width:100%">' +
+                '<div id="pr-suggest" style="max-height:170px;overflow:auto;margin-top:4px;border:1px solid var(--border);border-radius:6px"></div></div>' +
+                '<table id="pr-table"><thead><tr><th>模型</th><th>输入</th><th>缓存命中</th>' +
+                "<th>输出</th><th>缓存写入</th><th></th></tr></thead><tbody>";
+            keys.forEach(function (k) {
+                html += pricingRow(k, pricing[k]);
+            });
+            html += "</tbody></table>";
+            html +=
+                '<div class="row" style="margin-top:8px;gap:10px;align-items:center">' +
+                '<button class="btn primary" id="pr-save">保存定价（热生效）</button>' +
+                "<span id='pr-result' class='muted'></span></div></div>";
+            // 折叠内置默认（最后，只读参考）
+            var dkeys = Object.keys(defaults).sort();
+            if (dkeys.length) {
                 html +=
-                    '<div class="panel"><h2>模型单价（USD / 百万 token）</h2>' +
-                    '<table><thead><tr><th>模型</th><th>输入</th><th>缓存命中</th>' +
-                    "<th>输出</th><th>缓存写入</th></tr></thead><tbody>";
-                keys.forEach(function (k) {
-                    var p = pricing[k] || {};
+                    '<details class="panel"><summary>内置默认单价（参考 OpenRouter，共 ' +
+                    dkeys.length +
+                    " 个模型，只读）</summary>" +
+                    '<div class="muted small" style="margin:6px 0">随插件版本更新；作为上方编辑表的预填基准与「重置为内置默认」的目标。</div>' +
+                    '<table><thead><tr><th>模型</th><th>输入</th><th>缓存命中</th><th>输出</th><th>缓存写入</th></tr></thead><tbody>';
+                dkeys.forEach(function (k) {
+                    var p = defaults[k] || {};
                     html +=
                         "<tr><td class='mono'>" +
                         esc(k) +
                         "</td><td>" +
-                        (p.input != null ? p.input : "-") +
+                        pricingNum(p.input) +
                         "</td><td>" +
-                        (p.input_cached != null ? p.input_cached : "-") +
+                        pricingNum(p.input_cached) +
                         "</td><td>" +
-                        (p.output != null ? p.output : "-") +
+                        pricingNum(p.output) +
                         "</td><td>" +
-                        (p.cache_creation != null ? p.cache_creation : "-") +
+                        pricingNum(p.cache_creation) +
                         "</td></tr>";
                 });
-                html += "</tbody></table></div>";
+                html += "</tbody></table></details>";
             }
             $("content").innerHTML = html;
+            bindPricingEditor(defaults);
         } catch (e) {
             setError("加载定价失败：" + esc(e.message));
         }
+    }
+
+    function pricingRow(model, p) {
+        p = p || {};
+        function numInput(cls, val) {
+            return (
+                "<td><input class='budget-input pr-num pr-" +
+                cls +
+                "' type='number' step='any' min='0' value='" +
+                (val != null && val !== "" ? val : "") +
+                "' style='width:90px'></td>"
+            );
+        }
+        return (
+            "<tr class='pr-row'>" +
+            "<td><input class='budget-input mono pr-model' value='" +
+            esc(model || "") +
+            "' style='width:180px'></td>" +
+            numInput("input", p.input) +
+            numInput("input_cached", p.input_cached) +
+            numInput("output", p.output) +
+            numInput("cache_creation", p.cache_creation) +
+            "<td><button class='btn pr-del' title='删除该行'>✕</button></td>" +
+            "</tr>"
+        );
+    }
+
+    function pricingNum(v) {
+        return v != null && v !== "" ? esc(String(v)) : "-";
+    }
+
+    function bindPricingEditor(defaults) {
+        defaults = defaults || {};
+        var tbody = document.querySelector("#pr-table tbody");
+        function addRow(model, p) {
+            var tr = document.createElement("tr");
+            tr.className = "pr-row";
+            tr.innerHTML = pricingRow(model, p || {});
+            tbody.appendChild(tr);
+            return tr;
+        }
+        $("pr-add").onclick = function () {
+            var tr = addRow("", {});
+            var m = tr.querySelector(".pr-model");
+            if (m) m.focus();
+        };
+        tbody.addEventListener("click", function (ev) {
+            if (ev.target.classList.contains("pr-del")) {
+                var row = ev.target.closest(".pr-row");
+                if (row) row.remove();
+            }
+        });
+        // 关键词模糊搜索内置预设 → 点击即填充到编辑表（大小写不敏感子串匹配）
+        function renderSuggest(query) {
+            var box = $("pr-suggest");
+            if (!box) return;
+            var q = (query || "").trim().toLowerCase();
+            var keys = Object.keys(defaults)
+                .filter(function (k) {
+                    return !q || k.toLowerCase().indexOf(q) >= 0;
+                })
+                .sort()
+                .slice(0, q ? 30 : 10);
+            if (!keys.length) {
+                box.innerHTML =
+                    '<div class="muted small" style="padding:6px">无匹配预设</div>';
+                return;
+            }
+            box.innerHTML = keys
+                .map(function (k) {
+                    var p = defaults[k] || {};
+                    return (
+                        '<div class="pr-suggest-item" data-model="' +
+                        esc(k) +
+                        '" style="display:flex;justify-content:space-between;gap:8px;padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border)">' +
+                        '<span class="mono">' +
+                        esc(k) +
+                        '</span><span class="muted small">输入 ' +
+                        pricingNum(p.input) +
+                        " · 输出 " +
+                        pricingNum(p.output) +
+                        "</span></div>"
+                    );
+                })
+                .join("");
+        }
+        renderSuggest("");
+        var searchEl = $("pr-search");
+        if (searchEl) {
+            searchEl.oninput = function () {
+                renderSuggest(searchEl.value);
+            };
+        }
+        var suggestBox = $("pr-suggest");
+        if (suggestBox) {
+            suggestBox.addEventListener("click", function (ev) {
+                var item = ev.target.closest(".pr-suggest-item");
+                if (!item) return;
+                var model = item.getAttribute("data-model");
+                // 已存在同名模型则聚焦已有行，避免重复
+                var existingRows = tbody.querySelectorAll(".pr-row");
+                for (var i = 0; i < existingRows.length; i++) {
+                    var inp = existingRows[i].querySelector(".pr-model");
+                    if (inp && inp.value.trim() === model) {
+                        if (inp.focus) inp.focus();
+                        if (searchEl) {
+                            searchEl.value = "";
+                            renderSuggest("");
+                        }
+                        return;
+                    }
+                }
+                var tr = addRow(model, defaults[model] || {});
+                if (searchEl) {
+                    searchEl.value = "";
+                    renderSuggest("");
+                }
+                var m = tr.querySelector(".pr-model");
+                if (m && m.scrollIntoView) m.scrollIntoView({ block: "center" });
+            });
+        }
+        $("pr-reset").onclick = async function () {
+            if (!confirm("确定清空所有自定义定价、恢复内置默认？")) return;
+            $("pr-result").textContent = "重置中…";
+            try {
+                await apiPost("actions/save_config", { pricing: {} });
+                $("pr-result").textContent = "✅ 已重置为内置默认，立即生效";
+                await loadPricing();
+            } catch (e) {
+                $("pr-result").textContent = "❌ 重置失败：" + e.message;
+            }
+        };
+        $("pr-save").onclick = async function () {
+            var body;
+            try {
+                body = { pricing: collectPricing() };
+            } catch (ce) {
+                $("pr-result").textContent = "❌ " + ce.message;
+                return;
+            }
+            $("pr-result").textContent = "保存中…";
+            try {
+                await apiPost("actions/save_config", body);
+                $("pr-result").textContent = "✅ 已保存，立即生效";
+                await loadPricing();
+            } catch (e) {
+                $("pr-result").textContent = "❌ 保存失败：" + e.message;
+            }
+        };
+    }
+
+    function collectPricing() {
+        var out = {};
+        var rows = document.querySelectorAll("#pr-table tbody .pr-row");
+        var fields = ["input", "input_cached", "output", "cache_creation"];
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var model = (row.querySelector(".pr-model").value || "").trim();
+            if (!model) continue;
+            if (Object.prototype.hasOwnProperty.call(out, model)) {
+                throw new Error("重复模型名：" + model);
+            }
+            var entry = {};
+            for (var j = 0; j < fields.length; j++) {
+                var el = row.querySelector(".pr-" + fields[j]);
+                var raw = el ? el.value : "";
+                if (raw === "") continue; // 留空 = 不覆盖
+                var n = parseFloat(raw);
+                if (isNaN(n) || n < 0) {
+                    throw new Error(model + " 的 " + fields[j] + " 非法数值");
+                }
+                entry[fields[j]] = n;
+            }
+            out[model] = entry;
+        }
+        return out;
     }
 
     async function loadSettings() {
@@ -1700,14 +1900,6 @@
                 html += "</div>";
             });
 
-            // 定价表（动态 map，用 JSON textarea）
-            html +=
-                '<div class="panel"><h2>定价表（USD / 百万 token）</h2>' +
-                '<div class="muted small" style="margin-bottom:6px">覆盖/新增模型单价，键=模型名，值含 input/input_cached/output/cache_creation。留空对象 {} 则只用内置默认价</div>' +
-                '<textarea id="set-pricing" class="mono" style="width:100%;height:160px">' +
-                esc(JSON.stringify(cfg.pricing || {}, null, 2)) +
-                "</textarea></div>";
-
             // 手动操作
             html +=
                 '<div class="panel"><h2>手动操作</h2><div class="row">' +
@@ -1749,14 +1941,6 @@
                             .map(function (s) { return s.trim(); })
                             .filter(Boolean);
                     } else target[k] = el.value;
-                }
-                // pricing
-                var prText = $("set-pricing").value || "{}";
-                try {
-                    body.pricing = JSON.parse(prText);
-                    if (typeof body.pricing !== "object" || body.pricing === null) body.pricing = {};
-                } catch (pe) {
-                    throw new Error("定价表 JSON 解析失败：" + pe.message);
                 }
                 return body;
             }
