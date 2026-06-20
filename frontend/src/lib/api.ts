@@ -3,9 +3,16 @@
 
 import { getBridge } from "./bridge";
 import type {
+  AttributionResponse,
   Bucket,
+  BudgetResponse,
+  CacheResponse,
   CompareResult,
   OverviewReport,
+  PricingResponse,
+  Provider,
+  RecordRow,
+  RecordsAggregate,
   TimelineResponse,
   Window,
 } from "./types";
@@ -35,7 +42,7 @@ async function post<T>(endpoint: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
-  // 阶段 1（overview）
+  // overview
   getOverview: (window: Window) => get<OverviewReport>("overview", { window }),
   getCompare: (window: Window) => get<CompareResult | null>("compare", { window }),
   getTimeline: (
@@ -44,7 +51,24 @@ export const api = {
     extra?: Record<string, unknown>,
   ) => get<TimelineResponse>("timeline", { days, bucket, ...extra }),
 
-  // 通用 action（后续阶段视图复用）
+  // records
+  getRecords: (filter: Record<string, unknown>) => get<RecordRow[]>("records", filter),
+  getRecordsAggregate: (params: Record<string, unknown>) =>
+    get<RecordsAggregate>("records/aggregate", params),
+
+  // budgets
+  getBudgets: () => get<BudgetResponse>("budgets"),
+  getProviders: () => get<{ providers: Provider[] }>("providers"),
+
+  // cache / attribution / pricing / config
+  getCache: (limit?: number) =>
+    get<CacheResponse>("cache", limit != null ? { limit } : undefined),
+  getAttribution: (limit?: number) =>
+    get<AttributionResponse>("attribution", limit != null ? { limit } : undefined),
+  getPricing: () => get<PricingResponse>("pricing"),
+  getConfig: () => get<Record<string, unknown>>("config"),
+
+  // actions
   postCleanup: () => post<{ deleted: number; message?: string }>("actions/cleanup"),
   postReport: () => post<{ message: string }>("actions/report"),
   postSaveConfig: (body: unknown) =>

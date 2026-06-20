@@ -37,6 +37,20 @@ uv run mypy cost_control                   # 类型检查
 
 调试流程：本地启动 AstrBot，把本目录软链到 `data/plugins/astrbot_plugin_cost_control`，通过 WebUI 重载插件即可热加载。
 
+## Plugin Page 前端（React）
+
+Plugin Page（`pages/dashboard/`）由 `frontend/` 的 Vite + React + TypeScript + recharts 源码构建。产物为 `index.html` + `app.js` + `style.css` 三文件（固定名、相对路径），提交 git 以便零构建部署。
+
+```bash
+cd frontend
+npm install        # 首次安装依赖
+npm run dev        # 本地预览（自动注入 mock bridge，仅验布局；真实数据须在 AstrBot 内验证）
+npm run build      # 构建到 ../pages/dashboard/
+npm run typecheck  # TypeScript 类型检查
+```
+
+修改前端后 `npm run build` 覆盖 `pages/dashboard/`，再在 AstrBot WebUI 重载插件即可热生效。注意 `pages/dashboard/` 全为构建产物，勿手写文件（`emptyOutDir` 构建时会清空重建）。
+
 ## 配置
 
 插件配置通过 AstrBot WebUI 的插件配置面板编辑（对应 `_conf_schema.json`）。主要配置项：

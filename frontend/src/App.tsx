@@ -5,6 +5,12 @@ import { useChartColors } from "./hooks/useChartColors";
 import { Segmented } from "./components/Segmented";
 import { Loading, ErrorBox } from "./components/Feedback";
 import { OverviewView } from "./views/OverviewView";
+import { RecordsView } from "./views/RecordsView";
+import { BudgetsView } from "./views/BudgetsView";
+import { CacheView } from "./views/CacheView";
+import { AttributionView } from "./views/AttributionView";
+import { PricingView } from "./views/PricingView";
+import { SettingsView } from "./views/SettingsView";
 import type { Window } from "./lib/types";
 
 const TABS = [
@@ -79,6 +85,18 @@ export function App() {
           <Loading />
         ) : tab === "overview" ? (
           <OverviewView window={win} refreshNonce={refreshNonce} colors={colors} />
+        ) : tab === "records" ? (
+          <RecordsView />
+        ) : tab === "budgets" ? (
+          <BudgetsView />
+        ) : tab === "cache" ? (
+          <CacheView />
+        ) : tab === "attribution" ? (
+          <AttributionView />
+        ) : tab === "pricing" ? (
+          <PricingView />
+        ) : tab === "settings" ? (
+          <SettingsView />
         ) : (
           <div className="empty">「{TABS.find((t) => t.key === tab)?.label}」开发中…</div>
         )}
