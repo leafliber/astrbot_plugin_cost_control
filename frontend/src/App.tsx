@@ -18,7 +18,7 @@ const TABS = [
   { key: "records", label: "明细" },
   { key: "budgets", label: "预算" },
   { key: "cache", label: "缓存" },
-  { key: "attribution", label: "归因" },
+  { key: "attribution", label: "上下文" },
   { key: "pricing", label: "定价" },
   { key: "settings", label: "设置" },
 ] as const;
@@ -46,7 +46,7 @@ export function App() {
       <header className="topbar">
         <div className="title-group">
           <h1>成本控制</h1>
-          {tab === "overview" && (
+          {(tab === "overview" || tab === "attribution" || tab === "cache") && (
             <Segmented
               value={win}
               onChange={(v) => setWin(v)}
@@ -90,9 +90,9 @@ export function App() {
         ) : tab === "budgets" ? (
           <BudgetsView />
         ) : tab === "cache" ? (
-          <CacheView />
+          <CacheView window={win} refreshNonce={refreshNonce} />
         ) : tab === "attribution" ? (
-          <AttributionView />
+          <AttributionView window={win} refreshNonce={refreshNonce} />
         ) : tab === "pricing" ? (
           <PricingView />
         ) : tab === "settings" ? (

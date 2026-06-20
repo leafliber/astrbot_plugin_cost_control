@@ -24,6 +24,7 @@ astrbot，可单测。
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 from typing import Any
 
@@ -53,6 +54,46 @@ def _summarize(sig: dict[str, Any]) -> dict[str, Any]:
         "tools_hash": str(sig.get("tools_hash", "") or ""),
         "contexts_count": len(hashes),
     }
+
+
+def _line_diff(
+    old: Any,
+    new: Any,
+    max_lines: int = 150,
+) -> list[dict[str, str]] | None:
+    """对两段文本做行级 diff，返回 git 风格行列表（纯函数）。
+
+    返回 ``[{"op": "+" | "-" | " ", "text": line}, ...]``：``+`` 新增、``-``
+    删除、``" "`` 上下文。任一输入为空、无增删行或出错时返回 ``None``（前端据此
+    不渲染 diff 块）。超过 ``max_lines`` 截断并追加一条提示行，避免落库 payload 失控。
+    """
+    try:
+        o = str(old or "")
+        n = str(new or "")
+        if not o or not n:
+            return None
+        out: list[dict[str, str]] = []
+        for line in difflib.ndiff(o.splitlines(), n.splitlines()):
+            raw = line.rstrip("\n")
+            if not raw or raw.startswith("?"):  # ? 是 ndiff 行内提示行，跳过
+                continue
+            op = raw[0]
+            text = raw[2:] if len(raw) >= 2 else ""
+            if op == "+":
+                out.append({"op": "+", "text": text})
+            elif op == "-":
+                out.append({"op": "-", "text": text})
+            else:
+                out.append({"op": " ", "text": text})
+        if not any(d["op"] != " " for d in out):
+            return None
+        total = len(out)
+        if total > max_lines:
+            out = out[:max_lines]
+            out.append({"op": " ", "text": f"…（已截断，共 {total} 行 diff）"})
+        return out
+    except Exception:
+        return None
 
 
 def hit_rate(
@@ -118,13 +159,17 @@ def diagnose_changes(
     if on("detect_system_prompt_change"):
         if current.get("system_hash") and last.get("system_hash"):
             if current["system_hash"] != last["system_hash"]:
+                ev_after = dict(after)
+                sd = _line_diff(last.get("system_text"), current.get("system_text"))
+                if sd is not None:
+                    ev_after["system_diff"] = sd
                 events.append(
                     {
                         "type": "system_prompt_change",
                         "severity": "high",
                         "detail": "system prompt 内容变化，前缀缓存失效",
                         "before": before,
-                        "after": after,
+                        "after": ev_after,
                     }
                 )
 
@@ -132,13 +177,17 @@ def diagnose_changes(
         if current.get("tools_hash") != last.get("tools_hash"):
             # 仅当至少一轮有 tools 才报（避免空对空误报）
             if current.get("tools_hash") or last.get("tools_hash"):
+                ev_after = dict(after)
+                td = _line_diff(last.get("tools_text"), current.get("tools_text"))
+                if td is not None:
+                    ev_after["tools_diff"] = td
                 events.append(
                     {
                         "type": "tools_change",
                         "severity": "medium",
                         "detail": "工具定义变化，破坏缓存键",
                         "before": before,
-                        "after": after,
+                        "after": ev_after,
                     }
                 )
 
@@ -197,7 +246,12 @@ class CacheDiagMixin:
             return 30.0
 
     def _context_signature(self, req: ProviderRequest) -> dict[str, Any]:
-        """从 req 提取上下文签名（确定性 hash + 历史长度）。"""
+        """从 req 提取上下文签名（确定性 hash + 历史长度）。
+
+        除 hash 外，额外保留 ``system_text`` / ``tools_text`` 原始文本——这两者只进
+        内存 ``_last_ctx[umo]``（供下一轮 :func:`_line_diff` 计算内容 diff），**不**经
+        :func:`_summarize` 落库，避免 DB 行膨胀。
+        """
         try:
             system = getattr(req, "system_prompt", "") or ""
             func_tool = getattr(req, "func_tool", None)
@@ -210,6 +264,8 @@ class CacheDiagMixin:
                 "tools_hash": _hash_text(str(func_tool)) if func_tool is not None else "",
                 "contexts_hashes": contexts_hashes,
                 "history_len": len(contexts),
+                "system_text": system,
+                "tools_text": str(func_tool) if func_tool is not None else "",
             }
         except Exception:
             return {
@@ -217,6 +273,8 @@ class CacheDiagMixin:
                 "tools_hash": "",
                 "contexts_hashes": [],
                 "history_len": 0,
+                "system_text": "",
+                "tools_text": "",
             }
 
     async def run_cache_diag(self, req: ProviderRequest, umo: str) -> list[dict[str, Any]]:

@@ -1,6 +1,6 @@
 """``CacheDiagMixin`` 纯函数单测：命中率与四类破坏诊断。"""
 
-from cost_control.cache_diag import diagnose_changes, hit_rate
+from cost_control.cache_diag import _line_diff, diagnose_changes, hit_rate
 
 
 def test_hit_rate_normal():
@@ -19,6 +19,88 @@ def test_hit_rate_no_data():
 def test_hit_rate_with_creation():
     # 50 read / (50 + 30 + 20) = 50%
     assert hit_rate(50, 30, 20) == 50.0
+
+
+def test_line_diff_modify():
+    # 第二行 b → c：保留上下文 a，删 b，增 c
+    d = _line_diff("a\nb", "a\nc")
+    assert d == [
+        {"op": " ", "text": "a"},
+        {"op": "-", "text": "b"},
+        {"op": "+", "text": "c"},
+    ]
+
+
+def test_line_diff_add_and_remove():
+    assert _line_diff("a", "a\nb") == [
+        {"op": " ", "text": "a"},
+        {"op": "+", "text": "b"},
+    ]
+    assert _line_diff("a\nb", "a") == [
+        {"op": " ", "text": "a"},
+        {"op": "-", "text": "b"},
+    ]
+
+
+def test_line_diff_empty_or_unchanged():
+    # 任一为空 → None
+    assert _line_diff("", "x") is None
+    assert _line_diff("x", "") is None
+    # 无增删 → None
+    assert _line_diff("a\nb", "a\nb") is None
+
+
+def test_line_diff_truncation():
+    # old 1 行、new 201 行 → 200 行 + 1 上下文 = 201 条 diff，截断到 max_lines
+    new_lines = "\n".join("line" + str(i) for i in range(201))
+    d = _line_diff("base", new_lines, max_lines=10)
+    assert d is not None
+    assert len(d) == 11  # 10 行 + 1 截断提示
+    assert "已截断" in d[-1]["text"]
+
+
+def test_diagnose_system_change_with_diff():
+    last = {
+        "history_len": 2,
+        "system_hash": "a",
+        "tools_hash": "x",
+        "system_text": "你是助手\n规则一",
+        "tools_text": "",
+        "contexts_hashes": ["a", "b"],
+    }
+    cur = {
+        "history_len": 2,
+        "system_hash": "b",
+        "tools_hash": "x",
+        "system_text": "你是助手\n规则二",
+        "tools_text": "",
+        "contexts_hashes": ["a", "b"],
+    }
+    ev = next(e for e in diagnose_changes(cur, last, {}) if e["type"] == "system_prompt_change")
+    assert "system_diff" in ev["after"]
+    ops = [d["op"] for d in ev["after"]["system_diff"]]
+    assert "+" in ops and "-" in ops
+
+
+def test_diagnose_tools_change_with_diff():
+    last = {
+        "history_len": 1,
+        "system_hash": "a",
+        "tools_hash": "x",
+        "system_text": "",
+        "tools_text": "toolA",
+        "contexts_hashes": ["a"],
+    }
+    cur = {
+        "history_len": 1,
+        "system_hash": "a",
+        "tools_hash": "y",
+        "system_text": "",
+        "tools_text": "toolA\ntoolB",
+        "contexts_hashes": ["a"],
+    }
+    ev = next(e for e in diagnose_changes(cur, last, {}) if e["type"] == "tools_change")
+    assert "tools_diff" in ev["after"]
 
 
 def _sig(history_len, system_hash="a", tools_hash="x", hashes=None):

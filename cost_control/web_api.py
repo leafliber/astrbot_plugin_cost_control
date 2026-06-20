@@ -274,7 +274,7 @@ class WebApiMixin:
             def _pct(c: float, p: float) -> float | None:
                 return round((c - p) * 100.0 / p, 1) if p > 0 else None
 
-            label = "昨日" if window == "daily" else "上周" if window == "weekly" else "上月"
+            label = "昨日" if window == "daily" else "近 7 天" if window == "weekly" else "近 30 天"
             return self._ok(
                 {
                     "window": window,
@@ -575,18 +575,34 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_cache(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /cache``：缓存命中率 + 所有会话最近的破坏诊断事件。"""
+        """``GET /cache``：缓存命中率 + 所有会话最近的破坏诊断事件。
+
+        Query：``window``（daily|weekly|monthly，默认 daily）按报表窗口
+        （见 :func:`analytics.report_window_start`）过滤命中率与 token 聚合统计；
+        ``limit``（默认 100，上限 500）。缓存破坏事件始终取最近 ``limit`` 条，
+        **不受 window 影响**。
+        """
         try:
+            from datetime import UTC, datetime
+
+            from .analytics import report_window_start
+
             try:
                 limit = max(1, min(500, int(self._param("limit", "100"))))
             except (TypeError, ValueError):
                 limit = 100
-            sups = await self.query_supplements(limit=limit)
+            window = self._param("window", "daily") or "daily"
+            now = datetime.now(UTC)
+            tz = resolve_tz(self.context)
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
+            start = report_window_start(window, now, tz, refresh)
+            sups = await self.query_supplements(start=start, limit=limit)
             from .cache_diag import hit_rate
 
             rates: list[float] = []
             total_input_other = 0
             total_input_cached = 0
+            total_output = 0
             for s in sups:
                 rate = hit_rate(
                     getattr(s, "cache_read", None) or getattr(s, "token_input_cached", None),
@@ -597,6 +613,7 @@ class WebApiMixin:
                     rates.append(rate)
                 total_input_other += int(getattr(s, "token_input_other", 0) or 0)
                 total_input_cached += int(getattr(s, "token_input_cached", 0) or 0)
+                total_output += int(getattr(s, "token_output", 0) or 0)
             avg = round(sum(rates) / len(rates), 1) if rates else 0.0
 
             events: list[dict[str, Any]] = []
@@ -623,6 +640,7 @@ class WebApiMixin:
                     "samples": len(rates),
                     "total_input_other": total_input_other,
                     "total_input_cached": total_input_cached,
+                    "total_output": total_output,
                     "events": events,
                 }
             )
@@ -630,13 +648,26 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_attribution(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /attribution``：最近请求的归因（各组件占比 + 注入量）。"""
+        """``GET /attribution``：最近请求的归因（各组件占比 + 注入量）。
+
+        Query：``window``（daily|weekly|monthly，默认 daily）按与总览一致的报表窗口
+        （见 :func:`analytics.report_window_start`）过滤；``limit``（默认 50，上限 500）。
+        """
         try:
+            from datetime import UTC, datetime
+
+            from .analytics import report_window_start
+
             try:
                 limit = max(1, min(500, int(self._param("limit", "50"))))
             except (TypeError, ValueError):
                 limit = 50
-            sups = await self.query_supplements(limit=limit)
+            window = self._param("window", "daily") or "daily"
+            now = datetime.now(UTC)
+            tz = resolve_tz(self.context)
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
+            start = report_window_start(window, now, tz, refresh)
+            sups = await self.query_supplements(start=start, limit=limit)
             items: list[dict[str, Any]] = []
             comps: dict[str, list[int]] = {
                 "system": [],

@@ -643,6 +643,70 @@ tr:hover td {
   margin-bottom: 4px;
 }
 
+.gitdiff {
+  margin: 6px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.gitdiff-label {
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.gitdiff-body {
+  margin: 0;
+  padding: 6px 0;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.diff-line {
+  display: flex;
+  white-space: pre;
+}
+
+.diff-line .dl-sign {
+  flex: 0 0 22px;
+  text-align: center;
+  user-select: none;
+  color: var(--text-dim);
+}
+
+.diff-line .dl-text {
+  flex: 1;
+  padding-right: 10px;
+}
+
+.diff-line.dl-add {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.diff-line.dl-add .dl-sign,
+.diff-line.dl-add .dl-text {
+  color: var(--ok);
+}
+
+.diff-line.dl-del {
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+}
+
+.diff-line.dl-del .dl-sign,
+.diff-line.dl-del .dl-text {
+  color: var(--bad);
+}
+
+.diff-line.dl-ctx .dl-text {
+  color: var(--text-dim);
+}
+
 .pr-suggest-item:hover {
   background: rgba(127, 127, 127, 0.14);
 }

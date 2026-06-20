@@ -61,10 +61,13 @@ export const api = {
   getProviders: () => get<{ providers: Provider[] }>("providers"),
 
   // cache / attribution / pricing / config
-  getCache: (limit?: number) =>
-    get<CacheResponse>("cache", limit != null ? { limit } : undefined),
-  getAttribution: (limit?: number) =>
-    get<AttributionResponse>("attribution", limit != null ? { limit } : undefined),
+  getCache: (window: Window, limit?: number) =>
+    get<CacheResponse>("cache", limit != null ? { window, limit } : { window }),
+  getAttribution: (window: Window, limit?: number) =>
+    get<AttributionResponse>(
+      "attribution",
+      limit != null ? { window, limit } : { window },
+    ),
   getPricing: () => get<PricingResponse>("pricing"),
   getConfig: () => get<Record<string, unknown>>("config"),
 

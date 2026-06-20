@@ -159,11 +159,18 @@ export interface Strategy {
 }
 
 // ===== cache =====
+export interface DiffLine {
+  op: "+" | "-" | " ";
+  text: string;
+}
+
 export interface CacheEventState {
   history_len?: number;
   system_hash?: string;
   tools_hash?: string;
   first_diverge_at?: number;
+  system_diff?: DiffLine[];
+  tools_diff?: DiffLine[];
 }
 
 export interface CacheEvent {
@@ -181,6 +188,7 @@ export interface CacheResponse {
   samples?: number;
   total_input_other?: number;
   total_input_cached?: number;
+  total_output?: number;
   events?: CacheEvent[];
 }
 

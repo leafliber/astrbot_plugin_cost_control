@@ -1,15 +1,22 @@
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { fmtNum, shortTime } from "../lib/format";
+import type { Window } from "../lib/types";
 import { StatCardGrid } from "../components/StatCardGrid";
 import { Panel } from "../components/Panel";
 import { StackedBar } from "../components/StackedBar";
 import { Loading, ErrorBox, Empty } from "../components/Feedback";
 
-export function AttributionView() {
-  const res = useApi(() => api.getAttribution(), []);
+export function AttributionView({
+  window: win,
+  refreshNonce,
+}: {
+  window: Window;
+  refreshNonce: number;
+}) {
+  const res = useApi(() => api.getAttribution(win), [win, refreshNonce]);
   if (res.loading && !res.data) return <Loading />;
-  if (res.error) return <ErrorBox message={`加载归因失败：${res.error}`} />;
+  if (res.error) return <ErrorBox message={`加载上下文失败：${res.error}`} />;
 
   const r = res.data;
   const avg = r?.avg_components || {};
@@ -53,9 +60,9 @@ export function AttributionView() {
       </Panel>
 
       <Panel>
-        <h2>最近请求归因</h2>
+        <h2>最近请求上下文</h2>
         {recent.length === 0 ? (
-          <Empty text="暂无归因数据" />
+          <Empty text="暂无上下文数据" />
         ) : (
           <table>
             <thead>

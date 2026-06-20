@@ -1,4 +1,4 @@
-import type { CacheEvent, CacheEventState } from "./types";
+import type { CacheEvent, CacheEventState, DiffLine } from "./types";
 
 // 缓存破坏事件类型元数据：标题 + 处置建议
 export const CACHE_EVENT_META: Record<string, { title: string; tip: string }> = {
@@ -54,6 +54,7 @@ export interface CacheDetail {
   firstDiv?: number;
   tip: string;
   detail: string;
+  diff?: { label: string; lines: DiffLine[] };
 }
 
 export function cacheDetailRows(ev: CacheEvent): CacheDetail {
@@ -74,5 +75,14 @@ export function cacheDetailRows(ev: CacheEvent): CacheDetail {
     ev.type === "order_drift" && a.first_diverge_at != null
       ? a.first_diverge_at
       : undefined;
-  return { rows, firstDiv, tip: cacheEvtMeta(ev.type).tip, detail: ev.detail || "" };
+  // 内容级 diff（后端 _line_diff 产出，仅 system/tools 变更事件有）
+  const sysLines = (a.system_diff || []).filter((l) => l && l.op);
+  const toolLines = (a.tools_diff || []).filter((l) => l && l.op);
+  const diff =
+    sysLines.length > 0
+      ? { label: "system prompt 变更", lines: sysLines }
+      : toolLines.length > 0
+        ? { label: "工具定义变更", lines: toolLines }
+        : undefined;
+  return { rows, firstDiv, tip: cacheEvtMeta(ev.type).tip, detail: ev.detail || "", diff };
 }

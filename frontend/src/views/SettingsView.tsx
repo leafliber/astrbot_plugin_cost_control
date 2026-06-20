@@ -63,7 +63,7 @@ const SECTIONS: SettingSection[] = [
   },
   {
     key: "attribution",
-    title: "归因分析",
+    title: "上下文分析",
     fields: [
       { k: "enabled", label: "启用上下文注入归因", type: "bool" },
       { k: "sample_rate", label: "采样率 (%)，100=全采样", type: "int" },

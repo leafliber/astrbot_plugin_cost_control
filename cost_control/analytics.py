@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .budget import day_window_start, month_window_start, resolve_tz
+from .budget import day_window_start, resolve_tz
 from .cache_diag import hit_rate
 from .config import get_config, get_pricing
 from .cost import compute_cost_value
@@ -40,14 +40,14 @@ def report_window_start(
         窗口起始 UTC datetime（aware）。
         - ``daily``：当日 ``refresh_time`` 起点。
         - ``weekly``：当日 ``refresh_time`` 起点回退 6 天（最近 7 天含今天）。
-        - ``monthly``：本月 1 日 0 点。
+        - ``monthly``：当日 ``refresh_time`` 起点回退 29 天（最近 30 天含今天）。
     """
     window = (window or "daily").strip().lower()
-    if window == "monthly":
-        return month_window_start(now_utc, tz)
     daily_start = day_window_start(refresh_time, now_utc, tz)
     if window == "weekly":
         return daily_start - timedelta(days=6)
+    if window == "monthly":
+        return daily_start - timedelta(days=29)
     return daily_start
 
 
@@ -61,23 +61,18 @@ def compare_windows(
 
     返回 ``(cur_start, cur_end, prev_start, prev_end)``（均 aware UTC）。
     当前窗口与 :func:`report_window_start` 一致（``cur_end`` 为 ``now_utc``）；
-    上一窗口为紧邻当前窗口起点的上一段：
+    上一窗口为紧邻当前窗口起点的等长上一段：
     - ``daily``：``[cur_start-1d, cur_start)``
     - ``weekly``：``[cur_start-7d, cur_start)``
-    - ``monthly``：``[上月1号, 本月1号)``（自然月环比，与当前「本月至今」口径对应）
+    - ``monthly``：``[cur_start-30d, cur_start)``（与当前「近 30 天」滚动口径对应）
     未知 window 按 daily。
     """
     cur_start = report_window_start(window, now_utc, tz, refresh_time)
     cur_end = now_utc
     w = (window or "daily").strip().lower()
     if w == "monthly":
+        prev_start = cur_start - timedelta(days=30)
         prev_end = cur_start
-        local = cur_start.astimezone(tz)
-        if local.month == 1:
-            prev_start_local = local.replace(year=local.year - 1, month=12)
-        else:
-            prev_start_local = local.replace(month=local.month - 1)
-        prev_start = prev_start_local.astimezone(UTC)
     elif w == "weekly":
         prev_start = cur_start - timedelta(days=7)
         prev_end = cur_start

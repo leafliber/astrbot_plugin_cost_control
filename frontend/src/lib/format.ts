@@ -66,5 +66,5 @@ export function windowToDays(w: Window | string): number {
 }
 
 export function windowLabel(w: Window | string): string {
-  return w === "monthly" ? "本月" : w === "weekly" ? "近 7 天" : "今日";
+  return w === "monthly" ? "近 30 天" : w === "weekly" ? "近 7 天" : "今日";
 }

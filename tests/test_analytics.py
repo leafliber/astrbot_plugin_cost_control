@@ -8,7 +8,7 @@ from cost_control.analytics import (
     compare_windows,
     report_window_start,
 )
-from cost_control.budget import day_window_start, month_window_start
+from cost_control.budget import day_window_start
 from cost_control.config import DEFAULT_PRICING
 
 _TZ = ZoneInfo("Asia/Shanghai")
@@ -28,7 +28,8 @@ def test_report_window_weekly_is_six_days_before_daily():
 
 def test_report_window_monthly():
     refresh = "00:00"
-    assert report_window_start("monthly", _NOW, _TZ, refresh) == month_window_start(_NOW, _TZ)
+    daily = day_window_start(refresh, _NOW, _TZ)
+    assert report_window_start("monthly", _NOW, _TZ, refresh) == daily - timedelta(days=29)
 
 
 def test_report_window_unknown_defaults_daily():
@@ -178,22 +179,10 @@ def test_compare_windows_weekly():
 def test_compare_windows_monthly():
     refresh = "00:00"
     cur_start, cur_end, prev_start, prev_end = compare_windows("monthly", _NOW, _TZ, refresh)
-    month_start = month_window_start(_NOW, _TZ)
-    assert cur_start == month_start
-    assert prev_end == month_start
-    # 上月1号本地 (2026-05-01 00:00 +08:00) = 2026-04-30 16:00 UTC
-    assert prev_start == datetime(2026, 4, 30, 16, 0, 0, tzinfo=UTC)
-
-
-def test_compare_windows_monthly_january_rolls_year():
-    # 1 月时上一窗口应回到去年 12 月
-    now = datetime(2026, 1, 15, 5, 0, 0, tzinfo=UTC)
-    refresh = "00:00"
-    _, _, prev_start, _ = compare_windows("monthly", now, _TZ, refresh)
-    local_prev = prev_start.astimezone(_TZ)
-    assert local_prev.year == 2025
-    assert local_prev.month == 12
-    assert local_prev.day == 1
+    mo = report_window_start("monthly", _NOW, _TZ, refresh)
+    assert cur_start == mo
+    assert prev_start == mo - timedelta(days=30)
+    assert prev_end == mo
 
 
 def test_compare_windows_unknown_defaults_daily():

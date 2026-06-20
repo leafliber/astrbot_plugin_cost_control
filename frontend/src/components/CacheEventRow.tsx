@@ -51,6 +51,22 @@ export function CacheEventRow({ ev }: { ev: CacheEvent }) {
                 </div>
               )}
             </div>
+            {detail.diff && detail.diff.lines.length > 0 && (
+              <div className="gitdiff">
+                <div className="gitdiff-label">{detail.diff.label}</div>
+                <pre className="gitdiff-body">
+                  {detail.diff.lines.map((l, i) => {
+                    const cls = l.op === "+" ? "add" : l.op === "-" ? "del" : "ctx";
+                    return (
+                      <div key={i} className={`diff-line dl-${cls}`}>
+                        <span className="dl-sign">{l.op}</span>
+                        <span className="dl-text">{l.text}</span>
+                      </div>
+                    );
+                  })}
+                </pre>
+              </div>
+            )}
             {detail.tip && (
               <div className="diff-tip">
                 <strong>处置建议：</strong>
