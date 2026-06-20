@@ -22,7 +22,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 
 from .budget import _DIM_ORDER, day_window_start, resolve_tz
 from .config import get_config, get_pricing
-from .cost import compute_cost_value
+from .cost import compute_row_cost
 
 
 class CommandsMixin:
@@ -63,9 +63,9 @@ class CommandsMixin:
             umo = self._umo(event)
             d_start = self._day_start()
             usage = await self.query_usage(umo=umo, start=d_start)
-            rows = await self.query_usage_grouped(by="model", umo=umo, start=d_start)
+            rows = await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start)
             pricing = get_pricing(getattr(self, "cfg", None))
-            cost = sum(compute_cost_value(r, r.get("key") or None, pricing) for r in rows)
+            cost = round(sum(compute_row_cost(r, pricing) for r in rows), 6)
             lines = [
                 "💰 今日用量（本会话）",
                 f"调用 {usage.get('count', 0)} 次，成本 ≈ ${cost:.4f}",
@@ -74,8 +74,9 @@ class CommandsMixin:
                 f"输出 {usage.get('token_output', 0)}",
             ]
             for r in rows[:5]:
-                c = compute_cost_value(r, r.get("key") or None, pricing)
-                lines.append(f"  · {r.get('key') or '?'}：{r.get('count', 0)}次 / ${c:.4f}")
+                c = round(compute_row_cost(r, pricing), 6)
+                name = r.get("provider_model") or r.get("key") or "?"
+                lines.append(f"  · {name}：{r.get('count', 0)}次 / ${c:.4f}")
             yield event.plain_result("\n".join(lines))
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")

@@ -238,19 +238,30 @@ class UsageQueryMixin:
 
         try:
             db = self.context.get_db()
+            composite = by == "provider_model"
             if by == "provider":
                 group_col = ProviderStat.provider_id
             elif by == "umo":
                 group_col = ProviderStat.umo
             else:
                 group_col = ProviderStat.provider_model
-            stmt = select(  # type: ignore[call-overload]
-                group_col,
-                func.sum(ProviderStat.token_input_other),
-                func.sum(ProviderStat.token_input_cached),
-                func.sum(ProviderStat.token_output),
-                func.count(),
-            ).group_by(group_col)
+            if composite:
+                stmt = select(  # type: ignore[call-overload]
+                    ProviderStat.provider_id,
+                    ProviderStat.provider_model,
+                    func.sum(ProviderStat.token_input_other),
+                    func.sum(ProviderStat.token_input_cached),
+                    func.sum(ProviderStat.token_output),
+                    func.count(),
+                ).group_by(ProviderStat.provider_id, ProviderStat.provider_model)
+            else:
+                stmt = select(  # type: ignore[call-overload]
+                    group_col,
+                    func.sum(ProviderStat.token_input_other),
+                    func.sum(ProviderStat.token_input_cached),
+                    func.sum(ProviderStat.token_output),
+                    func.count(),
+                ).group_by(group_col)
             if umo:
                 stmt = stmt.where(ProviderStat.umo == umo)
             if provider:
@@ -266,15 +277,28 @@ class UsageQueryMixin:
                 rows = result.all()
             out: list[dict[str, Any]] = []
             for r in rows:
-                out.append(
-                    {
-                        "key": str(r[0] or ""),
-                        "token_input_other": int(r[1] or 0),
-                        "token_input_cached": int(r[2] or 0),
-                        "token_output": int(r[3] or 0),
-                        "count": int(r[4] or 0),
-                    }
-                )
+                if composite:
+                    out.append(
+                        {
+                            "provider_id": str(r[0] or ""),
+                            "provider_model": str(r[1] or ""),
+                            "key": str(r[1] or ""),
+                            "token_input_other": int(r[2] or 0),
+                            "token_input_cached": int(r[3] or 0),
+                            "token_output": int(r[4] or 0),
+                            "count": int(r[5] or 0),
+                        }
+                    )
+                else:
+                    out.append(
+                        {
+                            "key": str(r[0] or ""),
+                            "token_input_other": int(r[1] or 0),
+                            "token_input_cached": int(r[2] or 0),
+                            "token_output": int(r[3] or 0),
+                            "count": int(r[4] or 0),
+                        }
+                    )
             return out
         except Exception:
             return []

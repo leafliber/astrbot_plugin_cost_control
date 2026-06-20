@@ -43,7 +43,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "global_daily": 0.0,
         "global_monthly": 0.0,
     },
-    "pricing": {},  # 用户自定义覆盖 DEFAULT_PRICING；为空时只用默认表
+    "pricing": {},  # 用户自定义定价，key=provider_id，value 按 mode（见 get_pricing）
     # 局部阈值（每条规则挂自己的 on_exceeded；优先级高于全局 5 维）。
     # 规则对象形如：
     #   {"enabled": bool, "target_type": "umo"|"provider"|"user",
@@ -209,37 +209,73 @@ def get_config(config: dict[str, Any] | None, key: str, default: Any = None) -> 
     return CONFIG_DEFAULTS.get(key, default)
 
 
-def get_pricing(config: dict[str, Any] | None) -> dict[str, dict[str, float]]:
-    """返回生效的模型单价表（默认表 + 用户配置覆盖）。
+def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
+    """返回生效的定价结构：``{"defaults": {model: {...}}, "user": {provider_id: {...}}}``。
 
-    用户在 ``pricing`` 项配置的模型会与 ``DEFAULT_PRICING`` 合并：同名模型按字段
-    覆盖（用户填的字段生效，未填的字段保留默认）；用户新增的模型直接加入。
+    两套 key 空间并存、互不合并：
+
+    - ``defaults``：内置出厂默认表 ``DEFAULT_PRICING``（key=模型名，隐含 per_token），
+      由 :func:`cost_control.cost.match_pricing` 按模型名模糊匹配。
+    - ``user``：用户在 ``pricing`` 项配置的覆盖（key=**provider_id**）。每条按
+      ``mode``（``per_token``/``per_turn``/``per_request``）规范化；缺 ``mode`` 视为
+      ``per_token``（兼容旧结构）。优先级高于 defaults——见
+      :func:`cost_control.cost.resolve_pricing`。
 
     Args:
         config: 插件配置字典。
 
     Returns:
-        形如 ``{"gpt-4o": {"input": 2.5, "input_cached": 1.25, "output": 10.0,
-        "cache_creation": 2.5}}`` 的字典（USD / 百万 token）。
+        ``{"defaults": {model: {input,...}}, "user": {provider_id: {mode,...}}}``。
+        user entry 形如：
+        - ``{"mode":"per_token","input":f,"input_cached":f,"output":f,"cache_creation":f|None}``
+        - ``{"mode":"per_turn","price":f}`` / ``{"mode":"per_request","price":f}``
     """
-    merged: dict[str, dict[str, float]] = {
+    defaults: dict[str, dict[str, float]] = {
         model: dict(prices) for model, prices in DEFAULT_PRICING.items()
     }
+    user: dict[str, dict[str, Any]] = {}
     user_pricing = get_config(config, "pricing", {}) or {}
     if isinstance(user_pricing, dict):
-        for model, prices in user_pricing.items():
-            if not isinstance(prices, dict):
-                continue
-            base = dict(merged.get(model, {}))
-            for field, value in prices.items():
-                if value is None:
-                    continue
-                try:
-                    base[field] = float(value)
-                except (TypeError, ValueError):
-                    continue
-            merged[model] = base
-    return merged
+        for pid, entry in user_pricing.items():
+            norm = _normalize_user_entry(entry)
+            if norm is not None:
+                user[str(pid)] = norm
+    return {"defaults": defaults, "user": user}
+
+
+def _normalize_user_entry(entry: Any) -> dict[str, Any] | None:
+    """规范化一条用户定价 entry（key=provider_id 的 value）。非法返回 ``None``。
+
+    识别 ``mode``（缺省 per_token），按 mode 校验数值：
+    - per_token：input/input_cached/output（float>=0，缺 0.0）、cache_creation（float>=0 或 None）。
+    - per_turn/per_request：price（float>=0）。
+    非法字段回退 0.0 / None；mode 非法或 entry 非 dict 返回 None。
+    """
+    if not isinstance(entry, dict):
+        return None
+    mode = str(entry.get("mode") or "per_token").strip().lower()
+    if mode not in ("per_token", "per_turn", "per_request"):
+        return None
+    if mode == "per_token":
+        out: dict[str, Any] = {"mode": "per_token"}
+        for f in ("input", "input_cached", "output"):
+            out[f] = _to_float_or_zero(entry.get(f))
+        cc = entry.get("cache_creation")
+        if cc is None:
+            out["cache_creation"] = None
+        else:
+            out["cache_creation"] = _to_float_or_zero(cc)
+        return out
+    # per_turn / per_request
+    return {"mode": mode, "price": _to_float_or_zero(entry.get("price"))}
+
+
+def _to_float_or_zero(v: Any) -> float:
+    try:
+        f = float(v)
+        return f if f >= 0 else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # schema 中保留的「功能开关」键（保存时分离开关与详细配置）。

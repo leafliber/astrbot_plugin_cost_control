@@ -118,6 +118,7 @@ export interface Provider {
   id: string;
   model?: string;
   type?: string;
+  candidates?: string[];
 }
 
 export interface MetricProgress {
@@ -230,6 +231,7 @@ export interface AttributionResponse {
 }
 
 // ===== pricing =====
+// 旧 PriceEntry（内置默认表 defaults 用，per_token 四字段）
 export interface PriceEntry {
   input?: number;
   input_cached?: number;
@@ -237,8 +239,44 @@ export interface PriceEntry {
   cache_creation?: number;
 }
 
+export type PricingMode = "per_token" | "per_turn" | "per_request";
+
+// 用户自定义定价 entry（key=provider_id），按 mode 区分字段
+export interface PerTokenEntry {
+  mode: "per_token";
+  input: number;
+  input_cached: number;
+  output: number;
+  cache_creation?: number | null;
+}
+export interface PerTurnEntry {
+  mode: "per_turn";
+  price: number;
+}
+export interface PerRequestEntry {
+  mode: "per_request";
+  price: number;
+}
+export type UserPricingEntry = PerTokenEntry | PerTurnEntry | PerRequestEntry;
+
+// provider 及其候选模型（GET /providers / GET /pricing.provider_models）
+export interface ProviderModelInfo {
+  id: string;
+  model?: string;
+  type?: string;
+  candidates: string[];
+}
+
+export interface PricingUnpriced {
+  provider_id?: string;
+  model: string;
+  tokens: number;
+  count: number;
+}
+
 export interface PricingResponse {
-  pricing?: Record<string, PriceEntry>;
-  unpriced?: { model: string; tokens: number; count: number }[];
-  defaults?: Record<string, PriceEntry>;
+  provider_models?: ProviderModelInfo[];
+  user_pricing?: Record<string, UserPricingEntry>; // key=provider_id
+  defaults?: Record<string, PriceEntry>; // key=模型名，per_token
+  unpriced?: PricingUnpriced[];
 }

@@ -1,85 +1,73 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { fmtNum } from "../lib/format";
-import type { PriceEntry } from "../lib/types";
+import type { PriceEntry, ProviderModelInfo, UserPricingEntry } from "../lib/types";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
-import { PresetSuggest } from "../components/PresetSuggest";
 import { Loading, ErrorBox } from "../components/Feedback";
-
-interface PriceRow {
-  model: string;
-  input: string;
-  input_cached: string;
-  output: string;
-  cache_creation: string;
-}
-
-const NUM_FIELDS: (keyof Omit<PriceRow, "model">)[] = [
-  "input",
-  "input_cached",
-  "output",
-  "cache_creation",
-];
-
-function entryToRow(model: string, p: PriceEntry | undefined): PriceRow {
-  return {
-    model,
-    input: p?.input != null ? String(p.input) : "",
-    input_cached: p?.input_cached != null ? String(p.input_cached) : "",
-    output: p?.output != null ? String(p.output) : "",
-    cache_creation: p?.cache_creation != null ? String(p.cache_creation) : "",
-  };
-}
+import {
+  DraftEntry,
+  ProviderPricingCard,
+  draftToEntry,
+  entryToDraft,
+  isDraftEmpty,
+} from "../components/ProviderPricingCard";
 
 export function PricingView() {
   const res = useApi(() => api.getPricing(), []);
   const data = res.data;
-  const [rows, setRows] = useState<PriceRow[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
   const [result, setResult] = useState("");
 
   useEffect(() => {
     if (!data) return;
-    const pricing = data.pricing || {};
-    setRows(Object.keys(pricing).sort().map((k) => entryToRow(k, pricing[k])));
+    const next: Record<string, DraftEntry> = {};
+    const userPricing = data.user_pricing || {};
+    for (const [pid, entry] of Object.entries(userPricing)) {
+      next[pid] = entryToDraft(entry);
+    }
+    setDrafts(next);
   }, [data]);
 
   if (res.loading && !data) return <Loading />;
   if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
-  const defaults = data?.defaults || {};
+  const providerModels: ProviderModelInfo[] = data?.provider_models || [];
+  const defaults: Record<string, PriceEntry> = data?.defaults || {};
   const unpriced = data?.unpriced || [];
 
-  const updateField = (i: number, field: keyof PriceRow, value: string) =>
-    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)));
-  const delRow = (i: number) => setRows((prev) => prev.filter((_, idx) => idx !== i));
-  const addRow = (model = "", p?: PriceEntry) =>
-    setRows((prev) => [...prev, entryToRow(model, p)]);
+  // 显示集合：当前 provider 列表 + 手动设过价但不在列表的「孤儿」provider
+  const orphanIds = Object.keys(drafts).filter(
+    (pid) => !providerModels.some((p) => p.id === pid),
+  );
+  const displayList: { id: string; type?: string; candidates: string[] }[] = [
+    ...providerModels.map((p) => ({ id: p.id, type: p.type, candidates: p.candidates })),
+    ...orphanIds.map((id) => ({ id, type: undefined, candidates: [] })),
+  ];
 
-  const pickPreset = (model: string) => {
-    if (rows.some((r) => r.model.trim() === model)) return;
-    addRow(model, defaults[model]);
-  };
-
-  const collect = (): Record<string, PriceEntry> => {
-    const out: Record<string, PriceEntry> = {};
-    rows.forEach((r) => {
-      const model = r.model.trim();
-      if (!model) return;
-      if (Object.prototype.hasOwnProperty.call(out, model)) {
-        throw new Error(`重复模型名：${model}`);
-      }
-      const entry: PriceEntry = {};
-      NUM_FIELDS.forEach((f) => {
-        const raw = r[f];
-        if (raw === "") return;
-        const n = parseFloat(raw);
-        if (Number.isNaN(n) || n < 0) throw new Error(`${model} 的 ${f} 非法数值`);
-        entry[f] = n;
-      });
-      out[model] = entry;
+  const updateDraft = (pid: string, patch: Partial<DraftEntry>) =>
+    setDrafts((prev) => {
+      const cur = prev[pid] ?? entryToDraft();
+      return { ...prev, [pid]: { ...cur, ...patch } };
     });
+  const clearDraft = (pid: string) =>
+    setDrafts((prev) => {
+      const next = { ...prev };
+      delete next[pid];
+      return next;
+    });
+  // 为未在 drafts 中的 provider 补一个空 draft（首次编辑时创建）
+  const ensureDraft = (pid: string): DraftEntry =>
+    drafts[pid] ?? entryToDraft(undefined);
+
+  const collect = (): Record<string, UserPricingEntry> => {
+    const out: Record<string, UserPricingEntry> = {};
+    for (const [pid, d] of Object.entries(drafts)) {
+      if (isDraftEmpty(d)) continue;
+      const entry = draftToEntry(d);
+      if (entry) out[pid] = entry;
+    }
     return out;
   };
 
@@ -102,37 +90,41 @@ export function PricingView() {
   };
 
   const reset = async () => {
-    if (!confirm("确定清空所有自定义定价、恢复内置默认？")) return;
+    if (!confirm("确定清空所有自定义定价、恢复内置默认匹配？")) return;
     setResult("重置中…");
     try {
       await api.postSaveConfig({ pricing: {} });
-      setResult("✅ 已重置为内置默认，立即生效");
+      setResult("✅ 已重置，立即生效");
       res.refetch();
     } catch (e) {
       setResult(`❌ 重置失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
+  const defaultKeys = useMemo(() => Object.keys(defaults).sort(), [defaults]);
+
   return (
     <div>
       {unpriced.length > 0 && (
         <Panel className="alert-panel">
-          <h2>未定价模型告警</h2>
+          <h2>未定价告警</h2>
           <div className="alert-body">
-            以下模型有用量但未配置单价，其成本被计为 <strong>$0</strong>
-            ，会导致成本统计偏低。请在下方定价表补充单价。
+            以下 provider+模型有用量但解析不到定价，其成本被计为 <strong>$0</strong>
+            ，会导致成本统计偏低。请为对应 provider 设置定价，或确认模型名能匹配内置默认。
           </div>
           <table>
             <thead>
               <tr>
+                <th>Provider</th>
                 <th>模型</th>
                 <th>用量 token</th>
                 <th>调用</th>
               </tr>
             </thead>
             <tbody>
-              {unpriced.map((u) => (
-                <tr key={u.model}>
+              {unpriced.map((u, i) => (
+                <tr key={`${u.provider_id || ""}-${u.model}-${i}`}>
+                  <td className="mono">{u.provider_id || "-"}</td>
                   <td className="mono">{u.model}</td>
                   <td>{fmtNum(u.tokens)}</td>
                   <td>{fmtNum(u.count)}</td>
@@ -144,76 +136,48 @@ export function PricingView() {
       )}
 
       <Panel>
-        <h2>模型定价</h2>
+        <h2>Provider 定价</h2>
         <div className="muted small" style={{ marginBottom: 8 }}>
-          单位 USD / 百万 token。修改后点「保存」即时热生效；某项留空表示沿用默认值（不覆盖）。
+          按 <strong>provider_id</strong> 设置定价：命中则按其计费模式生效；未设置时按模型名
+          匹配下方内置默认（per_token）。修改后点「保存」即时热生效。
         </div>
-        <div className="row" style={{ gap: 8, marginBottom: 8 }}>
-          <Button onClick={() => addRow()}>+ 添加模型</Button>
-          <Button onClick={reset} title="清空自定义定价，恢复内置默认">
-            重置为内置默认
-          </Button>
+        {displayList.length === 0 && (
+          <div className="muted small" style={{ margin: "8px 0" }}>
+            未获取到当前 AstrBot 的 provider 配置。可在 AstrBot 主配置添加 provider 后重载插件。
+          </div>
+        )}
+        <div className="overrides-list">
+          {displayList.map((p) => (
+            <ProviderPricingCard
+              key={p.id}
+              providerId={p.id}
+              type={p.type}
+              candidates={p.candidates}
+              draft={ensureDraft(p.id)}
+              defaults={defaults}
+              onChange={(patch) => updateDraft(p.id, patch)}
+              onClear={() => clearDraft(p.id)}
+            />
+          ))}
         </div>
-        <PresetSuggest defaults={defaults} onPick={pickPreset} />
-        <table>
-          <thead>
-            <tr>
-              <th>模型</th>
-              <th>输入</th>
-              <th>缓存命中</th>
-              <th>输出</th>
-              <th>缓存写入</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                <td>
-                  <input
-                    className="budget-input mono"
-                    value={r.model}
-                    onChange={(e) => updateField(i, "model", e.target.value)}
-                    style={{ width: 180 }}
-                  />
-                </td>
-                {NUM_FIELDS.map((f) => (
-                  <td key={f}>
-                    <input
-                      className="budget-input"
-                      type="number"
-                      step="any"
-                      min="0"
-                      value={r[f]}
-                      onChange={(e) => updateField(i, f, e.target.value)}
-                      style={{ width: 90 }}
-                    />
-                  </td>
-                ))}
-                <td>
-                  <button className="btn" title="删除该行" onClick={() => delRow(i)}>
-                    ✕
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
         <div className="row" style={{ marginTop: 8, gap: 10, alignItems: "center" }}>
           <Button variant="primary" onClick={save}>
             保存定价（热生效）
+          </Button>
+          <Button onClick={reset} title="清空自定义定价，恢复内置默认匹配">
+            重置全部
           </Button>
           <span className="muted">{result}</span>
         </div>
       </Panel>
 
-      {Object.keys(defaults).length > 0 && (
+      {defaultKeys.length > 0 && (
         <details className="panel">
           <summary>
-            内置默认单价（参考 OpenRouter，共 {Object.keys(defaults).length} 个模型，只读）
+            内置默认单价（参考 OpenRouter，共 {defaultKeys.length} 个模型，per_token，只读）
           </summary>
           <div className="muted small" style={{ margin: "6px 0" }}>
-            随插件版本更新；作为上方编辑表的预填基准与「重置为内置默认」的目标。
+            随插件版本更新；按模型名模糊匹配（前缀 / 子串），作为未设置 provider 定价时的回退基准。
           </div>
           <table>
             <thead>
@@ -226,20 +190,18 @@ export function PricingView() {
               </tr>
             </thead>
             <tbody>
-              {Object.keys(defaults)
-                .sort()
-                .map((k) => {
-                  const p = defaults[k] || {};
-                  return (
-                    <tr key={k}>
-                      <td className="mono">{k}</td>
-                      <td>{p.input != null ? p.input : "-"}</td>
-                      <td>{p.input_cached != null ? p.input_cached : "-"}</td>
-                      <td>{p.output != null ? p.output : "-"}</td>
-                      <td>{p.cache_creation != null ? p.cache_creation : "-"}</td>
-                    </tr>
-                  );
-                })}
+              {defaultKeys.map((k) => {
+                const p = defaults[k] || {};
+                return (
+                  <tr key={k}>
+                    <td className="mono">{k}</td>
+                    <td>{p.input != null ? p.input : "-"}</td>
+                    <td>{p.input_cached != null ? p.input_cached : "-"}</td>
+                    <td>{p.output != null ? p.output : "-"}</td>
+                    <td>{p.cache_creation != null ? p.cache_creation : "-"}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </details>

@@ -115,6 +115,12 @@ class Main(
         （fallback_provider 逐个尝试备用 Provider，或 stop_llm 拦截）。归因初始
         快照仅在未超限（或链路未处理）时记录。异常一律降级放行，绝不阻断主流程。
         """
+        # 为本次用户请求生成 request_id（per_request 计费用；function-calling 多步复用）。
+        # 独立 try，绝不影响后续预算/归因逻辑。
+        try:
+            self.ensure_request_id(event)
+        except Exception as e:
+            logger.warning("[cost_control] request_id 生成失败: %s", e)
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             model = getattr(req, "model", None) or None

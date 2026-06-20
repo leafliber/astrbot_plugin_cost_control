@@ -22,7 +22,7 @@ from astrbot import logger
 
 from .budget import day_window_start, month_window_start, resolve_tz
 from .config import get_config, get_pricing
-from .cost import compute_cost_value
+from .cost import compute_cost_grouped
 
 REPORT_JOB_NAME = "cost_control_daily_report"
 CLEANUP_JOB_NAME = "cost_control_cleanup"
@@ -154,10 +154,10 @@ class ScheduleMixin:
             logger.warning("[cost_control] 历史清理失败: %s", e)
 
     async def _grouped_cost(self, *, start: datetime) -> float:
-        """按模型分组聚合用量并求和成本（model 为空或无单价的行计 0）。"""
+        """按 (provider,model) 分组聚合用量并求和成本（无定价的行计 0）。"""
         try:
-            rows = await self.query_usage_grouped(by="model", start=start)
+            rows = await self.query_usage_grouped(by="provider_model", start=start)
             pricing = get_pricing(getattr(self, "cfg", None))
-            return sum(compute_cost_value(r, r.get("key") or None, pricing) for r in rows)
+            return compute_cost_grouped(rows, pricing)
         except Exception:
             return 0.0

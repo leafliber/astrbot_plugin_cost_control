@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from .budget import day_window_start, resolve_tz
 from .cache_diag import hit_rate
 from .config import get_config, get_pricing
-from .cost import compute_cost_value
+from .cost import compute_cost_value, compute_row_cost
 
 
 def report_window_start(
@@ -82,14 +82,14 @@ def compare_windows(
     return cur_start, cur_end, prev_start, prev_end
 
 
-def _row_cost(row: dict[str, Any], pricing: dict[str, dict[str, float]]) -> float:
-    """按模型单价算单行成本（纯函数辅助）。模型无匹配单价返回 0.0。"""
-    return compute_cost_value(row, row.get("key") or None, pricing)
+def _row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
+    """按 (provider_id, model) 解析定价算单行成本（纯函数辅助）。无定价返回 0.0。"""
+    return compute_row_cost(row, pricing)
 
 
 def _aggregate_supplements(
     sups: list[Any],
-    pricing: dict[str, dict[str, float]] | None = None,
+    pricing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从补充记录列表聚合缓存命中率与归因注入（纯函数）。
 
@@ -136,6 +136,7 @@ def _aggregate_supplements(
                     "token_output": token_output,
                     "cache_creation": getattr(s, "cache_creation", None),
                 },
+                getattr(s, "provider_id", None) or None,
                 getattr(s, "provider_model", None),
                 pricing,
             )
@@ -205,20 +206,24 @@ class AnalyticsMixin:
         }
         try:
             usage = await self.query_usage(start=start)
-            rows = await self.query_usage_grouped(by="model", start=start)
-            cost_by_model = [
-                {
-                    "model": r.get("key") or "",
-                    "count": r.get("count", 0),
-                    "tokens": (
-                        int(r.get("token_input_other", 0) or 0)
-                        + int(r.get("token_input_cached", 0) or 0)
-                        + int(r.get("token_output", 0) or 0)
-                    ),
-                    "cost": round(_row_cost(r, pricing), 6),
-                }
-                for r in rows
-            ]
+            rows = await self.query_usage_grouped(by="provider_model", start=start)
+            # 按 model 二次聚合（同模型可能由多个 provider 提供、不同价）
+            model_agg: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                model_name = r.get("provider_model") or ""
+                m = model_agg.setdefault(
+                    model_name,
+                    {"model": model_name, "count": 0, "tokens": 0, "cost": 0.0},
+                )
+                m["count"] += int(r.get("count", 0) or 0)
+                toks = (
+                    int(r.get("token_input_other", 0) or 0)
+                    + int(r.get("token_input_cached", 0) or 0)
+                    + int(r.get("token_output", 0) or 0)
+                )
+                m["tokens"] += toks
+                m["cost"] += _row_cost(r, pricing)
+            cost_by_model = [{**m, "cost": round(float(m["cost"]), 6)} for m in model_agg.values()]
             cost_by_model.sort(key=lambda m: m["cost"], reverse=True)
             total_cost = round(sum(m["cost"] for m in cost_by_model), 6)
 

@@ -367,38 +367,43 @@ def test_check_dimensions_dual_zero_limits_skipped():
 
 
 def test_groups_cost_multi_model():
+    pricing = {"defaults": DEFAULT_PRICING, "user": {}}
     groups = [
         {
-            "key": "gpt-4o",
+            "provider_id": None,
+            "provider_model": "gpt-4o",
             "token_input_other": 1_000_000,
             "token_input_cached": 0,
             "token_output": 0,
         },
         {
-            "key": "gpt-4o-mini",
+            "provider_id": None,
+            "provider_model": "gpt-4o-mini",
             "token_input_other": 1_000_000,
             "token_input_cached": 0,
             "token_output": 0,
         },
     ]
     # gpt-4o 1M input = $2.5；gpt-4o-mini 1M input = $0.15 → 合计 $2.65
-    assert abs(_groups_cost(groups, DEFAULT_PRICING) - 2.65) < 1e-6
+    assert abs(_groups_cost(groups, pricing) - 2.65) < 1e-6
 
 
 def test_groups_cost_unpriced_zero():
+    pricing = {"defaults": DEFAULT_PRICING, "user": {}}
     groups = [
         {
-            "key": "nonexistent-xyz",
+            "provider_id": None,
+            "provider_model": "nonexistent-xyz",
             "token_input_other": 1_000_000,
             "token_input_cached": 0,
             "token_output": 0,
         },
     ]
-    assert _groups_cost(groups, DEFAULT_PRICING) == 0.0
+    assert _groups_cost(groups, pricing) == 0.0
 
 
 def test_groups_cost_empty():
-    assert _groups_cost([], DEFAULT_PRICING) == 0.0
+    assert _groups_cost([], {"defaults": DEFAULT_PRICING, "user": {}}) == 0.0
 
 
 class _BudgetStub(BudgetMixin):

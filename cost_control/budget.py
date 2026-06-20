@@ -37,7 +37,7 @@ from .config import (
     get_config,
     get_pricing,
 )
-from .cost import compute_cost_value
+from .cost import compute_cost_grouped, compute_row_cost
 
 
 def resolve_tz(context: Any) -> ZoneInfo:
@@ -138,13 +138,17 @@ def check_dimensions_dual(
 
 def _groups_cost(
     groups: list[dict[str, Any]],
-    pricing: dict[str, dict[str, float]],
+    pricing: dict[str, Any],
 ) -> float:
-    """把 ``query_usage_grouped(by="model")`` 结果按模型求和花费（纯函数）。"""
+    """把 ``query_usage_grouped(by="provider_model")`` 结果按行求和花费（纯函数）。
+
+    每行含 ``provider_id`` / ``provider_model`` / ``count`` / token 字段，委托
+    :func:`cost_control.cost.compute_row_cost`（按 provider_id 匹配用户定价、按 mode 计费）。
+    """
     total = 0.0
     for g in groups or []:
         try:
-            total += compute_cost_value(g, g.get("key"), pricing)
+            total += compute_row_cost(g, pricing)
         except Exception:
             continue
     return round(total, 6)
@@ -326,7 +330,7 @@ class BudgetMixin:
         user_id: str | None,
         provider_id: str | None,
         d_start: datetime,
-        pricing: dict[str, dict[str, float]],
+        pricing: dict[str, Any],
     ) -> float:
         """按 override target 聚合当前周期的 ``metric`` 用量（token 数 / USD 花费）。"""
         tt = str(ov.get("target_type") or "")
@@ -335,11 +339,7 @@ class BudgetMixin:
             if tt == "umo":
                 return float(total_tokens(await self.query_usage(umo=tv, start=d_start)))
             if tt == "provider":
-                return float(
-                    total_tokens(
-                        await self.query_usage(provider=tv, start=d_start)
-                    )
-                )
+                return float(total_tokens(await self.query_usage(provider=tv, start=d_start)))
             if tt == "user":
                 if not user_id:
                     return 0.0
@@ -348,13 +348,11 @@ class BudgetMixin:
         # cost
         if tt == "umo":
             return _groups_cost(
-                await self.query_usage_grouped(by="model", umo=tv, start=d_start),
+                await self.query_usage_grouped(by="provider_model", umo=tv, start=d_start),
                 pricing,
             )
         if tt == "provider":
-            rows = await self.query_usage_grouped(
-                by="model", provider=tv, start=d_start
-            )
+            rows = await self.query_usage_grouped(by="provider_model", provider=tv, start=d_start)
             return _groups_cost(rows, pricing)
         if tt == "user":
             if not user_id:
@@ -402,11 +400,7 @@ class BudgetMixin:
             overrides = get_budget_overrides(cfg)
             has_global_token = any(float(limits_t.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
             has_global_cost = any(float(limits_c.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
-            if (
-                not has_global_token
-                and not has_global_cost
-                and not overrides
-            ):
+            if not has_global_token and not has_global_cost and not overrides:
                 return zero
 
             now = datetime.now(UTC)
@@ -416,9 +410,7 @@ class BudgetMixin:
 
             user_id = await self._user_id_for_request(event) if event is not None else None
             provider_id = (
-                await self._provider_id_for_request(event, umo)
-                if event is not None
-                else None
+                await self._provider_id_for_request(event, umo) if event is not None else None
             )
 
             # ===== 1. 局部阈值（override）=====
@@ -487,9 +479,7 @@ class BudgetMixin:
                 session_total = total_tokens(session_usage)
                 model_total = session_total
                 if model:
-                    model_total = total_tokens(
-                        await self.query_usage(model=model, start=d_start)
-                    )
+                    model_total = total_tokens(await self.query_usage(model=model, start=d_start))
                 used_t_map = {
                     "per_session_daily": session_total,
                     "per_user_daily": session_total,
@@ -500,14 +490,15 @@ class BudgetMixin:
             if has_global_cost:
                 pricing = self.get_pricing()
                 ses_cost = _groups_cost(
-                    await self.query_usage_grouped(by="model", umo=umo, start=d_start),
+                    await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start),
                     pricing,
                 )
                 mod_cost = ses_cost
                 if model:
-                    mod_cost = compute_cost_value(
-                        await self.query_usage(model=model, start=d_start),
-                        model,
+                    mod_cost = compute_cost_grouped(
+                        await self.query_usage_grouped(
+                            by="provider_model", model=model, start=d_start
+                        ),
                         pricing,
                     )
                 used_c_map = {
@@ -515,11 +506,11 @@ class BudgetMixin:
                     "per_user_daily": ses_cost,
                     "per_model_daily": mod_cost,
                     "global_daily": _groups_cost(
-                        await self.query_usage_grouped(by="model", start=d_start),
+                        await self.query_usage_grouped(by="provider_model", start=d_start),
                         pricing,
                     ),
                     "global_monthly": _groups_cost(
-                        await self.query_usage_grouped(by="model", start=m_start),
+                        await self.query_usage_grouped(by="provider_model", start=m_start),
                         pricing,
                     ),
                 }
@@ -556,9 +547,7 @@ class BudgetMixin:
             action = str(result.get("on_exceeded") or "stop").lower()
             if action == "fallback":
                 pids = [
-                    str(p)
-                    for p in (result.get("fallback_provider_ids") or [])
-                    if str(p).strip()
+                    str(p) for p in (result.get("fallback_provider_ids") or []) if str(p).strip()
                 ]
                 if pids:
                     return await self._try_fallback(
@@ -595,10 +584,7 @@ class BudgetMixin:
         used = result.get("used")
         limit = result.get("limit")
         if result.get("metric") == "cost":
-            return (
-                f"⏸ 已超出花费预算（{dim}）："
-                f"${float(used or 0):.4f} / ${float(limit or 0):.2f}"
-            )
+            return f"⏸ 已超出花费预算（{dim}）：${float(used or 0):.4f} / ${float(limit or 0):.2f}"
         return f"⏸ 已超出预算（{dim}）：用 {used} / 限 {limit} token"
 
     async def _try_fallback(
@@ -689,9 +675,7 @@ class BudgetMixin:
             pass
 
         umo = str(
-            getattr(event, "unified_msg_origin", None)
-            or getattr(event, "session_id", None)
-            or ""
+            getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", None) or ""
         )
         record = {
             "umo": umo,

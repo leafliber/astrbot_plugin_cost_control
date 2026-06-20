@@ -118,7 +118,7 @@ def test_aggregate_with_pricing_sums_cost():
             injection_total=None,
         ),
     ]
-    r = _aggregate_supplements(sups, DEFAULT_PRICING)
+    r = _aggregate_supplements(sups, {"defaults": DEFAULT_PRICING, "user": {}})
     # 两条各 1M input gpt-4o = $2.5，合计 $5.0
     assert r["by_session"][0]["umo"] == "s1"
     assert abs(r["by_session"][0]["cost"] - 5.0) < 1e-6
@@ -136,7 +136,7 @@ def test_aggregate_unpriced_model_cost_zero():
             injection_total=None,
         ),
     ]
-    r = _aggregate_supplements(sups, DEFAULT_PRICING)
+    r = _aggregate_supplements(sups, {"defaults": DEFAULT_PRICING, "user": {}})
     assert r["by_session"][0]["cost"] == 0.0
 
 

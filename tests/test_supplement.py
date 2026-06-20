@@ -51,3 +51,32 @@ def test_extract_cache_no_usage():
     assert cc is None
     assert cr is None
     assert raw is None
+
+
+# ===== request_id 采集（ensure_request_id 生成 + _read_request_id 读回）=====
+
+
+def test_ensure_request_id_generates_once():
+    from cost_control.supplement import SupplementMixin
+
+    # ensure_request_id 不引用 self，传任意实例作 self 即可
+    event = SimpleNamespace()
+    SupplementMixin.ensure_request_id(object(), event)  # type: ignore[arg-type]
+    rid1 = getattr(event, "_cost_control_request_id", None)
+    assert rid1 and rid1.startswith("cc_")
+    # 第二次调用幂等：不覆盖已有值
+    SupplementMixin.ensure_request_id(object(), event)  # type: ignore[arg-type]
+    assert getattr(event, "_cost_control_request_id", None) == rid1
+
+
+def test_read_request_id_reads_back():
+    from cost_control.supplement import _read_request_id
+
+    event = SimpleNamespace(_cost_control_request_id="cc_abc123")
+    assert _read_request_id(event) == "cc_abc123"
+
+
+def test_read_request_id_none_when_absent():
+    from cost_control.supplement import _read_request_id
+
+    assert _read_request_id(SimpleNamespace()) is None

@@ -175,13 +175,11 @@ class WebApiMixin:
             return None
 
     @staticmethod
-    def _supplement_to_dict(
-        s: Any, pricing: dict[str, dict[str, float]] | None = None
-    ) -> dict[str, Any]:
+    def _supplement_to_dict(s: Any, pricing: dict[str, Any] | None = None) -> dict[str, Any]:
         """把 ``CostSupplement`` 行序列化为 JSON 友好 dict。
 
-        ``pricing`` 非空时按模型单价算出本条成本 ``cost``（未定价为 0.0，与
-        全局口径一致）。
+        ``pricing`` 非空时按生效定价算出本条成本 ``cost``（未定价为 0.0）。per_request
+        模式单条无法独立计费（需 distinct request_id 聚合），此处按 0 近似。
         """
         from .cost import compute_cost_value
 
@@ -200,6 +198,7 @@ class WebApiMixin:
                         "token_output": token_output,
                         "cache_creation": cache_creation,
                     },
+                    getattr(s, "provider_id", None) or None,
                     getattr(s, "provider_model", None),
                     pricing,
                 ),
@@ -249,7 +248,7 @@ class WebApiMixin:
 
             from .analytics import compare_windows
             from .budget import total_tokens
-            from .cost import compute_cost_value
+            from .cost import compute_cost_grouped
 
             window = self._param("window", "daily") or "daily"
             now = datetime.now(UTC)
@@ -260,11 +259,8 @@ class WebApiMixin:
 
             async def _stats(start: datetime, end: datetime) -> dict[str, Any]:
                 usage = await self.query_usage(start=start, end=end)
-                rows = await self.query_usage_grouped(by="model", start=start, end=end)
-                cost = round(
-                    sum(compute_cost_value(r, r.get("key") or None, pricing) for r in rows),
-                    6,
-                )
+                rows = await self.query_usage_grouped(by="provider_model", start=start, end=end)
+                cost = compute_cost_grouped(rows, pricing)
                 return {
                     "cost": cost,
                     "count": int(usage.get("count", 0) or 0),
@@ -373,7 +369,7 @@ class WebApiMixin:
         （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
         """
         try:
-            from .cost import compute_cost_value
+            from .cost import compute_row_cost
 
             by = self._param("by", "model") or "model"
             if by not in ("model", "provider", "umo"):
@@ -383,39 +379,83 @@ class WebApiMixin:
             umo = self._param("umo") or None
             provider = self._param("provider") or None
             model = self._param("model") or None
-            rows = await self.query_usage_grouped(
-                by=by,
-                umo=umo,
-                provider=provider,
-                model=model,
-                start=start,
-                end=end,
-            )
             pricing = self.get_pricing()
-            total_tokens = 0
+
+            # model / provider 维度：用 (provider_id, provider_model) 底层行精确算成本
+            # （按 provider_id 匹配用户定价），再二次聚合到请求维度。umo 维度底层无
+            # provider/model，成本无法精确（维持 0，已知局限）。
+            groups: dict[str, dict[str, Any]] = {}
+            if by == "umo":
+                rows = await self.query_usage_grouped(
+                    by="umo",
+                    umo=umo,
+                    provider=provider,
+                    model=model,
+                    start=start,
+                    end=end,
+                )
+                for r in rows:
+                    key = r.get("key") or ""
+                    g = groups.setdefault(
+                        key,
+                        {
+                            "key": key,
+                            "count": 0,
+                            "tokens": 0,
+                            "token_input_other": 0,
+                            "token_input_cached": 0,
+                            "token_output": 0,
+                            "cost": 0.0,
+                        },
+                    )
+                    tio = int(r.get("token_input_other", 0) or 0)
+                    tic = int(r.get("token_input_cached", 0) or 0)
+                    tio_out = int(r.get("token_output", 0) or 0)
+                    g["count"] += int(r.get("count", 0) or 0)
+                    g["tokens"] += tio + tic + tio_out
+                    g["token_input_other"] += tio
+                    g["token_input_cached"] += tic
+                    g["token_output"] += tio_out
+            else:
+                pm_rows = await self.query_usage_grouped(
+                    by="provider_model",
+                    umo=umo,
+                    provider=provider,
+                    model=model,
+                    start=start,
+                    end=end,
+                )
+                for r in pm_rows:
+                    key = (r.get("provider_model") if by == "model" else r.get("provider_id")) or ""
+                    g = groups.setdefault(
+                        key,
+                        {
+                            "key": key,
+                            "count": 0,
+                            "tokens": 0,
+                            "token_input_other": 0,
+                            "token_input_cached": 0,
+                            "token_output": 0,
+                            "cost": 0.0,
+                        },
+                    )
+                    tio = int(r.get("token_input_other", 0) or 0)
+                    tic = int(r.get("token_input_cached", 0) or 0)
+                    tio_out = int(r.get("token_output", 0) or 0)
+                    g["count"] += int(r.get("count", 0) or 0)
+                    g["tokens"] += tio + tic + tio_out
+                    g["token_input_other"] += tio
+                    g["token_input_cached"] += tic
+                    g["token_output"] += tio_out
+                    g["cost"] += compute_row_cost(r, pricing)
+
+            total_tokens = sum(int(g["tokens"]) for g in groups.values())
             out: list[dict[str, Any]] = []
-            for r in rows:
-                tokens = (
-                    int(r.get("token_input_other", 0) or 0)
-                    + int(r.get("token_input_cached", 0) or 0)
-                    + int(r.get("token_output", 0) or 0)
-                )
-                cost = round(compute_cost_value(r, r.get("key") or None, pricing), 6)
-                total_tokens += tokens
-                out.append(
-                    {
-                        "key": r.get("key") or "",
-                        "count": int(r.get("count", 0) or 0),
-                        "tokens": tokens,
-                        "token_input_other": int(r.get("token_input_other", 0) or 0),
-                        "token_input_cached": int(r.get("token_input_cached", 0) or 0),
-                        "token_output": int(r.get("token_output", 0) or 0),
-                        "cost": cost,
-                    }
-                )
+            for g in groups.values():
+                g["cost"] = round(float(g["cost"]), 6)
+                g["pct"] = round(g["tokens"] * 100.0 / total_tokens, 1) if total_tokens else 0.0
+                out.append(g)
             out.sort(key=lambda x: x["cost"], reverse=True)
-            for o in out:
-                o["pct"] = round(o["tokens"] * 100.0 / total_tokens, 1) if total_tokens else 0.0
             return self._ok(
                 {
                     "by": by,
@@ -480,35 +520,33 @@ class WebApiMixin:
             top_session.sort(key=lambda r: total_tokens(r), reverse=True)
             ses_used = total_tokens(top_session[0]) if top_session else 0
             ses_key = str((top_session[0] or {}).get("key", "")) if top_session else ""
-            top_model = await self.query_usage_grouped(by="model", start=d_start)
+            top_model = await self.query_usage_grouped(by="provider_model", start=d_start)
             top_model.sort(key=lambda r: total_tokens(r), reverse=True)
             mod_used = total_tokens(top_model[0]) if top_model else 0
-            mod_key = str((top_model[0] or {}).get("key", "")) if top_model else ""
+            mod_key = str((top_model[0] or {}).get("provider_model", "")) if top_model else ""
 
             if has_cost:
                 from .budget import _groups_cost
-                from .cost import compute_cost_value
+                from .cost import compute_row_cost
 
                 pricing = self.get_pricing()
                 day_cost = _groups_cost(
-                    await self.query_usage_grouped(by="model", start=d_start), pricing
+                    await self.query_usage_grouped(by="provider_model", start=d_start), pricing
                 )
                 month_cost = _groups_cost(
-                    await self.query_usage_grouped(by="model", start=m_start), pricing
+                    await self.query_usage_grouped(by="provider_model", start=m_start), pricing
                 )
                 ses_cost = (
                     _groups_cost(
-                        await self.query_usage_grouped(by="model", umo=ses_key, start=d_start),
+                        await self.query_usage_grouped(
+                            by="provider_model", umo=ses_key, start=d_start
+                        ),
                         pricing,
                     )
                     if ses_key
                     else 0.0
                 )
-                mod_cost = (
-                    round(compute_cost_value(top_model[0], mod_key, pricing), 6)
-                    if top_model
-                    else 0.0
-                )
+                mod_cost = round(compute_row_cost(top_model[0], pricing), 6) if top_model else 0.0
             else:
                 day_cost = month_cost = ses_cost = mod_cost = 0.0
 
@@ -556,37 +594,27 @@ class WebApiMixin:
                         if ov.get("cost_limit", 0) > 0:
                             used_c_v = _groups_cost(
                                 await self.query_usage_grouped(
-                                    by="model", umo=tv, start=d_start
+                                    by="provider_model", umo=tv, start=d_start
                                 ),
                                 pricing,
                             )
                     elif tt == "provider":
                         if ov.get("token_limit", 0) > 0:
                             used_t_v = float(
-                                total_tokens(
-                                    await self.query_usage(provider=tv, start=d_start)
-                                )
+                                total_tokens(await self.query_usage(provider=tv, start=d_start))
                             )
                         if ov.get("cost_limit", 0) > 0:
                             used_c_v = _groups_cost(
                                 await self.query_usage_grouped(
-                                    by="model", provider=tv, start=d_start
+                                    by="provider_model", provider=tv, start=d_start
                                 ),
                                 pricing,
                             )
                     elif tt == "user":
-                        if ov.get("token_limit", 0) > 0 and hasattr(
-                            self, "query_user_token_total"
-                        ):
-                            used_t_v = float(
-                                await self.query_user_token_total(tv, d_start)
-                            )
-                        if ov.get("cost_limit", 0) > 0 and hasattr(
-                            self, "query_user_cost_total"
-                        ):
-                            used_c_v = float(
-                                await self.query_user_cost_total(tv, d_start, pricing)
-                            )
+                        if ov.get("token_limit", 0) > 0 and hasattr(self, "query_user_token_total"):
+                            used_t_v = float(await self.query_user_token_total(tv, d_start))
+                        if ov.get("cost_limit", 0) > 0 and hasattr(self, "query_user_cost_total"):
+                            used_c_v = float(await self.query_user_cost_total(tv, d_start, pricing))
                 except Exception:
                     # 单条 override 聚合失败不影响其它条
                     pass
@@ -609,9 +637,7 @@ class WebApiMixin:
                         "cost_limit": float(ov.get("cost_limit") or 0.0),
                         "on_exceeded": str(ov.get("on_exceeded") or "stop"),
                         "stop_message": str(ov.get("stop_message") or ""),
-                        "fallback_provider_ids": list(
-                            ov.get("fallback_provider_ids") or []
-                        ),
+                        "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
                         "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
                         "current": {
                             "token": _ratio(used_t_v, ov.get("token_limit", 0)),
@@ -628,9 +654,7 @@ class WebApiMixin:
                     "limits_cost": limits_cost,
                     "dimensions": {
                         "global_daily": _dim_entry("global_daily", day_total, day_cost),
-                        "global_monthly": _dim_entry(
-                            "global_monthly", month_total, month_cost
-                        ),
+                        "global_monthly": _dim_entry("global_monthly", month_total, month_cost),
                         "per_session_daily": _dim_entry(
                             "per_session_daily",
                             ses_used,
@@ -661,15 +685,62 @@ class WebApiMixin:
         except Exception as e:
             return self._err(str(e))
 
-    async def api_providers(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /providers``：astrbot 当前配置的 Provider 列表（供策略编辑器下拉选）。
+    def _collect_provider_models(self) -> list[dict[str, Any]]:
+        """从 ``context.get_config()`` 遍历 provider 配置，返回 provider + 候选模型列表。
 
-        经 ``context.get_all_providers()`` 取全部 Provider，``.meta()`` 取
-        ``{id, model, type}``，按 id 去重。任一步异常兜空，绝不抛出。
+        每个 provider 读 ``id`` / ``type`` / ``model_config.model``（主模型）/
+        ``model_config.model_list``（候选模型数组，每项 ``model_name`` / ``enable``），
+        合并主模型 + 启用候选，按 id 去重，返回
+        ``[{id, model, type, candidates: [str, ...]}]``。
+
+        三级降级：读 model_config.model → 回退 ``get_all_providers().meta()`` 单 model
+        → 空列表。全步骤 try 包裹，绝不抛异常（配置结构跨 AstrBot 版本可能差异）。
         """
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        # 1. 优先从主配置读 provider 全量模型（含 model_list 候选）
         try:
-            provs: list[dict[str, Any]] = []
-            seen: set[str] = set()
+            cfg = self.context.get_config() or {}
+            prov_list = cfg.get("provider") if isinstance(cfg, dict) else None
+            if isinstance(prov_list, list):
+                for p in prov_list:
+                    try:
+                        if not isinstance(p, dict):
+                            continue
+                        pid = str(p.get("id") or "").strip()
+                        if not pid or pid in seen:
+                            continue
+                        seen.add(pid)
+                        ptype = str(p.get("type") or "")
+                        mc = p.get("model_config") or {}
+                        main_model = str(mc.get("model") or "").strip() or None
+                        candidates: list[str] = []
+                        ml = mc.get("model_list")
+                        if isinstance(ml, list):
+                            for it in ml:
+                                if not isinstance(it, dict):
+                                    continue
+                                if not it.get("enable", True):
+                                    continue
+                                m = str(it.get("model_name") or it.get("model") or "").strip()
+                                if m and m not in candidates:
+                                    candidates.append(m)
+                        if main_model and main_model not in candidates:
+                            candidates.insert(0, main_model)
+                        out.append(
+                            {
+                                "id": pid,
+                                "model": main_model or "",
+                                "type": ptype,
+                                "candidates": candidates,
+                            }
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        # 2. 降级：主配置读不到时，用 get_all_providers().meta() 补单 model 的 provider
+        if not out:
             try:
                 all_provs = self.context.get_all_providers()
             except Exception:
@@ -681,16 +752,27 @@ class WebApiMixin:
                     if not pid or pid in seen:
                         continue
                     seen.add(pid)
-                    provs.append(
+                    model = str(getattr(meta, "model", "") or "")
+                    out.append(
                         {
                             "id": pid,
-                            "model": str(getattr(meta, "model", "") or ""),
+                            "model": model,
                             "type": str(getattr(meta, "type", "") or ""),
+                            "candidates": [model] if model else [],
                         }
                     )
                 except Exception:
                     continue
-            return self._ok({"providers": provs})
+        return out
+
+    async def api_providers(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /providers``：astrbot 当前配置的 Provider 列表（含候选模型）。
+
+        经 :meth:`_collect_provider_models` 取全部 provider 及其候选模型。任一步异常
+        兜空，绝不抛出。
+        """
+        try:
+            return self._ok({"providers": self._collect_provider_models()})
         except Exception as e:
             return self._err(str(e))
 
@@ -817,27 +899,30 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_pricing(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /pricing``：模型单价表 + 有用量但未定价的模型告警 + 内置默认表。
+        """``GET /pricing``：定价页所需全部数据。
 
-        返回 ``{pricing, unpriced, defaults}``：
+        返回 ``{provider_models, user_pricing, defaults, unpriced}``：
 
-        - ``pricing``：生效表（内置默认 ⊕ 用户 ``pricing`` 配置覆盖）。
-        - ``defaults``：内置出厂默认单价（``DEFAULT_PRICING``，参考 OpenRouter），
-          供前端折叠区只读展示与「重置为默认」基准。
-        - ``unpriced``：全量历史（``query_usage_grouped(by="model")``）中
-          :func:`cost.match_pricing` 匹配不到单价的模型——这些模型的成本被计为 0，
-          会使整体成本统计偏低，需提示用户补单价。附 token 量表明失真影响范围。
+        - ``provider_models``：当前 AstrBot 配置的全部 provider 及其候选模型（见
+          :meth:`_collect_provider_models`），供前端按 provider 展示与编辑。
+        - ``user_pricing``：用户自定义定价（``cfg["pricing"]``，key=provider_id）。
+        - ``defaults``：内置出厂默认单价（``DEFAULT_PRICING``，key=模型名，per_token），
+          供前端折叠区只读展示与 per_token 预填基准。
+        - ``unpriced``：全量历史（``query_usage_grouped(by="provider_model")``）中
+          :func:`cost.resolve_pricing` 解析不到定价的 (provider,model)——其成本被计
+          为 0，会使成本统计偏低，需提示用户补定价。附 token 量表明失真影响范围。
         """
         try:
-            from .cost import match_pricing
+            from .cost import resolve_pricing
 
             pricing = self.get_pricing()
             unpriced: list[dict[str, Any]] = []
             try:
-                rows = await self.query_usage_grouped(by="model")
+                rows = await self.query_usage_grouped(by="provider_model")
                 for r in rows:
-                    model = r.get("key") or ""
-                    if model and match_pricing(model, pricing) is None:
+                    provider_id = r.get("provider_id") or ""
+                    model = r.get("provider_model") or ""
+                    if model and resolve_pricing(provider_id or None, model, pricing) is None:
                         tokens = (
                             int(r.get("token_input_other", 0) or 0)
                             + int(r.get("token_input_cached", 0) or 0)
@@ -845,6 +930,7 @@ class WebApiMixin:
                         )
                         unpriced.append(
                             {
+                                "provider_id": provider_id,
                                 "model": model,
                                 "tokens": tokens,
                                 "count": int(r.get("count", 0) or 0),
@@ -853,7 +939,14 @@ class WebApiMixin:
                 unpriced.sort(key=lambda x: x["tokens"], reverse=True)
             except Exception:
                 pass  # 用量查询失败不阻断定价表展示
-            return self._ok({"pricing": pricing, "unpriced": unpriced, "defaults": DEFAULT_PRICING})
+            return self._ok(
+                {
+                    "provider_models": self._collect_provider_models(),
+                    "user_pricing": pricing.get("user", {}),
+                    "defaults": DEFAULT_PRICING,
+                    "unpriced": unpriced,
+                }
+            )
         except Exception as e:
             return self._err(str(e))
 
@@ -930,8 +1023,19 @@ class WebApiMixin:
                 out[k] = sv
             elif k == "pricing":
                 if not isinstance(v, dict):
-                    return None, "pricing 必须是对象"
-                out[k] = {str(mk): p for mk, p in v.items() if isinstance(p, dict)}
+                    return None, "pricing 必须是对象（key=provider_id）"
+                # 复用 config._normalize_user_entry 按 mode 规范化（key=provider_id）
+                from .config import _normalize_user_entry
+
+                normalized_p: dict[str, dict[str, Any]] = {}
+                for pid, entry in v.items():
+                    pid_s = str(pid).strip()
+                    if not pid_s:
+                        continue
+                    n = _normalize_user_entry(entry)
+                    if n is not None:
+                        normalized_p[pid_s] = n
+                out[k] = normalized_p
             elif k in CONFIG_DEFAULTS:
                 out[k] = coerce_to_default_type(v, CONFIG_DEFAULTS[k])
             # else: 未知 key 忽略

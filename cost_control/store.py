@@ -44,6 +44,10 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     provider_model: str | None = Field(default=None, index=True)
     conversation_id: str | None = Field(default=None, index=True)
     response_id: str | None = Field(default=None, index=True)
+    # 用户请求 ID（一次用户消息触发的完整 pipeline；function-calling 多步 LLM 调用
+    # 共享同一值）。由 on_llm_request_head 生成并挂到 event，on_llm_response 读回。
+    # 用于 per_request 计费模式按 distinct request_id 计数。主表 ProviderStat 无此字段。
+    request_id: str | None = Field(default=None, index=True)
 
     # token 三类（冗余存储，便于独立库查询，不必 JOIN 主库）
     token_input_other: int = Field(default=0)
@@ -155,6 +159,7 @@ class StoreMixin:
 
         当前迁移项：
         - ``user_id TEXT``（按用户 override 需要；索引由后续 ``CREATE INDEX IF NOT EXISTS`` 兜底）
+        - ``request_id TEXT``（per_request 计费按 distinct request_id 计数；索引兜底）
 
         任何 SQLite 错误吞掉（开发期重命名/删除列属人为操作，不应阻断）。
         """
@@ -162,14 +167,20 @@ class StoreMixin:
             res = await conn.execute(text("PRAGMA table_info(cost_supplements)"))
             cols = {row[1] for row in res.fetchall()}
             if "user_id" not in cols:
-                await conn.execute(
-                    text("ALTER TABLE cost_supplements ADD COLUMN user_id TEXT")
-                )
+                await conn.execute(text("ALTER TABLE cost_supplements ADD COLUMN user_id TEXT"))
+            if "request_id" not in cols:
+                await conn.execute(text("ALTER TABLE cost_supplements ADD COLUMN request_id TEXT"))
             # 索引（IF NOT EXISTS 在 SQLite 3.8+ 可用）
             await conn.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_cost_supplements_user_id "
                     "ON cost_supplements (user_id)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_cost_supplements_request_id "
+                    "ON cost_supplements (request_id)"
                 )
             )
         except Exception:
@@ -193,6 +204,7 @@ class StoreMixin:
             provider_model=record.get("provider_model"),
             conversation_id=record.get("conversation_id"),
             response_id=record.get("response_id"),
+            request_id=record.get("request_id"),
             token_input_other=int(record.get("token_input_other", 0) or 0),
             token_input_cached=int(record.get("token_input_cached", 0) or 0),
             token_output=int(record.get("token_output", 0) or 0),
@@ -275,12 +287,8 @@ class StoreMixin:
             maker = await self._ensure_session_maker()
             async with maker() as session:
                 stmt = select(
-                    func.coalesce(
-                        func.sum(CostSupplement.token_input_other), 0
-                    ),
-                    func.coalesce(
-                        func.sum(CostSupplement.token_input_cached), 0
-                    ),
+                    func.coalesce(func.sum(CostSupplement.token_input_other), 0),
+                    func.coalesce(func.sum(CostSupplement.token_input_cached), 0),
                     func.coalesce(func.sum(CostSupplement.token_output), 0),
                 ).where(CostSupplement.user_id == user_id)
                 if start:
@@ -296,11 +304,19 @@ class StoreMixin:
         self,
         user_id: str,
         start: datetime,
-        pricing: dict[str, dict[str, float]],
+        pricing: dict[str, Any],
     ) -> float:
-        """按 user_id 聚合自 ``start`` 以来的花费（按模型单价逐行算，失败返回 0.0）。"""
+        """按 user_id 聚合自 ``start`` 以来的花费（supplement 路径，精确含 per_request）。
+
+        逐行按 (provider_id, model) 解析定价规则：
+
+        - per_token / per_turn：逐行算后求和。
+        - per_request：按 provider 聚合 distinct ``request_id`` 数 × price（**精确**，
+          supplement 表有 request_id；主表路径无此字段只能近似）。request_id 为 NULL
+          的行无法归属，跳过。
+        """
         try:
-            from .cost import compute_cost_value
+            from .cost import _cost_per_token, resolve_pricing
 
             maker = await self._ensure_session_maker()
             async with maker() as session:
@@ -309,21 +325,48 @@ class StoreMixin:
                     stmt = stmt.where(CostSupplement.created_at >= start)
                 result = await session.execute(stmt)
                 rows = list(result.scalars().all())
+
             total = 0.0
+            # per_request：按 provider 聚合 distinct request_id（精确）
+            req_prices: dict[str, float] = {}
             for r in rows:
                 try:
-                    total += compute_cost_value(
-                        {
-                            "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
-                            "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
-                            "token_output": int(getattr(r, "token_output", 0) or 0),
-                            "cache_creation": getattr(r, "cache_creation", None),
-                        },
-                        getattr(r, "provider_model", None),
-                        pricing,
-                    )
+                    provider_id = getattr(r, "provider_id", "") or None
+                    model = getattr(r, "provider_model", None)
+                    rule = resolve_pricing(provider_id, model, pricing)
+                    if rule is None:
+                        continue
+                    mode = rule.get("mode", "per_token")
+                    if mode == "per_token":
+                        total += _cost_per_token(
+                            {
+                                "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
+                                "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
+                                "token_output": int(getattr(r, "token_output", 0) or 0),
+                                "cache_creation": getattr(r, "cache_creation", None),
+                            },
+                            rule,
+                        )
+                    elif mode == "per_turn":
+                        total += float(rule.get("price", 0.0) or 0.0)
+                    elif mode == "per_request":
+                        pid = provider_id or ""
+                        req_prices[pid] = float(rule.get("price", 0.0) or 0.0)
                 except Exception:
                     continue
+
+            # per_request 精确：每个 provider 的 distinct request_id 数 × price
+            if req_prices:
+                distinct: dict[str, set[str]] = {}
+                for r in rows:
+                    pid = getattr(r, "provider_id", "") or ""
+                    if pid not in req_prices:
+                        continue
+                    rid = getattr(r, "request_id", None)
+                    if rid:
+                        distinct.setdefault(pid, set()).add(str(rid))
+                for pid, price in req_prices.items():
+                    total += len(distinct.get(pid, set())) * price
             return round(total, 6)
         except Exception:
             return 0.0
