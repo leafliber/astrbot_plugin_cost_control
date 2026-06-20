@@ -10,3 +10,8 @@ __pycache__/
 *.egg-info/
 .DS_Store
 CLAUDE.md
+
+# frontend (Vite + React 源码；构建产物 pages/dashboard/* 仍提交以便零构建部署)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

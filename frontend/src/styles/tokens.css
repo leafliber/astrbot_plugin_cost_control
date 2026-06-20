@@ -1,0 +1,31 @@
+/* 主题 token：浅色（:root）+ 深色（body[data-theme="dark"]）。由 useTheme 设置 body[data-theme]。 */
+
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #fafbfc;
+  --border: #e3e6ea;
+  --text: #1f2329;
+  --text-dim: #6b7280;
+  --accent: #4f7cff;
+  --accent-weak: #eaf0ff;
+  --ok: #2f9e44;
+  --warn: #f08c00;
+  --bad: #e03131;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+body[data-theme="dark"] {
+  --bg: #15171c;
+  --panel: #1d2027;
+  --panel-2: #242833;
+  --border: #2e333d;
+  --text: #e6e8ec;
+  --text-dim: #8b909a;
+  --accent: #6b94ff;
+  --accent-weak: #1f2a44;
+  --ok: #51cf66;
+  --warn: #ffa94d;
+  --bad: #ff6b6b;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}

@@ -4,15 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>成本控制</title>
-    <!-- CSS 由 main.tsx 的 import 触发，Vite 构建后注入 <link rel="stylesheet" href="style.css"> -->
-    
-    <link rel="stylesheet" crossorigin href="style.css">
+    <!-- CSS 由 main.tsx 的 import 触发，Vite 构建后注入 <link rel="stylesheet" href="./style.css"> -->
   </head>
   <body>
     <div id="root"></div>
     <!-- bridge SDK：dashboard 服务本页时把 src 替换为带 asset_token 的真实 URL，
          且必须在 React bundle 之前加载，使 window.AstrBotPluginPage 就绪。 -->
     <script src="/api/plugin/page/bridge-sdk.js"></script>
-    <script type="module" crossorigin src="app.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
