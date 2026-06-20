@@ -96,6 +96,9 @@ export function OverviewView({
     .slice(0, 8)
     .reverse()
     .map((s) => ({ umo: shortUmo(s.umo), tokens: s.tokens, cost: s.cost || 0 }));
+  const byCost = (r?.top_sessions_by_cost || [])
+    .slice(0, 8)
+    .map((s) => ({ model: shortUmo(s.umo), cost: s.cost || 0 }));
   const series = timeline.data?.series ?? [];
 
   return (
@@ -122,6 +125,26 @@ export function OverviewView({
         </Panel>
       </div>
       <div className="grid-2">
+        <Panel title="Top 会话（按成本）">
+          {byCost.length ? (
+            <div className="chart-box">
+              <ModelCostBar data={byCost} colors={colors} />
+            </div>
+          ) : (
+            <Empty text="暂无会话数据" />
+          )}
+        </Panel>
+        <Panel title="Top 会话（按 token）">
+          {top.length ? (
+            <div className="chart-box">
+              <TopSessionsBar data={top} colors={colors} />
+            </div>
+          ) : (
+            <Empty text="暂无会话数据" />
+          )}
+        </Panel>
+      </div>
+      <div className="grid-2">
         <Panel title="Token 构成">
           {hasTokens ? (
             <div className="chart-box">
@@ -132,15 +155,6 @@ export function OverviewView({
             </div>
           ) : (
             <Empty text="暂无 token 数据" />
-          )}
-        </Panel>
-        <Panel title="Top 会话（按 token）">
-          {top.length ? (
-            <div className="chart-box">
-              <TopSessionsBar data={top} colors={colors} />
-            </div>
-          ) : (
-            <Empty text="暂无会话数据" />
           )}
         </Panel>
       </div>

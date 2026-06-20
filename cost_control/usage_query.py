@@ -213,31 +213,37 @@ class UsageQueryMixin:
         by: str = "model",
         umo: str | None = None,
         provider: str | None = None,
+        model: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        """按 ``by`` 分组聚合 token 用量（供成本核算按模型 / provider 拆分）。
+        """按 ``by`` 分组聚合 token 用量（供成本核算按模型 / provider / 会话拆分）。
 
         Args:
-            by: ``"model"``（按 ``provider_model``）或 ``"provider"``（按 ``provider_id``）。
+            by: ``"model"``（按 ``provider_model``）、``"provider"``（按
+            ``provider_id``）或 ``"umo"``（按会话 ``umo``）。
             umo: 会话标识，None 表示不限。
             provider: Provider ID，None 表示不限。
+            model: 模型名（``provider_model``），None 表示不限。
             start: 窗口起始（含）。
             end: 窗口结束（含）。
 
         Returns:
             ``[{"key": str, "token_input_other": int, "token_input_cached": int,
             "token_output": int, "count": int}, ...]``，``key`` 为分组值
-            （模型名或 provider id）。失败返回空列表。
+            （模型名 / provider id / umo）。失败返回空列表。
         """
         from astrbot.core.db.po import ProviderStat
         from sqlmodel import func, select
 
         try:
             db = self.context.get_db()
-            group_col = (
-                ProviderStat.provider_id if by == "provider" else ProviderStat.provider_model
-            )
+            if by == "provider":
+                group_col = ProviderStat.provider_id
+            elif by == "umo":
+                group_col = ProviderStat.umo
+            else:
+                group_col = ProviderStat.provider_model
             stmt = select(  # type: ignore[call-overload]
                 group_col,
                 func.sum(ProviderStat.token_input_other),
@@ -249,6 +255,8 @@ class UsageQueryMixin:
                 stmt = stmt.where(ProviderStat.umo == umo)
             if provider:
                 stmt = stmt.where(ProviderStat.provider_id == provider)
+            if model:
+                stmt = stmt.where(ProviderStat.provider_model == model)
             if start:
                 stmt = stmt.where(ProviderStat.created_at >= start)
             if end:

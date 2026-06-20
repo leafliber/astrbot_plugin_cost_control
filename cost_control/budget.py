@@ -1,21 +1,27 @@
 """预算 Mixin。
 
-按会话 / 用户 / 模型 / 全局四维，日 / 月两个时间窗，检查 token 用量是否
-超出 ``budgets`` 配置的阈值。超限维度与 ``over_limit_strategies`` 策略链一起返回，
-供 ``on_llm_request`` 按 fallback ladder 执行（``fallback_provider`` 逐个尝试备用
-Provider，首个成功返回响应；``stop_llm`` 硬拦截）。
+按会话 / 用户 / 模型 / 全局四维，日 / 月两个时间窗，检查 token 用量 / 花费是否
+超出 ``budgets`` 与 ``budgets_cost`` 配置的阈值。
 
-可测性设计：窗口计算（``day_window_start`` / ``month_window_start``）与逐维
-比较（``check_dimensions``）抽成模块级纯函数，不依赖 astrbot / DB，可单测；
-DB 查询在 ``BudgetMixin.check_budget`` 内复用 ``UsageQueryMixin.query_usage``。
+**评估顺序（重要）**：
 
-时区说明：``ProviderStat.created_at`` 是 UTC aware datetime；预算窗口（日 / 月）
-按 **astrbot 主配置的 ``timezone``**（默认 ``Asia/Shanghai``，即用户感知的本地
-时间）计算——``resolve_tz`` 从 ``context.get_config()`` 读取该设置。窗口边界在
-本地时区算出后转 UTC，再与 ``created_at`` 比较。``refresh_time``（``"HH:MM"``）
-按本地时区解释。
+1. **局部阈值**（``budget_overrides``）：按配置顺序扫每条启用的规则，第一条匹配
+   当前请求（umo / provider / user）的规则生效。若其 token_limit 或 cost_limit
+   任一超限 → 立即返回 ``{exceeded: True, dim: "override:<idx>", ...}``。
+2. **全局 5 维**（``budgets`` / ``budgets_cost``）：未匹配 override 或 override 未
+   超限时按 ``_DIM_ORDER`` 顺序逐维比较。
+3. **默认处理**：全局超限时使用 ``default_on_exceeded``（``"stop" | "fallback" |
+   "warn"``）；override 超限时直接用 override 自身的 ``on_exceeded``。
 
-阶段 2 实现。
+执行动作（``apply_over_limit_chain``）：
+- ``stop`` → 发送文案 + stop_event
+- ``fallback`` → 遍历 override 自身的 ``fallback_provider_ids`` 逐个尝试
+- ``warn`` → 仅发警告，不 stop_event（请求继续走原 Provider）
+
+降级：所有路径 try/except 兜底，绝不阻断主流程。
+
+时区：``ProviderStat.created_at`` 是 UTC aware；预算窗口按 astrbot 主配置
+``timezone``（默认 ``Asia/Shanghai``）解释，详见 :func:`resolve_tz`。
 """
 
 from __future__ import annotations
@@ -27,11 +33,9 @@ from zoneinfo import ZoneInfo
 
 from .attributor import _str_tokens
 from .config import (
-    CONFIG_DEFAULTS,
-    enabled_strategies,
+    enabled_overrides,
     get_config,
-    migrate_legacy_policy,
-    normalize_strategy,
+    get_pricing,
 )
 from .cost import compute_cost_value
 
@@ -60,14 +64,6 @@ def day_window_start(refresh_time: str, now_utc: datetime, tz: ZoneInfo) -> date
 
     算法：把 ``now_utc`` 转到本地时区，取当日 ``refresh_time`` 时刻；若该时刻尚未
     到达则回退到昨日同时刻；最后转回 UTC（用于与 ``created_at`` 比较）。
-
-    Args:
-        refresh_time: ``"HH:MM"`` 格式（按本地时区解释）。解析失败按 ``"00:00"``。
-        now_utc: 当前 UTC 时刻（aware）。
-        tz: 本地时区（``resolve_tz`` 返回值）。
-
-    Returns:
-        窗口起始 UTC datetime（aware）。
     """
     hh, mm = 0, 0
     try:
@@ -104,17 +100,7 @@ def check_dimensions(
     used: dict[str, int],
     limits: dict[str, int],
 ) -> dict[str, Any]:
-    """逐维比较用量与阈值，返回首个超限维度（纯函数）。
-
-    ``limit <= 0`` 视为「不限制」，跳过该维度。
-
-    Args:
-        used: 各维度当前周期已用 token 总数。
-        limits: 各维度上限（来自 ``budgets`` 配置）。
-
-    Returns:
-        ``{"exceeded": bool, "dim": str | None, "limit": int, "used": int}``。
-    """
+    """逐维比较用量与阈值，返回首个超限维度（纯函数）。"""
     for dim in _DIM_ORDER:
         limit = int(limits.get(dim, 0) or 0)
         if limit <= 0:
@@ -135,10 +121,6 @@ def check_dimensions_dual(
 
     按 :data:`_DIM_ORDER` 逐维；某维 token 或 cost 任一超限即返回。同维两者都超
     优先报 token（更直观）。``limit <= 0`` 视为该指标不限，跳过。
-
-    Returns:
-        ``{"exceeded": bool, "dim": str | None, "metric": "token"|"cost"|None,
-        "limit": float, "used": float}``。
     """
     for dim in _DIM_ORDER:
         lt = float(limits_t.get(dim, 0) or 0)
@@ -158,11 +140,7 @@ def _groups_cost(
     groups: list[dict[str, Any]],
     pricing: dict[str, dict[str, float]],
 ) -> float:
-    """把 ``query_usage_grouped(by="model")`` 结果按模型求和花费（纯函数）。
-
-    每组用 :func:`compute_cost_value` 按其 ``key``（模型名）匹配单价；未定价
-    模型贡献 0（与全局口径一致）。
-    """
+    """把 ``query_usage_grouped(by="model")`` 结果按模型求和花费（纯函数）。"""
     total = 0.0
     for g in groups or []:
         try:
@@ -182,11 +160,7 @@ def total_tokens(usage: dict[str, Any]) -> int:
 
 
 def truncate_contexts(contexts: Any, token_limit: int) -> list[Any]:
-    """保留最近的对话历史，使估算 token 总数不超过 ``token_limit``（纯函数）。
-
-    ``token_limit <= 0`` 时原样返回（转 list）；否则从末尾向前累计，保留尽可能多
-    的近期上下文，确保不超额。估算用 :func:`attributor._str_tokens`（粗略）。
-    """
+    """保留最近的对话历史，使估算 token 总数不超过 ``token_limit``（纯函数）。"""
     items = list(contexts or [])
     if token_limit <= 0:
         return items
@@ -202,17 +176,83 @@ def truncate_contexts(contexts: Any, token_limit: int) -> list[Any]:
     return kept
 
 
+# ===== override 纯函数 =====
+
+
+def match_override(
+    ov: dict[str, Any],
+    umo: str,
+    user_id: str | None,
+    provider_id: str | None,
+) -> str | None:
+    """判断 override 是否匹配当前请求上下文，返回命中的目标值；不匹配返回 ``None``。
+
+    ``target_type``：
+    - ``"umo"`` —— 匹配 ``umo == ov.target_value``
+    - ``"provider"`` —— 匹配 ``provider_id == ov.target_value``
+    - ``"user"`` —— 匹配 ``user_id == ov.target_value``（``user_id`` 为空时永远不命中）
+    """
+    if not isinstance(ov, dict):
+        return None
+    tt = str(ov.get("target_type") or "")
+    tv = str(ov.get("target_value") or "")
+    if not tv:
+        return None
+    if tt == "umo":
+        return tv if umo == tv else None
+    if tt == "provider":
+        if not provider_id:
+            return None
+        return tv if provider_id == tv else None
+    if tt == "user":
+        if not user_id:
+            return None
+        return tv if user_id == tv else None
+    return None
+
+
+def default_on_exceeded(cfg: Any) -> str:
+    """读取 ``default_on_exceeded``（默认 ``"stop"``；非 stop/fallback/warn 兜底 stop）。"""
+    if isinstance(cfg, dict):
+        v = str(cfg.get("default_on_exceeded") or "").strip().lower()
+        if v in ("stop", "fallback", "warn"):
+            return v
+    return "stop"
+
+
+def get_fallback_providers(cfg: Any) -> list[dict[str, Any]]:
+    """读取 ``fallback_providers`` 列表（仅返回启用的，规范化字段）。"""
+    from .config import enabled_fallback_providers
+
+    raw = None
+    if isinstance(cfg, dict):
+        raw = cfg.get("fallback_providers")
+    return enabled_fallback_providers(raw)
+
+
+def get_budget_overrides(cfg: Any) -> list[dict[str, Any]]:
+    """读取 ``budget_overrides``（仅返回启用的，规范化字段；保持原顺序）。"""
+    raw = None
+    if isinstance(cfg, dict):
+        raw = cfg.get("budget_overrides")
+    return enabled_overrides(raw)
+
+
 class BudgetMixin:
     """四维预算阈值检查的 Mixin。
 
-    依赖兄弟 ``UsageQueryMixin.query_usage``（由 ``Main`` 多继承提供）。
+    依赖兄弟 ``UsageQueryMixin.query_usage`` / ``StoreMixin.query_user_token_total``
+    / ``StoreMixin.query_user_cost_total``（由 ``Main`` 多继承提供）。
     """
 
     # 由 ``Main`` 宿主提供（Mixin 不定义 ``__init__``）。
     context: Any
-    # 兄弟 Mixin 提供，这里仅声明以通过 mypy。
+    # 兄弟 Mixin 提供。
     query_usage: Any
     query_usage_grouped: Any
+    query_supplements: Any
+    query_user_token_total: Any
+    query_user_cost_total: Any
     get_pricing: Any
     save_supplement: Any
 
@@ -233,10 +273,7 @@ class BudgetMixin:
         return merged
 
     def get_budgets_cost(self) -> dict[str, float]:
-        """返回生效的花费预算阈值 dict（USD float，合并用户配置与默认值）。
-
-        与 :meth:`get_budgets` 同 5 维、独立生效。``<=0`` 视为该维度不限花费。
-        """
+        """返回生效的花费预算阈值 dict（USD float，合并用户配置与默认值）。"""
         budgets_cost = get_config(getattr(self, "cfg", None), "budgets_cost", {}) or {}
         defaults: dict[str, float] = dict(get_config(None, "budgets_cost", {}) or {})
         merged: dict[str, float] = dict(defaults)
@@ -251,80 +288,216 @@ class BudgetMixin:
                     continue
         return merged
 
-    def get_over_limit_strategies(self) -> list[dict[str, Any]]:
-        """返回生效的超限策略链（规范化 ``list[dict]``）。
+    async def _provider_id_for_request(
+        self,
+        event: Any,
+        umo: str,
+    ) -> str | None:
+        """尽力从 event / context 中获取当前请求所用 provider_id（用于 override 匹配）。
 
-        优先用配置中的 ``over_limit_strategies``（list）；若配置未显式提供该 key
-        但存在遗留的 ``over_limit_policy``（单对象），则迁移为 1 元素列表；
-        都没有则返回 :data:`CONFIG_DEFAULTS.over_limit_strategies` 默认值。
-        每条策略经 :func:`normalize_strategy` 规范化（字段齐全、action 合法）。
+        失败兜底 ``None``（target_type=provider 的 override 不会命中，不阻断主流程）。
         """
-        cfg = getattr(self, "cfg", None)
-        if isinstance(cfg, dict) and "over_limit_strategies" in cfg:
-            raw = cfg.get("over_limit_strategies")
-            if isinstance(raw, list):
-                return [normalize_strategy(s) for s in raw]
-        if isinstance(cfg, dict) and "over_limit_policy" in cfg:
-            migrated = migrate_legacy_policy(cfg.get("over_limit_policy"))
-            if migrated:
-                return migrated
-        default = CONFIG_DEFAULTS.get("over_limit_strategies", [])
-        return [normalize_strategy(s) for s in (default or [])]
+        try:
+            getter = getattr(self.context, "get_using_provider", None)
+            if not callable(getter):
+                return None
+            prov = getter(umo)
+            if prov is None:
+                return None
+            meta = getattr(prov, "meta", None)
+            if not callable(meta):
+                return None
+            return str(getattr(meta(), "id", "") or "") or None
+        except Exception:
+            return None
 
-    async def check_budget(self, umo: str, model: str | None) -> dict[str, Any]:
-        """检查指定会话 + 模型当前是否超出任一预算维度。
+    async def _user_id_for_request(self, event: Any) -> str | None:
+        """从 event 读取 user_id（封装 :func:`supplement._safe_sender_id`）。"""
+        from .supplement import _safe_sender_id
+
+        return _safe_sender_id(event)
+
+    async def _override_used(
+        self,
+        ov: dict[str, Any],
+        metric: str,
+        umo: str,
+        model: str | None,
+        user_id: str | None,
+        provider_id: str | None,
+        d_start: datetime,
+        pricing: dict[str, dict[str, float]],
+    ) -> float:
+        """按 override target 聚合当前周期的 ``metric`` 用量（token 数 / USD 花费）。"""
+        tt = str(ov.get("target_type") or "")
+        tv = str(ov.get("target_value") or "")
+        if metric == "token":
+            if tt == "umo":
+                return float(total_tokens(await self.query_usage(umo=tv, start=d_start)))
+            if tt == "provider":
+                return float(
+                    total_tokens(
+                        await self.query_usage(provider=tv, start=d_start)
+                    )
+                )
+            if tt == "user":
+                if not user_id:
+                    return 0.0
+                return float(await self.query_user_token_total(tv, d_start))
+            return 0.0
+        # cost
+        if tt == "umo":
+            return _groups_cost(
+                await self.query_usage_grouped(by="model", umo=tv, start=d_start),
+                pricing,
+            )
+        if tt == "provider":
+            rows = await self.query_usage_grouped(
+                by="model", provider=tv, start=d_start
+            )
+            return _groups_cost(rows, pricing)
+        if tt == "user":
+            if not user_id:
+                return 0.0
+            return float(await self.query_user_cost_total(tv, d_start, pricing))
+        return 0.0
+
+    async def check_budget(
+        self,
+        umo: str,
+        model: str | None,
+        event: Any | None = None,
+    ) -> dict[str, Any]:
+        """检查指定请求是否超出任一预算（override 优先于全局 5 维）。
 
         Args:
-            umo: 会话标识（unified message origin）。
+            umo: 会话标识。
             model: 当前请求所用模型名（用于 ``per_model_daily``）。
+            event: 原始 ``AstrMessageEvent``（可选；用于读 user_id / provider_id，
+                供 override 匹配）。不传则按 provider/user 类型的 override 退化为
+                不命中（umo 仍可命中）。
 
         Returns:
-            ``{"exceeded": bool, "dim": str | None, "metric": "token"|"cost"|None,
-            "limit": float, "used": float, "strategies": list}``。任一维度的 token 或
-            cost 超出即超限。任何异常都降级为「未超限」，绝不阻断主流程。
+            ``{"exceeded": bool, "dim": str|None, "metric": "token"|"cost"|None,
+            "limit": float, "used": float, "on_exceeded": str,
+            "fallback_provider_ids": list[str], "fallback_token_limit": int,
+            "stop_message": str}``。任何异常都降级为「未超限」，绝不阻断主流程。
         """
-        strategies = self.get_over_limit_strategies()
+        cfg = getattr(self, "cfg", None)
         zero: dict[str, Any] = {
             "exceeded": False,
             "dim": None,
             "metric": None,
             "limit": 0.0,
             "used": 0.0,
-            "strategies": strategies,
+            "on_exceeded": default_on_exceeded(cfg),
+            "fallback_provider_ids": [],
+            "fallback_token_limit": 0,
+            "stop_message": "",
+            "rule_idx": -1,
         }
         try:
             limits_t = self.get_budgets()
             limits_c = self.get_budgets_cost()
-            has_token = any(float(limits_t.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
-            has_cost = any(float(limits_c.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
-            if not has_token and not has_cost:
-                return zero  # 未配置任何预算，直接放行
+            overrides = get_budget_overrides(cfg)
+            has_global_token = any(float(limits_t.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
+            has_global_cost = any(float(limits_c.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
+            if (
+                not has_global_token
+                and not has_global_cost
+                and not overrides
+            ):
+                return zero
 
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
-            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
+            refresh = str(get_config(cfg, "refresh_time", "00:00"))
             d_start = day_window_start(refresh, now, tz)
-            m_start = month_window_start(now, tz)
 
-            # token 用量（单会话 / 单用户：阶段 2 均按 umo 聚合）
-            used_t: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
-            if has_token:
+            user_id = await self._user_id_for_request(event) if event is not None else None
+            provider_id = (
+                await self._provider_id_for_request(event, umo)
+                if event is not None
+                else None
+            )
+
+            # ===== 1. 局部阈值（override）=====
+            if overrides:
+                pricing = self.get_pricing() if has_global_cost else get_pricing(cfg)
+                for idx, ov in enumerate(overrides):
+                    matched = match_override(ov, umo, user_id, provider_id)
+                    if matched is None:
+                        continue
+                    # 命中一条规则 → 评估其 token / cost
+                    lt = float(ov.get("token_limit") or 0)
+                    lc = float(ov.get("cost_limit") or 0)
+                    if lt <= 0 and lc <= 0:
+                        # 规则未设上限，视为不限制；继续下一条 / 全局
+                        break
+                    used_t = 0.0
+                    used_c = 0.0
+                    if lt > 0:
+                        used_t = await self._override_used(
+                            ov, "token", umo, model, user_id, provider_id, d_start, pricing
+                        )
+                    if lc > 0:
+                        used_c = await self._override_used(
+                            ov, "cost", umo, model, user_id, provider_id, d_start, pricing
+                        )
+                    if lt > 0 and used_t >= lt:
+                        return {
+                            "exceeded": True,
+                            "dim": f"override:{idx}",
+                            "metric": "token",
+                            "limit": lt,
+                            "used": used_t,
+                            "on_exceeded": str(ov.get("on_exceeded") or "stop"),
+                            "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
+                            "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
+                            "stop_message": str(ov.get("stop_message") or ""),
+                            "rule_idx": idx,
+                        }
+                    if lc > 0 and used_c >= lc:
+                        return {
+                            "exceeded": True,
+                            "dim": f"override:{idx}",
+                            "metric": "cost",
+                            "limit": lc,
+                            "used": used_c,
+                            "on_exceeded": str(ov.get("on_exceeded") or "stop"),
+                            "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
+                            "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
+                            "stop_message": str(ov.get("stop_message") or ""),
+                            "rule_idx": idx,
+                        }
+                    # 命中且未超限 → 不再继续扫其他 override，也不评估全局
+                    return {
+                        **zero,
+                        "on_exceeded": default_on_exceeded(cfg),
+                    }
+
+            # ===== 2. 全局 5 维 =====
+            if not has_global_token and not has_global_cost:
+                return zero
+            used_t_map: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
+            used_c_map: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
+            m_start = month_window_start(now, tz)
+            if has_global_token:
                 session_usage = await self.query_usage(umo=umo, start=d_start)
                 session_total = total_tokens(session_usage)
                 model_total = session_total
                 if model:
-                    model_total = total_tokens(await self.query_usage(model=model, start=d_start))
-                used_t = {
+                    model_total = total_tokens(
+                        await self.query_usage(model=model, start=d_start)
+                    )
+                used_t_map = {
                     "per_session_daily": session_total,
-                    "per_user_daily": session_total,  # 阶段 2 退化为 umo 维度
+                    "per_user_daily": session_total,
                     "per_model_daily": model_total,
                     "global_daily": total_tokens(await self.query_usage(start=d_start)),
                     "global_monthly": total_tokens(await self.query_usage(start=m_start)),
                 }
-
-            # 花费用量（快路径：仅当存在 cost 限额才查；按模型分组 + 单价求和）
-            used_c: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
-            if has_cost:
+            if has_global_cost:
                 pricing = self.get_pricing()
                 ses_cost = _groups_cost(
                     await self.query_usage_grouped(by="model", umo=umo, start=d_start),
@@ -333,85 +506,111 @@ class BudgetMixin:
                 mod_cost = ses_cost
                 if model:
                     mod_cost = compute_cost_value(
-                        await self.query_usage(model=model, start=d_start), model, pricing
+                        await self.query_usage(model=model, start=d_start),
+                        model,
+                        pricing,
                     )
-                used_c = {
+                used_c_map = {
                     "per_session_daily": ses_cost,
-                    "per_user_daily": ses_cost,  # 阶段 2 退化为 umo 维度
+                    "per_user_daily": ses_cost,
                     "per_model_daily": mod_cost,
                     "global_daily": _groups_cost(
-                        await self.query_usage_grouped(by="model", start=d_start), pricing
+                        await self.query_usage_grouped(by="model", start=d_start),
+                        pricing,
                     ),
                     "global_monthly": _groups_cost(
-                        await self.query_usage_grouped(by="model", start=m_start), pricing
+                        await self.query_usage_grouped(by="model", start=m_start),
+                        pricing,
                     ),
                 }
-
-            result = check_dimensions_dual(used_t, used_c, limits_t, limits_c)
-            result["strategies"] = strategies
+            result = check_dimensions_dual(used_t_map, used_c_map, limits_t, limits_c)
+            result["on_exceeded"] = default_on_exceeded(cfg)
+            result["fallback_provider_ids"] = []
+            result["fallback_token_limit"] = 0
+            result["stop_message"] = ""
+            result["rule_idx"] = -1
             return result
         except Exception:
             return zero
 
-    # ===== 超限策略链执行（fallback ladder） =====
-    # 超限时按 strategies 顺序求值：fallback_provider 逐个尝试备用 Provider，
-    # 首个成功即返回其响应；stop_llm 硬拦截终止。链路耗尽兜底拦截。
-    # 全程 try/except，绝不抛异常（on_llm_request_head 另有一层兜底）。
+    # ===== 执行动作派发 =====
 
     async def apply_over_limit_chain(
         self,
         event: Any,
         req: Any,
         result: dict[str, Any],
-        strategies: list[dict[str, Any]] | None,
+        _strategies: list[dict[str, Any]] | None = None,  # 兼容旧签名
     ) -> bool:
-        """超限时按策略链顺序求值并执行，命中即处理。返回是否已处理。
+        """根据 ``result["on_exceeded"]`` 派发处理动作，返回是否已处理。
 
-        ``fallback_provider``：按 ``provider_ids`` 逐个尝试，首个成功返回响应即
-        完成；该条全失败则继续下一条策略。``stop_llm``：硬拦截 + 文案，终止链路。
-        链路无 ``stop_llm`` 且 fallback 全失败 → 兜底拦截。任何异常兜底拦截。
+        - ``"stop"`` → 发文案 + stop_event
+        - ``"fallback"`` → 按 ``result.fallback_provider_ids`` 逐个尝试
+        - ``"warn"`` → 仅发警告（不 stop_event，请求继续）
+        - 其他 / 异常 → 兜底 stop
         """
         from astrbot import logger
+        from astrbot.api.event import MessageChain
 
-        chain = enabled_strategies(strategies) if strategies else []
-        if not chain:
-            chain = [normalize_strategy({})]  # 兜底：单条 stop_llm
         try:
-            for s in chain:
-                action = s.get("action")
-                if action == "fallback_provider":
-                    if await self._try_fallback(event, req, s):
-                        return True
-                    # 该 fallback 全失败 → 继续下一条策略
-                elif action == "stop_llm":
-                    await self._do_stop(event, result, s)
-                    return True
-            # 链路无 stop_llm 且 fallback 全失败 → 兜底拦截
-            await self._do_stop(event, result, {})
+            action = str(result.get("on_exceeded") or "stop").lower()
+            if action == "fallback":
+                pids = [
+                    str(p)
+                    for p in (result.get("fallback_provider_ids") or [])
+                    if str(p).strip()
+                ]
+                if pids:
+                    return await self._try_fallback(
+                        event,
+                        req,
+                        pids,
+                        int(result.get("fallback_token_limit") or 0),
+                    )
+                # fallback 但没配 provider 列表 → 兜底 stop
+                logger.warning("[cost_control] fallback 未配置 provider，降级 stop")
+                await self._do_stop(event, result, str(result.get("stop_message") or ""))
+                return True
+            if action == "warn":
+                msg = self._format_message(result)
+                try:
+                    await event.send(MessageChain().message(f"⚠ {msg}（仅警告，继续执行）"))
+                except Exception as e:
+                    logger.warning("[cost_control] warn 发送失败: %s", e)
+                return False  # 不 stop_event
+            # stop
+            msg = str(result.get("stop_message") or "").strip() or self._format_message(result)
+            await self._do_stop(event, result, msg)
             return True
         except Exception as e:
-            logger.warning("[cost_control] 策略链执行异常，兜底拦截: %s", e)
+            logger.warning("[cost_control] 超限派发异常，兜底 stop: %s", e)
             try:
-                await self._do_stop(event, result, {})
+                await self._do_stop(event, result, "")
             except Exception:
                 pass
             return True
+
+    def _format_message(self, result: dict[str, Any]) -> str:
+        dim = result.get("dim") or ""
+        used = result.get("used")
+        limit = result.get("limit")
+        if result.get("metric") == "cost":
+            return (
+                f"⏸ 已超出花费预算（{dim}）："
+                f"${float(used or 0):.4f} / ${float(limit or 0):.2f}"
+            )
+        return f"⏸ 已超出预算（{dim}）：用 {used} / 限 {limit} token"
 
     async def _try_fallback(
         self,
         event: Any,
         req: Any,
-        strategy: dict[str, Any],
+        pids: list[str],
+        token_limit: int,
     ) -> bool:
-        """尝试单条 ``fallback_provider`` 策略：遍历 ``provider_ids`` 逐个调用。
-
-        首个成功（解析到 Provider 且 ``text_chat`` 返回非空）即 ``stop_event`` 并
-        发送响应，返回 True；全部失败返回 False（调用方继续下一条策略）。
-        """
+        """遍历 ``pids`` 逐个调用，首个成功即返回 True；全失败返回 False。"""
         from astrbot import logger
 
-        pids = [str(p) for p in (strategy.get("provider_ids") or []) if str(p).strip()]
-        token_limit = int(strategy.get("token_limit", 0) or 0)
         for pid in pids:
             prov = None
             try:
@@ -434,7 +633,6 @@ class BudgetMixin:
                 text = ""
             if not text:
                 continue
-            # 记录 fallback usage（弥补绕过 on_llm_response 的统计缺口；失败不阻断响应）
             try:
                 await self._record_fallback(event, prov, pid, resp)
             except Exception as e:
@@ -453,12 +651,7 @@ class BudgetMixin:
         return False
 
     async def _call_fallback(self, prov: Any, req: Any, token_limit: int) -> Any:
-        """用备用 Provider 执行本轮请求。
-
-        先尝试带 ``contexts``（按 ``token_limit`` 截断历史）；若该 Provider 的
-        ``text_chat`` 签名不接受 ``contexts``（抛 ``TypeError``），退化为仅
-        ``prompt`` + ``system_prompt``。
-        """
+        """用备用 Provider 执行本轮请求。"""
         prompt = getattr(req, "prompt", "") or ""
         system_prompt = getattr(req, "system_prompt", "") or ""
         contexts = truncate_contexts(getattr(req, "contexts", None), token_limit)
@@ -476,13 +669,8 @@ class BudgetMixin:
         pid: str,
         resp: Any,
     ) -> None:
-        """把 fallback 调用的 usage 落补充表（保持成本统计完整）。
-
-        token 三类取自 ``resp.usage``（TokenUsage），cache 字段经
-        :func:`supplement._extract_cache` 解析；provider_id/model 取自 ``prov.meta()``
-        （比配置串更权威）。失败由调用方 try/except 兜住，仅记日志。
-        """
-        from .supplement import _extract_cache
+        """把 fallback 调用的 usage 落补充表。"""
+        from .supplement import _extract_cache, _safe_sender_id
 
         usage = getattr(resp, "usage", None)
         token_input_other = int(getattr(usage, "input_other", 0) or 0)
@@ -501,7 +689,9 @@ class BudgetMixin:
             pass
 
         umo = str(
-            getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", None) or ""
+            getattr(event, "unified_msg_origin", None)
+            or getattr(event, "session_id", None)
+            or ""
         )
         record = {
             "umo": umo,
@@ -515,6 +705,7 @@ class BudgetMixin:
             "cache_read": cache_read,
             "raw_usage": raw_usage,
             "response_id": getattr(resp, "id", None),
+            "user_id": _safe_sender_id(event),
             "created_at": datetime.now(UTC),
         }
         await self.save_supplement(record)
@@ -523,23 +714,13 @@ class BudgetMixin:
         self,
         event: Any,
         result: dict[str, Any],
-        strategy: dict[str, Any],
+        message: str,
     ) -> None:
-        """硬拦截：发送文案 + ``stop_event``。文案优先用策略自定义 ``message``。"""
+        """硬拦截：发送文案 + stop_event。"""
         from astrbot import logger
         from astrbot.api.event import MessageChain
 
-        msg = str(strategy.get("message", "") or "").strip()
-        if not msg:
-            dim = result.get("dim")
-            used = result.get("used")
-            limit = result.get("limit")
-            if result.get("metric") == "cost":
-                msg = (
-                    f"⏸ 已超出花费预算（{dim}）：${float(used or 0):.4f} / ${float(limit or 0):.2f}"
-                )
-            else:
-                msg = f"⏸ 已超出预算（{dim}）：用 {used} / 限 {limit} token"
+        msg = (message or "").strip() or self._format_message(result)
         try:
             event.stop_event()
         except Exception:
@@ -548,3 +729,19 @@ class BudgetMixin:
             await event.send(MessageChain().message(msg))
         except Exception as e:
             logger.warning("[cost_control] 超限提示发送失败: %s", e)
+
+
+__all__ = [
+    "resolve_tz",
+    "day_window_start",
+    "month_window_start",
+    "check_dimensions",
+    "check_dimensions_dual",
+    "total_tokens",
+    "truncate_contexts",
+    "match_override",
+    "default_on_exceeded",
+    "get_budget_overrides",
+    "get_fallback_providers",
+    "BudgetMixin",
+]

@@ -37,7 +37,9 @@ class CommandsMixin:
     query_supplements: Any
     get_budgets: Any
     get_budgets_cost: Any
-    get_over_limit_strategies: Any
+    get_budget_overrides: Any
+    get_fallback_providers: Any
+    default_on_exceeded: Any
     check_budget: Any
     consume_last_injection: Any
     last_system_prompt: Any
@@ -85,7 +87,8 @@ class CommandsMixin:
             umo = self._umo(event)
             budgets = self.get_budgets()
             budgets_cost = self.get_budgets_cost()
-            result = await self.check_budget(umo, None)
+            overrides = self.get_budget_overrides(getattr(self, "cfg", None))
+            result = await self.check_budget(umo, None, event=event)
             lines = ["📋 预算配置"]
             any_cfg = False
             for dim in _DIM_ORDER:
@@ -100,20 +103,20 @@ class CommandsMixin:
                     lines.append(f"  {dim}: " + " / ".join(parts))
                     any_cfg = True
             if not any_cfg:
-                lines.append("  （未配置任何预算）")
-            # 超限策略链摘要（按序）
-            strategies = self.get_over_limit_strategies()
-            if strategies:
-                parts = []
-                for idx, s in enumerate(strategies, 1):
-                    act = s.get("action")
-                    tag = "" if s.get("enabled", True) else "[禁用]"
-                    if act == "fallback_provider":
-                        pids = s.get("provider_ids") or []
-                        parts.append(f"{idx}.切换备用{pids}{tag}")
-                    else:
-                        parts.append(f"{idx}.拦截{tag}")
-                lines.append("🧭 超限策略：" + " → ".join(parts))
+                lines.append("  （未配置全局预算）")
+            if overrides:
+                lines.append(f"🎯 局部阈值：{len(overrides)} 条")
+                for ov in overrides:
+                    parts = []
+                    if ov.get("token_limit", 0) > 0:
+                        parts.append(f"token {ov['token_limit']}")
+                    if ov.get("cost_limit", 0) > 0:
+                        parts.append(f"花费 ${ov['cost_limit']:.2f}")
+                    lines.append(
+                        f"  · {ov.get('target_type')}:{ov.get('target_value')} "
+                        f"({'/'.join(parts) or '不限'}) "
+                        f"→ {ov.get('on_exceeded', 'stop')}"
+                    )
             if result.get("exceeded"):
                 dim = result.get("dim")
                 used = result.get("used")
@@ -124,6 +127,7 @@ class CommandsMixin:
                     lines.append(f"⚠️ 已超出花费预算（{dim}）：{used_s} / {limit_s}")
                 else:
                     lines.append(f"⚠️ 已超限（{dim}）：用 {used} / 限 {limit} token")
+                lines.append(f"   处理动作：{result.get('on_exceeded', 'stop')}")
             else:
                 lines.append("✅ 当前未超限")
             yield event.plain_result("\n".join(lines))

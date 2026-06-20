@@ -1,15 +1,27 @@
 import { useState } from "react";
 import { shortTime } from "../lib/format";
-import { cacheDetailRows, cacheDiffText, cacheEvtMeta } from "../lib/cacheMeta";
+import {
+  buildCollapsedView,
+  cacheDetailRows,
+  cacheDiffText,
+  cacheEvtMeta,
+  type CollapsedLine,
+} from "../lib/cacheMeta";
 import type { CacheEvent } from "../lib/types";
 
 // 缓存破坏事件行（点击展开前后 diff 详情）
 export function CacheEventRow({ ev }: { ev: CacheEvent }) {
   const [open, setOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const sev = (ev.severity || "low").toLowerCase();
   const m = cacheEvtMeta(ev.type);
   const diff = cacheDiffText(ev.type || "", ev.before, ev.after);
   const detail = cacheDetailRows(ev);
+  // 折叠状态仅在 diff 存在时使用
+  const isCollapsed = !!detail.diff && collapsed;
+  const view: CollapsedLine[] = detail.diff
+    ? buildCollapsedView(detail.diff.segments, isCollapsed)
+    : [];
   return (
     <>
       <tr className="cache-event-row" onClick={() => setOpen((o) => !o)}>
@@ -51,19 +63,50 @@ export function CacheEventRow({ ev }: { ev: CacheEvent }) {
                 </div>
               )}
             </div>
-            {detail.diff && detail.diff.lines.length > 0 && (
+            {detail.diff && view.length > 0 && (
               <div className="gitdiff">
                 <div className="gitdiff-label">{detail.diff.label}</div>
                 <pre className="gitdiff-body">
-                  {detail.diff.lines.map((l, i) => {
-                    const cls = l.op === "+" ? "add" : l.op === "-" ? "del" : "ctx";
+                  {view.map((l, i) => {
+                    if ("kind" in l && l.kind === "placeholder") {
+                      return (
+                        <div
+                          key={i}
+                          className="diff-line diff-collapsed"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCollapsed(false);
+                          }}
+                        >
+                          <span className="dl-sign">⋯</span>
+                          <span className="dl-text">
+                            隐藏 {l.count} 行未变更上下文，点击展开
+                          </span>
+                        </div>
+                      );
+                    }
+                    const line = l as { op: "+" | "-" | " "; text: string };
+                    const cls =
+                      line.op === "+" ? "add" : line.op === "-" ? "del" : "ctx";
                     return (
                       <div key={i} className={`diff-line dl-${cls}`}>
-                        <span className="dl-sign">{l.op}</span>
-                        <span className="dl-text">{l.text}</span>
+                        <span className="dl-sign">{line.op}</span>
+                        <span className="dl-text">{line.text}</span>
                       </div>
                     );
                   })}
+                  {isCollapsed && (
+                    <div
+                      className="diff-line diff-collapsed diff-expand-all"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCollapsed(false);
+                      }}
+                    >
+                      <span className="dl-sign">▾</span>
+                      <span className="dl-text">展开全部</span>
+                    </div>
+                  )}
                 </pre>
               </div>
             )}

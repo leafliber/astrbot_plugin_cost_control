@@ -84,6 +84,26 @@ def _extract_cache(
     return cache_creation, cache_read, raw_usage_dict
 
 
+def _safe_sender_id(event: Any) -> str | None:
+    """从 ``AstrMessageEvent`` 读取发送者 user_id（健壮封装，绝不抛异常）。
+
+    AstrBot 4.25.5 暴露 ``event.get_sender_id()``（返回 ``message_obj.sender.user_id``，
+    平台统一处理为 str；不同平台可能是 QQ 号 / 微信 openid / 钉钉 staff_id）。读不到
+    或抛异常一律返回 ``None``（按用户 override 在 user_id 为空时自然不会命中）。
+    """
+    try:
+        fn = getattr(event, "get_sender_id", None)
+        if not callable(fn):
+            return None
+        v = fn()
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+    except Exception:
+        return None
+
+
 class SupplementMixin:
     """``on_llm_response`` 钩子补充采集 usage + cache 字段的 Mixin。"""
 
@@ -118,6 +138,7 @@ class SupplementMixin:
         conversation_id = self._get_conversation_id(event)
         provider_id, provider_model = await self._get_provider_info(umo, raw)
         response_id = getattr(resp, "id", None)
+        user_id = _safe_sender_id(event)
 
         return {
             "umo": umo,
@@ -131,6 +152,7 @@ class SupplementMixin:
             "cache_read": cache_read,
             "raw_usage": raw_usage,
             "response_id": response_id,
+            "user_id": user_id,
             "created_at": datetime.now(UTC),
         }
 

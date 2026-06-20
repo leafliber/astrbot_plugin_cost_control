@@ -7,7 +7,7 @@
 不做成 Mixin，避免污染 ``Main`` 的继承链。
 
 由于 AstrBot 重载时会裁剪 ``_conf_schema.json`` 之外的配置键（``check_config_integrity``），
-本插件的**详细配置**（budgets / pricing / over_limit_strategies / 各模块阈值等）存于
+本插件的**详细配置**（budgets / pricing / budget_overrides / 各模块阈值等）存于
 插件自有的 ``config.json``（data 目录，:func:`load_plugin_config` / :func:`save_plugin_config`），
 运行时由 ``Main`` 合并为 ``self.cfg`` 供读取；``_conf_schema.json`` 仅保留各功能开关。
 
@@ -27,6 +27,7 @@ from .default_pricing import DEFAULT_PRICING
 CONFIG_DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "platforms": [],
+    # 5 维全局默认预算（int token 上限）。
     "budgets": {
         "per_session_daily": 0,
         "per_user_daily": 0,
@@ -34,8 +35,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "global_daily": 0,
         "global_monthly": 0,
     },
-    # 花费预算（USD）：与 budgets(token) 同 5 维、独立生效。任一维度的 token 或
-    # cost 超出即触发 over_limit_strategies。0.0 表示该维度不限花费。
+    # 5 维全局默认花费预算（float USD）。
     "budgets_cost": {
         "per_session_daily": 0.0,
         "per_user_daily": 0.0,
@@ -44,11 +44,22 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "global_monthly": 0.0,
     },
     "pricing": {},  # 用户自定义覆盖 DEFAULT_PRICING；为空时只用默认表
-    # 超限处理策略链（有序列表）：超限时按序求值。fallback_provider 按
-    # provider_ids 列表逐个尝试备用 Provider；stop_llm 硬拦截。详见 budget.py。
-    "over_limit_strategies": [
-        {"action": "stop_llm", "message": "", "enabled": True},
-    ],
+    # 局部阈值（每条规则挂自己的 on_exceeded；优先级高于全局 5 维）。
+    # 规则对象形如：
+    #   {"enabled": bool, "target_type": "umo"|"provider"|"user",
+    #    "target_value": str, "token_limit": int (0=不限),
+    #    "cost_limit": float (0=不限),
+    #    "on_exceeded": "stop"|"fallback"|"warn",
+    #    "stop_message": str,
+    #    "fallback_provider_ids": [str, ...],
+    #    "fallback_token_limit": int}
+    "budget_overrides": [],
+    # 备用 Provider 库（Panel 3）：id 与 on_exceeded=fallback 的规则共享。
+    # 形如：[{"id": "prov_x", "enabled": bool, "note": str}]
+    "fallback_providers": [],
+    # 全局默认超限处理（当 override 未命中且全局 5 维超限时生效）。
+    # "stop" / "fallback" / "warn"。
+    "default_on_exceeded": "stop",
     "refresh_time": "00:00",
     "match_unique_session": False,
     "cache_diag": {
@@ -80,35 +91,40 @@ CONFIG_DEFAULTS: dict[str, Any] = {
 }
 
 
-# 超限策略合法动作白名单。
-_VALID_STRATEGY_ACTIONS = ("fallback_provider", "stop_llm")
+# 合法 target_type 白名单。
+_VALID_TARGET_TYPES = ("umo", "provider", "user")
+# 合法 on_exceeded 白名单。
+_VALID_ON_EXCEEDED = ("stop", "fallback", "warn")
+# 合法 default_on_exceeded 同 on_exceeded（复用同一组值）。
 
 
-def normalize_strategy(raw: Any) -> dict[str, Any]:
-    """规范化单条超限策略（纯函数，非法值一律兜底，绝不抛异常）。
-
-    返回形如 ``{"action","provider_ids","token_limit","message","enabled"}`` 的 dict。
-    非法 / 缺失 action → ``"stop_llm"``；``provider_ids`` 容错为 ``list[str]``
-    （接受单字符串、逗号分隔串、列表）。
-
-    Args:
-        raw: 原始策略对象（通常来自用户配置或前端）。
+def normalize_budget_override(raw: Any) -> dict[str, Any] | None:
+    """规范化单条局部阈值规则（纯函数；非法值一律兜底；空规则返回 None）。
 
     Returns:
-        规范化后的策略 dict。
+        规范化后的 dict；非法 / 缺字段不可恢复时返回 ``None``（调用方应丢弃该条）。
     """
-    if not isinstance(raw, dict):
-        return {
-            "action": "stop_llm",
-            "provider_ids": [],
-            "token_limit": 0,
-            "message": "",
-            "enabled": True,
-        }
-    action = str(raw.get("action") or "").strip()
-    if action not in _VALID_STRATEGY_ACTIONS:
-        action = "stop_llm"
-    pids_raw = raw.get("provider_ids")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    target_type = str(raw.get("target_type") or "").strip().lower()
+    if target_type not in _VALID_TARGET_TYPES:
+        return None
+    target_value = str(raw.get("target_value") or "").strip()
+    if not target_value:
+        return None
+    try:
+        token_limit = max(0, int(raw.get("token_limit", 0) or 0))
+    except (TypeError, ValueError):
+        token_limit = 0
+    try:
+        cost_limit = max(0.0, float(raw.get("cost_limit", 0) or 0))
+    except (TypeError, ValueError):
+        cost_limit = 0.0
+    on_exceeded = str(raw.get("on_exceeded") or "").strip().lower()
+    if on_exceeded not in _VALID_ON_EXCEEDED:
+        on_exceeded = "stop"
+    stop_message = str(raw.get("stop_message", "") or "")
+    pids_raw = raw.get("fallback_provider_ids") or []
     pids: list[str] = []
     if isinstance(pids_raw, str):
         pids = [p.strip() for p in pids_raw.split(",") if p.strip()]
@@ -118,68 +134,58 @@ def normalize_strategy(raw: Any) -> dict[str, Any]:
             if s:
                 pids.append(s)
     try:
-        token_limit = max(0, int(raw.get("token_limit", 0) or 0))
+        fallback_token_limit = max(0, int(raw.get("fallback_token_limit", 0) or 0))
     except (TypeError, ValueError):
-        token_limit = 0
-    message = str(raw.get("message", "") or "")
+        fallback_token_limit = 0
     enabled = bool(raw.get("enabled", True))
     return {
-        "action": action,
-        "provider_ids": pids,
-        "token_limit": token_limit,
-        "message": message,
         "enabled": enabled,
+        "target_type": target_type,
+        "target_value": target_value,
+        "token_limit": token_limit,
+        "cost_limit": cost_limit,
+        "on_exceeded": on_exceeded,
+        "stop_message": stop_message,
+        "fallback_provider_ids": pids,
+        "fallback_token_limit": fallback_token_limit,
     }
 
 
-def migrate_legacy_policy(policy: Any) -> list[dict[str, Any]]:
-    """把遗留的单对象 ``over_limit_policy`` 迁移为 1 元素策略列表（纯函数）。
+def normalize_fallback_provider(raw: Any) -> dict[str, Any] | None:
+    """规范化备用 Provider 库条目（纯函数；非法值返回 None 丢弃）。"""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    pid = str(raw.get("id") or "").strip()
+    if not pid:
+        return None
+    note = str(raw.get("note", "") or "")
+    enabled = bool(raw.get("enabled", True))
+    return {"id": pid, "enabled": enabled, "note": note}
 
-    ``action=="fallback_provider"`` 时保留原 ``fallback_provider_id`` →
-    ``provider_ids``、``fallback_token_limit`` → ``token_limit``；其余（含
-    ``stop_llm``）迁移为单条 ``stop_llm`` 策略。空 / 非对象返回 ``[]``。
+
+def enabled_overrides(overrides: Any) -> list[dict[str, Any]]:
+    """返回已启用且字段合法的 override（保持原顺序，纯函数）。
+
+    每条过 :func:`normalize_budget_override`（字段齐全）；返回 ``None`` 者跳过。
     """
-    if not isinstance(policy, dict) or not policy:
-        return []
-    action = str(policy.get("action") or "").strip()
-    if action == "fallback_provider":
-        pid = str(policy.get("fallback_provider_id", "") or "").strip()
-        try:
-            tl = max(0, int(policy.get("fallback_token_limit", 0) or 0))
-        except (TypeError, ValueError):
-            tl = 0
-        return [
-            {
-                "action": "fallback_provider",
-                "provider_ids": [pid] if pid else [],
-                "token_limit": tl,
-                "message": "",
-                "enabled": True,
-            }
-        ]
-    return [
-        {
-            "action": "stop_llm",
-            "provider_ids": [],
-            "token_limit": 0,
-            "message": "",
-            "enabled": True,
-        }
-    ]
-
-
-def enabled_strategies(strategies: Any) -> list[dict[str, Any]]:
-    """返回已启用且 action 合法的策略（保持原顺序，纯函数）。
-
-    输入先逐条过 :func:`normalize_strategy`（保证字段齐全 / 合法），
-    再过滤 ``enabled`` 为假者。
-    """
-    if not isinstance(strategies, (list, tuple)):
+    if not isinstance(overrides, (list, tuple)):
         return []
     out: list[dict[str, Any]] = []
-    for s in strategies:
-        n = normalize_strategy(s)
-        if n["enabled"] and n["action"] in _VALID_STRATEGY_ACTIONS:
+    for ov in overrides:
+        n = normalize_budget_override(ov)
+        if n is not None and n.get("enabled", True):
+            out.append(n)
+    return out
+
+
+def enabled_fallback_providers(items: Any) -> list[dict[str, Any]]:
+    """返回已启用的备用 Provider（纯函数）。"""
+    if not isinstance(items, (list, tuple)):
+        return []
+    out: list[dict[str, Any]] = []
+    for it in items:
+        n = normalize_fallback_provider(it)
+        if n is not None and n.get("enabled", True):
             out.append(n)
     return out
 

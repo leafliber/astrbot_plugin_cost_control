@@ -32,6 +32,7 @@ export interface OverviewReport {
   injection_samples?: number;
   cost_by_model?: CostByModel[];
   top_sessions?: TopSession[];
+  top_sessions_by_cost?: TopSession[];
 }
 
 export interface TimelinePoint {
@@ -119,43 +120,59 @@ export interface Provider {
   type?: string;
 }
 
-export interface BudgetMetric {
-  limit?: number;
-  used?: number;
-  ratio?: number;
-  exceeded?: boolean;
+export interface MetricProgress {
+  limit: number;
+  used: number;
+  ratio: number;
+  exceeded: boolean;
   top_key?: string;
   note?: string;
 }
 
 export interface BudgetDimension {
-  token?: BudgetMetric;
-  cost?: BudgetMetric;
+  token: MetricProgress;
+  cost: MetricProgress;
 }
 
-export type BudgetMetricKey = "token" | "cost";
+export type Metric = "token" | "cost";
+export type OverrideTarget = "umo" | "provider" | "user";
+export type OnExceeded = "stop" | "fallback" | "warn";
+
+export interface OverrideCurrent {
+  token: { used: number; ratio: number; exceeded: boolean };
+  cost: { used: number; ratio: number; exceeded: boolean };
+}
+
+export interface BudgetOverride {
+  id?: string;
+  enabled: boolean;
+  target_type: OverrideTarget;
+  target_value: string;
+  token_limit: number;
+  cost_limit: number;
+  on_exceeded: OnExceeded;
+  stop_message?: string;
+  fallback_provider_ids: string[];
+  fallback_token_limit: number;
+}
+
+export interface BudgetOverrideRow extends BudgetOverride {
+  current: OverrideCurrent;
+}
+
+export interface FallbackProvider {
+  id: string;
+  enabled: boolean;
+  note?: string;
+}
 
 export interface BudgetResponse {
   limits?: Record<string, number>;
   limits_cost?: Record<string, number>;
-  strategies?: RawStrategy[];
   dimensions?: Record<string, BudgetDimension>;
-}
-
-export interface RawStrategy {
-  action?: string;
-  provider_ids?: string[];
-  token_limit?: number;
-  message?: string;
-  enabled?: boolean;
-}
-
-export interface Strategy {
-  action: string;
-  provider_ids: string[];
-  token_limit: number;
-  message: string;
-  enabled: boolean;
+  overrides?: BudgetOverrideRow[];
+  fallback_providers?: FallbackProvider[];
+  global_default_on_exceeded?: OnExceeded;
 }
 
 // ===== cache =====

@@ -562,6 +562,263 @@ tr:hover td {
   color: var(--bad);
 }
 
+.strategy-warn {
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.45);
+  color: var(--warn, #d97706);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.strategy-warn div + div {
+  margin-top: 2px;
+}
+
+/* ===== 预算页重构样式 ===== */
+
+/* 5 张全局默认卡片网格 */
+.budget-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.budget-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.budget-card.exceeded {
+  border-color: var(--bad);
+}
+
+.budget-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.budget-card-label {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.budget-card-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border);
+}
+
+.budget-card-metric.dim {
+  opacity: 0.5;
+}
+
+.budget-card-metric.active {
+  background: var(--accent-weak);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+}
+
+.budget-card-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.budget-card-input input {
+  width: 100%;
+}
+
+/* override 规则行 */
+.overrides-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.override-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.override-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-areas:
+    "head head head"
+    "limits limits action"
+    "extra extra extra"
+    "progress progress move";
+  gap: 8px 12px;
+  align-items: start;
+}
+
+.override-row.is-disabled {
+  opacity: 0.55;
+}
+
+.override-head {
+  grid-area: head;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.override-idx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.override-target,
+.override-value,
+.override-on,
+.fb-add {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.override-limits {
+  grid-area: limits;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.limit-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.limit-cell.dim {
+  opacity: 0.5;
+}
+
+.limit-cell.active {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.override-action {
+  grid-area: action;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.override-extra {
+  grid-area: extra;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border);
+}
+
+.override-progress {
+  grid-area: progress;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.progress-cell {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.progress-cell.dim {
+  opacity: 0.5;
+}
+
+.progress-cell.active {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.override-move {
+  grid-area: move;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  justify-self: end;
+}
+
+/* 备用 Provider 多选（tag 风格） */
+.fb-picker {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.fallback-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* ===== 设置页表单行 ===== */
 .set-row {
   display: flex;
@@ -705,6 +962,42 @@ tr:hover td {
 
 .diff-line.dl-ctx .dl-text {
   color: var(--text-dim);
+}
+
+.diff-line.diff-collapsed {
+  background: var(--panel);
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+  cursor: pointer;
+  user-select: none;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.diff-line.diff-collapsed:hover {
+  background: var(--panel-2);
+}
+
+.diff-line.diff-collapsed .dl-sign {
+  flex: 0 0 22px;
+  text-align: center;
+  color: var(--accent);
+}
+
+.diff-line.diff-collapsed .dl-text {
+  color: var(--text-dim);
+  font-style: italic;
+  padding-right: 10px;
+}
+
+.diff-line.diff-expand-all {
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.diff-line.diff-expand-all .dl-sign,
+.diff-line.diff-expand-all .dl-text {
+  color: var(--accent);
 }
 
 .pr-suggest-item:hover {

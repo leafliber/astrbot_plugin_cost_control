@@ -43,8 +43,8 @@ from .config import (
     coerce_to_default_type,
     deep_merge,
     get_config,
-    migrate_legacy_policy,
-    normalize_strategy,
+    normalize_budget_override,
+    normalize_fallback_provider,
     save_plugin_config,
     switches_from_config,
 )
@@ -63,10 +63,13 @@ class WebApiMixin:
     build_report: Any
     get_budgets: Any
     get_budgets_cost: Any
-    get_over_limit_strategies: Any
+    get_budget_overrides: Any
+    get_fallback_providers: Any
     query_usage: Any
     query_usage_grouped: Any
     query_supplements: Any
+    query_user_token_total: Any
+    query_user_cost_total: Any
     query_usage_timeseries: Any
     query_cache_events: Any
     cleanup_old_supplements: Any
@@ -364,16 +367,16 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_records_aggregate(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /records/aggregate``：在筛选条件上按模型 / 会话二级聚合（基于 ProviderStat）。
+        """``GET /records/aggregate``：按模型 / provider / 会话聚合 ProviderStat 用量。
 
-        Query：``by``（model|provider，默认 model）、``umo`` / ``provider`` / ``model``
+        Query：``by``（model|provider|umo，默认 model）、``umo`` / ``provider`` / ``model``
         （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
         """
         try:
             from .cost import compute_cost_value
 
             by = self._param("by", "model") or "model"
-            if by not in ("model", "provider"):
+            if by not in ("model", "provider", "umo"):
                 by = "model"
             start = self._parse_iso(self._param("start"))
             end = self._parse_iso(self._param("end"))
@@ -384,12 +387,10 @@ class WebApiMixin:
                 by=by,
                 umo=umo,
                 provider=provider,
+                model=model,
                 start=start,
                 end=end,
             )
-            # query_usage_grouped 无 model 筛选参数，应用层补
-            if model and by == "model":
-                rows = [r for r in rows if r.get("key") == model]
             pricing = self.get_pricing()
             total_tokens = 0
             out: list[dict[str, Any]] = []
@@ -426,23 +427,47 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_budgets(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /budgets``：预算配置 + 各维度当前周期消耗（全局视角）。
+        """``GET /budgets``：预算配置 + 5 维全局消耗 + 局部阈值 + 备用 Provider 库。
 
-        全局维度（global_daily/global_monthly）给精确消耗；局部维度
-        （per_session/per_user/per_model）给「本周期消耗最多的会话/模型」代表值
-        （这些维度在运行时按当前请求的 umo/model 实时判定拦截，无单一全局消耗）。
+        返回结构：
+        ```
+        {
+          "limits": {dim: int},
+          "limits_cost": {dim: float},
+          "dimensions": {dim: {token: {limit, used, ratio, exceeded, top_key, note}, cost: ...}},
+          "overrides": [
+            {id, enabled, target_type, target_value, token_limit, cost_limit,
+             on_exceeded, stop_message, fallback_provider_ids, fallback_token_limit,
+             current: {token: {used, ratio, exceeded}, cost: {used, ratio, exceeded}}},
+            ...
+          ],
+          "fallback_providers": [{id, enabled, note}, ...],
+          "global_default_on_exceeded": "stop"|"fallback"|"warn",
+        }
+        ```
+        全局维度给精确消耗；局部维度（per_session/per_user/per_model）给「本周期消耗
+        最多的会话/模型」代表值（运行时按请求 umo/model 实时拦截，无单一全局值）。
         """
         try:
             from datetime import UTC, datetime
 
-            from .budget import _DIM_ORDER, day_window_start, month_window_start, total_tokens
+            from .budget import (
+                _DIM_ORDER,
+                day_window_start,
+                default_on_exceeded,
+                get_budget_overrides,
+                get_fallback_providers,
+                month_window_start,
+                total_tokens,
+            )
 
+            cfg = getattr(self, "cfg", None)
             limits = self.get_budgets()
             limits_cost = self.get_budgets_cost()
             has_cost = any(float(limits_cost.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
-            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
+            refresh = str(get_config(cfg, "refresh_time", "00:00"))
             d_start = day_window_start(refresh, now, tz)
             m_start = month_window_start(now, tz)
             day_usage = await self.query_usage(start=d_start)
@@ -460,7 +485,6 @@ class WebApiMixin:
             mod_used = total_tokens(top_model[0]) if top_model else 0
             mod_key = str((top_model[0] or {}).get("key", "")) if top_model else ""
 
-            # 花费消耗（仅当配置了 cost 限额时计算，否则全 0；口径同 check_budget）
             if has_cost:
                 from .budget import _groups_cost
                 from .cost import compute_cost_value
@@ -514,28 +538,124 @@ class WebApiMixin:
                     },
                 }
 
+            # ===== 局部阈值：聚合每条规则的实时 used =====
+            overrides_raw = get_budget_overrides(cfg)
+            pricing = self.get_pricing() if has_cost or overrides_raw else {}
+            overrides_out: list[dict[str, Any]] = []
+            for idx, ov in enumerate(overrides_raw):
+                used_t_v = 0.0
+                used_c_v = 0.0
+                tt = str(ov.get("target_type") or "")
+                tv = str(ov.get("target_value") or "")
+                try:
+                    if tt == "umo":
+                        if ov.get("token_limit", 0) > 0:
+                            used_t_v = float(
+                                total_tokens(await self.query_usage(umo=tv, start=d_start))
+                            )
+                        if ov.get("cost_limit", 0) > 0:
+                            used_c_v = _groups_cost(
+                                await self.query_usage_grouped(
+                                    by="model", umo=tv, start=d_start
+                                ),
+                                pricing,
+                            )
+                    elif tt == "provider":
+                        if ov.get("token_limit", 0) > 0:
+                            used_t_v = float(
+                                total_tokens(
+                                    await self.query_usage(provider=tv, start=d_start)
+                                )
+                            )
+                        if ov.get("cost_limit", 0) > 0:
+                            used_c_v = _groups_cost(
+                                await self.query_usage_grouped(
+                                    by="model", provider=tv, start=d_start
+                                ),
+                                pricing,
+                            )
+                    elif tt == "user":
+                        if ov.get("token_limit", 0) > 0 and hasattr(
+                            self, "query_user_token_total"
+                        ):
+                            used_t_v = float(
+                                await self.query_user_token_total(tv, d_start)
+                            )
+                        if ov.get("cost_limit", 0) > 0 and hasattr(
+                            self, "query_user_cost_total"
+                        ):
+                            used_c_v = float(
+                                await self.query_user_cost_total(tv, d_start, pricing)
+                            )
+                except Exception:
+                    # 单条 override 聚合失败不影响其它条
+                    pass
+
+                def _ratio(used: float, limit: Any) -> dict[str, Any]:
+                    limit_f = float(limit or 0)
+                    return {
+                        "used": round(used, 6),
+                        "ratio": round(used * 100.0 / limit_f, 1) if limit_f > 0 else 0.0,
+                        "exceeded": limit_f > 0 and used >= limit_f,
+                    }
+
+                overrides_out.append(
+                    {
+                        "id": f"ovo_{idx}",
+                        "enabled": bool(ov.get("enabled", True)),
+                        "target_type": tt,
+                        "target_value": tv,
+                        "token_limit": int(ov.get("token_limit") or 0),
+                        "cost_limit": float(ov.get("cost_limit") or 0.0),
+                        "on_exceeded": str(ov.get("on_exceeded") or "stop"),
+                        "stop_message": str(ov.get("stop_message") or ""),
+                        "fallback_provider_ids": list(
+                            ov.get("fallback_provider_ids") or []
+                        ),
+                        "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
+                        "current": {
+                            "token": _ratio(used_t_v, ov.get("token_limit", 0)),
+                            "cost": _ratio(used_c_v, ov.get("cost_limit", 0)),
+                        },
+                    }
+                )
+
+            fallback_providers = get_fallback_providers(cfg)
+
             return self._ok(
                 {
                     "limits": limits,
                     "limits_cost": limits_cost,
-                    "strategies": self.get_over_limit_strategies(),
                     "dimensions": {
                         "global_daily": _dim_entry("global_daily", day_total, day_cost),
-                        "global_monthly": _dim_entry("global_monthly", month_total, month_cost),
+                        "global_monthly": _dim_entry(
+                            "global_monthly", month_total, month_cost
+                        ),
                         "per_session_daily": _dim_entry(
-                            "per_session_daily", ses_used, ses_cost, ses_key, "今日消耗最多的会话"
+                            "per_session_daily",
+                            ses_used,
+                            ses_cost,
+                            ses_key,
+                            "今日消耗最多的会话",
                         ),
                         "per_user_daily": _dim_entry(
                             "per_user_daily",
                             ses_used,
                             ses_cost,
                             ses_key,
-                            "退化为会话维度（ProviderStat 无独立 user_id）",
+                            "退化为会话维度（按用户 override 走 CostSupplement.user_id）",
                         ),
                         "per_model_daily": _dim_entry(
-                            "per_model_daily", mod_used, mod_cost, mod_key, "今日消耗最多的模型"
+                            "per_model_daily",
+                            mod_used,
+                            mod_cost,
+                            mod_key,
+                            "今日消耗最多的模型",
                         ),
                     },
+                    "overrides": overrides_out,
+                    "fallback_providers": fallback_providers,
+                    "global_default_on_exceeded": default_on_exceeded(cfg),
                 }
             )
         except Exception as e:
@@ -775,22 +895,39 @@ class WebApiMixin:
         """校验 save_config 请求体，返回合并后的**全量**配置或错误信息。
 
         以当前 ``self.cfg`` 为底座，按 body 提供的 key 逐项强转校验
-        (:func:`coerce_to_default_type`)；``over_limit_strategies`` 逐条过
-        :func:`normalize_strategy`；``pricing`` 接受任意 dict；遗留
-        ``over_limit_policy`` 迁移为策略链。未知 key 忽略。返回 ``(full_cfg, err)``。
+        (:func:`coerce_to_default_type`)；``budget_overrides`` 逐条过
+        :func:`normalize_budget_override`（非法整条丢弃）；``fallback_providers``
+        逐条过 :func:`normalize_fallback_provider`；``pricing`` 接受任意 dict；
+        ``default_on_exceeded`` 限定 ``stop|fallback|warn``。未知 key 忽略。
         """
         if not isinstance(body, dict):
             return None, "请求体必须是 JSON 对象"
         cur = getattr(self, "cfg", None)
         out: dict[str, Any] = dict(cur) if isinstance(cur, dict) else {}
         for k, v in body.items():
-            if k == "over_limit_strategies":
+            if k == "budget_overrides":
                 if not isinstance(v, list):
-                    return None, "over_limit_strategies 必须是数组"
-                out[k] = [normalize_strategy(s) for s in v]
-            elif k == "over_limit_policy":  # 遗留兼容
-                migrated = migrate_legacy_policy(v)
-                out["over_limit_strategies"] = migrated if migrated else [normalize_strategy({})]
+                    return None, "budget_overrides 必须是数组"
+                normalized: list[dict[str, Any]] = []
+                for it in v:
+                    n = normalize_budget_override(it)
+                    if n is not None:
+                        normalized.append(n)
+                out[k] = normalized
+            elif k == "fallback_providers":
+                if not isinstance(v, list):
+                    return None, "fallback_providers 必须是数组"
+                normalized_fb: list[dict[str, Any]] = []
+                for it in v:
+                    n = normalize_fallback_provider(it)
+                    if n is not None:
+                        normalized_fb.append(n)
+                out[k] = normalized_fb
+            elif k == "default_on_exceeded":
+                sv = str(v or "").strip().lower()
+                if sv not in ("stop", "fallback", "warn"):
+                    return None, "default_on_exceeded 必须是 stop/fallback/warn"
+                out[k] = sv
             elif k == "pricing":
                 if not isinstance(v, dict):
                     return None, "pricing 必须是对象"
@@ -798,7 +935,7 @@ class WebApiMixin:
             elif k in CONFIG_DEFAULTS:
                 out[k] = coerce_to_default_type(v, CONFIG_DEFAULTS[k])
             # else: 未知 key 忽略
-        if not any(k in body for k in (*CONFIG_DEFAULTS, "over_limit_policy")):
+        if not any(k in body for k in CONFIG_DEFAULTS):
             return None, "未提供可识别的配置项"
         return out, ""
 
@@ -822,7 +959,7 @@ class WebApiMixin:
             if err:
                 return self._err(err)
             assert merged is not None
-            changed = [k for k in (body or {}) if k in CONFIG_DEFAULTS or k == "over_limit_policy"]
+            changed = [k for k in (body or {}) if k in CONFIG_DEFAULTS]
             # 1. 写插件自有配置文件（持久）
             data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
             try:

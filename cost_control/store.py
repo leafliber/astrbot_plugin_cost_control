@@ -3,7 +3,7 @@
 负责自有补充表的持久化（独立 sqlite 文件，放在 ``StarTools.get_data_dir`` 返回的
 数据目录），并复用 AstrBot 内置 ``Preference`` 表存配置 / 状态（告警冷却、计数等）。
 
-设计决策：补充数据（每请求的 cache_creation、归因注入量等原生 ``ProviderStat``
+设计决策：补充数据（每请求的 cache_creation、归因注入量、user_id 等原生 ``ProviderStat``
 没有的字段）存独立 sqlite，与 AstrBot 主库解耦——零 schema 干扰、astrbot 升级免疫。
 与 ``ProviderStat`` 的关联在应用层按 ``umo + provider_id + created_at`` 完成。
 
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api.star import StarTools
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import JSON, Field, SQLModel, select
 
@@ -28,7 +28,7 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     """每请求补充采集记录。
 
     与 ``ProviderStat`` 一一对应（按 ``umo + provider_id + created_at`` 近似关联），
-    记录原生表没有的 cache 细分、原始 usage、归因注入量等。
+    记录原生表没有的 cache 细分、原始 usage、归因注入量、发送者 user_id 等。
     """
 
     __tablename__ = "cost_supplements"
@@ -60,6 +60,10 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     # 归因（阶段 3 填充）
     injection_total: int | None = Field(default=None)
     attribution: dict[str, Any] | None = Field(default=None, sa_type=JSON)
+
+    # 发送者 user_id（从 AstrMessageEvent.get_sender_id 读取，用于按用户的
+    # 局部阈值 override；ProviderStat 无此字段，存本表）。
+    user_id: str | None = Field(default=None, index=True)
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
@@ -110,7 +114,12 @@ class StoreMixin:
         return StarTools.get_data_dir(PLUGIN_NAME)
 
     async def init_store(self) -> None:
-        """初始化独立 sqlite：创建 engine + 建补充表（仅建本表，不污染全局 metadata）。"""
+        """初始化独立 sqlite：创建 engine + 建补充表（仅建本表，不污染全局 metadata）。
+
+        对已存在的旧库调用一次幂等 ``ALTER TABLE`` 迁移，补充缺失列与索引
+        （SQLAlchemy ``create_all(checkfirst=True)`` 只建不存在的表，不加列；
+        新增字段需要手工 ALTER 才能补齐）。任何失败仅记录日志，不阻断插件加载。
+        """
         data_dir = self.get_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         db_path = data_dir / "supplement.db"
@@ -138,6 +147,34 @@ class StoreMixin:
                     checkfirst=True,
                 )
             )
+            # 幂等迁移：补齐新加的列与索引（旧库只有旧 schema 时必要）。
+            await self._migrate_supplement_columns(conn)
+
+    async def _migrate_supplement_columns(self, conn: Any) -> None:
+        """幂等迁移：检查 ``cost_supplements`` 实际列，缺则 ``ALTER TABLE ADD COLUMN``。
+
+        当前迁移项：
+        - ``user_id TEXT``（按用户 override 需要；索引由后续 ``CREATE INDEX IF NOT EXISTS`` 兜底）
+
+        任何 SQLite 错误吞掉（开发期重命名/删除列属人为操作，不应阻断）。
+        """
+        try:
+            res = await conn.execute(text("PRAGMA table_info(cost_supplements)"))
+            cols = {row[1] for row in res.fetchall()}
+            if "user_id" not in cols:
+                await conn.execute(
+                    text("ALTER TABLE cost_supplements ADD COLUMN user_id TEXT")
+                )
+            # 索引（IF NOT EXISTS 在 SQLite 3.8+ 可用）
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_cost_supplements_user_id "
+                    "ON cost_supplements (user_id)"
+                )
+            )
+        except Exception:
+            # 迁移失败不阻断；后续写入缺失字段会被 SQLAlchemy 兜底为 None
+            pass
 
     async def _ensure_session_maker(self) -> Any:
         if self._session_maker is None:
@@ -164,6 +201,7 @@ class StoreMixin:
             raw_usage=record.get("raw_usage"),
             injection_total=record.get("injection_total"),
             attribution=record.get("attribution"),
+            user_id=record.get("user_id"),
             created_at=record.get("created_at") or datetime.now(UTC),
         )
         maker = await self._ensure_session_maker()
@@ -177,6 +215,7 @@ class StoreMixin:
         umo: str | None = None,
         provider_id: str | None = None,
         provider_model: str | None = None,
+        user_id: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 100,
@@ -206,6 +245,8 @@ class StoreMixin:
             stmt = stmt.where(CostSupplement.provider_id == provider_id)
         if provider_model:
             stmt = stmt.where(CostSupplement.provider_model == provider_model)
+        if user_id:
+            stmt = stmt.where(CostSupplement.user_id == user_id)
         if start:
             stmt = stmt.where(CostSupplement.created_at >= start)
         if end:
@@ -218,6 +259,74 @@ class StoreMixin:
                 return list(result.scalars().all())
         except Exception:
             return []
+
+    async def query_user_token_total(
+        self,
+        user_id: str,
+        start: datetime,
+    ) -> int:
+        """按 user_id 聚合自 ``start`` 以来的 token 三类总和（纯 SQL，失败返回 0）。
+
+        用于按用户 override 的实时 used 计算（ProviderStat 无 user_id，必须查补充表）。
+        """
+        try:
+            from sqlalchemy import func
+
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                stmt = select(
+                    func.coalesce(
+                        func.sum(CostSupplement.token_input_other), 0
+                    ),
+                    func.coalesce(
+                        func.sum(CostSupplement.token_input_cached), 0
+                    ),
+                    func.coalesce(func.sum(CostSupplement.token_output), 0),
+                ).where(CostSupplement.user_id == user_id)
+                if start:
+                    stmt = stmt.where(CostSupplement.created_at >= start)
+                row = (await session.execute(stmt)).first()
+                if not row:
+                    return 0
+                return int(row[0] or 0) + int(row[1] or 0) + int(row[2] or 0)
+        except Exception:
+            return 0
+
+    async def query_user_cost_total(
+        self,
+        user_id: str,
+        start: datetime,
+        pricing: dict[str, dict[str, float]],
+    ) -> float:
+        """按 user_id 聚合自 ``start`` 以来的花费（按模型单价逐行算，失败返回 0.0）。"""
+        try:
+            from .cost import compute_cost_value
+
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                stmt = select(CostSupplement).where(CostSupplement.user_id == user_id)
+                if start:
+                    stmt = stmt.where(CostSupplement.created_at >= start)
+                result = await session.execute(stmt)
+                rows = list(result.scalars().all())
+            total = 0.0
+            for r in rows:
+                try:
+                    total += compute_cost_value(
+                        {
+                            "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
+                            "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
+                            "token_output": int(getattr(r, "token_output", 0) or 0),
+                            "cache_creation": getattr(r, "cache_creation", None),
+                        },
+                        getattr(r, "provider_model", None),
+                        pricing,
+                    )
+                except Exception:
+                    continue
+            return round(total, 6)
+        except Exception:
+            return 0.0
 
     async def cleanup_old_supplements(self, before: datetime) -> int:
         """删除 ``created_at`` 早于 before 的补充记录与缓存事件，返回删除条数（失败返回 0）。"""

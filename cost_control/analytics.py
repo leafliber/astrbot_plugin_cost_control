@@ -180,7 +180,8 @@ class AnalyticsMixin:
         Returns:
             报表 dict，含 ``window`` / ``start`` / ``end`` / ``usage`` /
             ``cost`` / ``cost_by_model`` / ``cache_hit_rate`` / ``avg_injection`` /
-            ``top_sessions``。任何异常降级为空字段，绝不抛出。
+            ``top_sessions``（按 token 降序）/ ``top_sessions_by_cost``（按成本降序）。
+            任何异常降级为空字段，绝不抛出。
         """
         now = datetime.now(UTC)
         tz = resolve_tz(self.context)
@@ -200,6 +201,7 @@ class AnalyticsMixin:
             "avg_injection": 0,
             "injection_samples": 0,
             "top_sessions": [],
+            "top_sessions_by_cost": [],
         }
         try:
             usage = await self.query_usage(start=start)
@@ -235,6 +237,11 @@ class AnalyticsMixin:
                 "avg_injection": agg["avg_injection"],
                 "injection_samples": agg["injection_samples"],
                 "top_sessions": agg["by_session"][:10],
+                "top_sessions_by_cost": sorted(
+                    agg["by_session"],
+                    key=lambda s: float(s.get("cost", 0) or 0),
+                    reverse=True,
+                )[:10],
             }
         except Exception:
             return empty

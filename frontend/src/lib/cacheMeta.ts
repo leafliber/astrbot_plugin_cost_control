@@ -1,5 +1,21 @@
 import type { CacheEvent, CacheEventState, DiffLine } from "./types";
 
+// 折叠阈值：连续未变更的 context 行数大于此值时折叠为一段
+const CONTEXT_COLLAPSE_THRESHOLD = 3;
+
+export interface CollapsedSegment {
+  kind: "lines";
+  lines: DiffLine[];
+}
+
+export interface CollapsedPlaceholder {
+  kind: "placeholder";
+  count: number;
+  segments: CollapsedSegment[]; // 折叠时被隐藏的原始段，点击展开后渲染
+}
+
+export type CollapsedLine = DiffLine | CollapsedPlaceholder;
+
 // 缓存破坏事件类型元数据：标题 + 处置建议
 export const CACHE_EVENT_META: Record<string, { title: string; tip: string }> = {
   context_reset: {
@@ -49,12 +65,69 @@ export interface DiffRow {
   changed: boolean;
 }
 
+export interface DiffPayload {
+  label: string;
+  segments: CollapsedSegment[];
+  // 初始折叠状态：true 表示所有长 context 段默认收起
+  initiallyCollapsed: boolean;
+}
+
 export interface CacheDetail {
   rows: DiffRow[];
   firstDiv?: number;
   tip: string;
   detail: string;
-  diff?: { label: string; lines: DiffLine[] };
+  diff?: DiffPayload;
+}
+
+// 将连续的 context 行合并为一个段，便于折叠
+function collapseContext(
+  lines: DiffLine[],
+  threshold: number,
+): CollapsedSegment[] {
+  const segments: CollapsedSegment[] = [];
+  let buf: DiffLine[] = [];
+  const flush = () => {
+    if (buf.length === 0) return;
+    segments.push({ kind: "lines", lines: buf });
+    buf = [];
+  };
+  for (const l of lines) {
+    if (l.op === " ") {
+      buf.push(l);
+    } else {
+      flush();
+      segments.push({ kind: "lines", lines: [l] });
+    }
+  }
+  flush();
+  // 仅折叠长度超过阈值的纯 context 段；首尾 context 段保留原样以提供上下文
+  return segments.map((s) => {
+    if (s.lines.every((l) => l.op === " ") && s.lines.length > threshold) {
+      return s; // 由 buildCollapsedView 决定是否折叠
+    }
+    return s;
+  });
+}
+
+// 把 segments 中过长的 context 段折叠为 placeholder，返回 CollapsedLine[]
+export function buildCollapsedView(
+  segments: CollapsedSegment[],
+  collapsed: boolean,
+): CollapsedLine[] {
+  const out: CollapsedLine[] = [];
+  segments.forEach((s, idx) => {
+    const isLongContext =
+      s.lines.every((l) => l.op === " ") && s.lines.length > CONTEXT_COLLAPSE_THRESHOLD;
+    // 收尾段保留展开：避免用户失去变更的上下文边界
+    const isBoundary = idx === 0 || idx === segments.length - 1;
+    if (collapsed && isLongContext && !isBoundary) {
+      out.push({ kind: "placeholder", count: s.lines.length, segments: [s] });
+    } else {
+      out.push(...s.lines);
+    }
+  });
+  return out;
 }
 
 export function cacheDetailRows(ev: CacheEvent): CacheDetail {
@@ -78,11 +151,17 @@ export function cacheDetailRows(ev: CacheEvent): CacheDetail {
   // 内容级 diff（后端 _line_diff 产出，仅 system/tools 变更事件有）
   const sysLines = (a.system_diff || []).filter((l) => l && l.op);
   const toolLines = (a.tools_diff || []).filter((l) => l && l.op);
-  const diff =
-    sysLines.length > 0
-      ? { label: "system prompt 变更", lines: sysLines }
-      : toolLines.length > 0
-        ? { label: "工具定义变更", lines: toolLines }
-        : undefined;
-  return { rows, firstDiv, tip: cacheEvtMeta(ev.type).tip, detail: ev.detail || "", diff };
+  const rawLines = sysLines.length > 0 ? sysLines : toolLines.length > 0 ? toolLines : [];
+  if (rawLines.length === 0) {
+    return { rows, firstDiv, tip: cacheEvtMeta(ev.type).tip, detail: ev.detail || "" };
+  }
+  const label = sysLines.length > 0 ? "system prompt 变更" : "工具定义变更";
+  const segments = collapseContext(rawLines, CONTEXT_COLLAPSE_THRESHOLD);
+  return {
+    rows,
+    firstDiv,
+    tip: cacheEvtMeta(ev.type).tip,
+    detail: ev.detail || "",
+    diff: { label, segments, initiallyCollapsed: true },
+  };
 }

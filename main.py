@@ -118,13 +118,12 @@ class Main(
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             model = getattr(req, "model", None) or None
-            result = await self.check_budget(umo, model)
+            result = await self.check_budget(umo, model, event=event)
             if result.get("exceeded"):
-                strategies = result.get("strategies") or []
                 try:
-                    handled = await self.apply_over_limit_chain(event, req, result, strategies)
+                    handled = await self.apply_over_limit_chain(event, req, result)
                 except Exception as e:
-                    logger.warning("[cost_control] 超限策略链执行失败: %s", e)
+                    logger.warning("[cost_control] 超限派发失败: %s", e)
                     handled = False
                 if handled:
                     return
