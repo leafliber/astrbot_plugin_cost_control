@@ -25,28 +25,49 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from .config import get_pricing
+
+
+def _best_match_key(target: str | None, table: Mapping[str, Any]) -> str | None:
+    """在 ``table`` 的键中为 ``target`` 选最佳匹配键（大小写：精确敏感，其余不敏感）。
+
+    三级回退，每级取**最长候选**（最具体优先），命中即返回：
+
+    1. **精确匹配**（原名，大小写敏感）；
+    2. **前缀匹配**：``target`` 以某键开头——处理带日期 / 版本后缀的名称
+       （如 ``claude-sonnet-4-5-20250929`` → ``claude-sonnet-4-5``）；
+    3. **子串匹配**：``target`` 包含某键——让实际调用中的变体名命中内置预设
+       （如厂商前缀 ``provider/qwen-max``、带后缀 ``qwen-max-20241115``、
+       大小写差异 ``GLM-4.5``）。
+
+    该函数同时驱动 :func:`match_pricing`（默认价按模型名匹配）与
+    :func:`resolve_pricing` 的用户定价 provider_id 模糊匹配，故两者规则一致。
+    """
+    if not target:
+        return None
+    if target in table:
+        return target
+    tl = target.lower()
+    candidates = [k for k in table if tl.startswith(k.lower())]
+    if not candidates:
+        candidates = [k for k in table if k.lower() in tl]
+    if candidates:
+        candidates.sort(key=len, reverse=True)
+        return candidates[0]
+    return None
 
 
 def match_pricing(
     model: str | None,
     pricing: dict[str, dict[str, float]],
 ) -> dict[str, float] | None:
-    """按模型名匹配**默认单价表**（精确 > 前缀 > 关键词模糊，均大小写不敏感）。
+    """按模型名匹配**默认单价表**（:func:`_best_match_key` 三级算法）。
 
     仅作用于 :func:`get_pricing` 返回的 ``defaults`` 空间（key=模型名，per_token）。
     用户按 provider_id 的覆盖在 :func:`resolve_pricing` 中优先处理，不经过本函数。
-
-    逐级回退，每级取**最长候选**（最具体的 key 优先），命中即返回：
-
-    1. **精确匹配**（原名）；
-    2. **前缀匹配**：``model`` 以某单价 key 开头——处理带日期 / 版本后缀的模型名
-       （如 ``claude-sonnet-4-5-20250929`` → ``claude-sonnet-4-5``）；
-    3. **关键词模糊**：``model`` 包含某单价 key 作为子串——让实际调用中的变体名
-       命中内置预设（如厂商前缀 ``provider/qwen-max``、带后缀 ``qwen-max-20241115``、
-       大小写差异 ``GLM-4.5``）。
 
     Args:
         model: 实际模型名（可能带厂商前缀、版本 / 日期后缀、变体）。
@@ -55,19 +76,8 @@ def match_pricing(
     Returns:
         匹配到的单价 dict，或 ``None``（无任何匹配）。
     """
-    if not model:
-        return None
-    if model in pricing:
-        return pricing[model]
-    ml = model.lower()
-    candidates = [name for name in pricing if ml.startswith(name.lower())]
-    if not candidates:
-        # 关键词模糊：模型名包含单价 key（子串，大小写不敏感）
-        candidates = [name for name in pricing if name.lower() in ml]
-    if candidates:
-        candidates.sort(key=len, reverse=True)  # 最长（最具体）优先
-        return pricing[candidates[0]]
-    return None
+    key = _best_match_key(model, pricing)
+    return pricing[key] if key is not None else None
 
 
 def resolve_pricing(
@@ -77,9 +87,15 @@ def resolve_pricing(
 ) -> dict[str, Any] | None:
     """解析生效的计费规则（优先级：provider_id 用户定价 > 模型名默认 > 未定价）。
 
+    **provider_id 模糊匹配**：用户定价 dict 的 key 不必与 provider_id 精确相等，
+    走 :func:`_best_match_key` 三级算法（精确 > 前缀 > 子串，最长优先）——
+    故用户把 ``deepseek`` 配为 key 即可命中实际 provider_id
+    ``deepseek-official-01``（子串）；最长优先保证 ``gpt-4`` 优先于 ``gpt``
+    命中 ``gpt-4o-mini``。仅做「key 是 provider_id 的子串 / 前缀」方向匹配。
+
     Args:
-        provider_id: Provider ID（用户定价的 key）。
-        model: 模型名（默认表的 key）。
+        provider_id: Provider ID（用户定价模糊匹配）。
+        model: 模型名（默认表匹配）。
         pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。
 
     Returns:
@@ -90,10 +106,12 @@ def resolve_pricing(
         - ``{"mode":"per_request","price"}``
     """
     user = pricing.get("user") if isinstance(pricing, dict) else None
-    if isinstance(user, dict) and provider_id and provider_id in user:
-        rule = user[provider_id]
-        if isinstance(rule, dict) and rule.get("mode"):
-            return rule
+    if isinstance(user, dict) and provider_id:
+        key = _best_match_key(provider_id, user)
+        if key is not None:
+            rule = user[key]
+            if isinstance(rule, dict) and rule.get("mode"):
+                return rule
     defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
     if isinstance(defaults, dict):
         prices = match_pricing(model, defaults)

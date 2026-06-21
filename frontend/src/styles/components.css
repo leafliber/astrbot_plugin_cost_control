@@ -760,20 +760,127 @@ tr:hover td {
   color: var(--accent);
 }
 
-/* ===== 设置页表单行 ===== */
-.set-row {
+/* ===== 设置页 ===== */
+.settings-view {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 5px 0;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.set-row label {
+.settings-hint {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  padding: 2px 2px 0;
+}
+
+.section-desc {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin: 2px 0 10px;
+}
+
+.set-fields {
+  display: flex;
+  flex-direction: column;
+}
+
+.set-field {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.set-field:first-child {
+  border-top: none;
+}
+
+.set-field-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.set-field-label {
   font-size: 13px;
-  display: inline-flex;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.set-field-help {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin-top: 3px;
+}
+
+.set-field-control {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.set-csv-input {
+  margin-top: 6px;
+  width: 100%;
+}
+
+/* toggle 开关：checkbox 隐藏 + 伪元素滑块 */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch .slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--border);
+  border-radius: 22px;
+  transition: background 0.18s ease;
+}
+
+.switch .slider::before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.18s ease;
+}
+
+.switch input:checked + .slider {
+  background: var(--accent);
+}
+
+.switch input:checked + .slider::before {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + .slider {
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+
+.settings-save {
+  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 12px;
+  margin-top: 4px;
 }
 
 /* ===== 缓存诊断：可展开事件行 ===== */

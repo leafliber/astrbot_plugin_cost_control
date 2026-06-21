@@ -12,69 +12,181 @@ interface SettingField {
   k: string;
   label: string;
   type: FieldType;
+  help?: string;
+  /** input 宽度（px），仅对 int/str 生效；csv 默认撑满。 */
+  width?: number;
 }
 
 interface SettingSection {
   key: string;
   title: string;
+  desc?: string;
   fields: SettingField[];
 }
 
 const SECTIONS: SettingSection[] = [
   {
     key: "_master",
-    title: "总开关",
+    title: "总开关与全局",
+    desc: "插件的启停、用量「日」窗口的起算时刻，以及生效平台。",
     fields: [
-      { k: "enabled", label: "启用插件", type: "bool" },
-      { k: "refresh_time", label: "每日重置时间 (HH:MM)", type: "str" },
-      { k: "match_unique_session", label: "匹配唯一会话", type: "bool" },
-      { k: "platforms", label: "生效平台（逗号分隔，空=全部）", type: "csv" },
+      {
+        k: "enabled",
+        label: "启用插件",
+        type: "bool",
+        help: "关闭后插件完全停止：不采集用量、不拦截请求、不推送告警与日报。",
+      },
+      {
+        k: "refresh_time",
+        label: "日窗口起算时刻",
+        type: "str",
+        width: 100,
+        help: "本地时区 HH:MM。预算计数与用量报表都按此划分「一天」。例如 09:00 表示 09:00 至次日 09:00 算作一天。",
+      },
+      {
+        k: "platforms",
+        label: "生效平台",
+        type: "csv",
+        help: "限定插件只处理这些平台的请求（如 aiocqhttp、telegram_official、lark）；留空 = 对所有平台生效。",
+      },
     ],
   },
   {
     key: "cache_diag",
     title: "缓存诊断",
+    desc: "LLM 通常对重复上下文做缓存，命中后计费的 token 更少。下列检测用于发现缓存意外失效、导致成本上升的情形。",
     fields: [
-      { k: "detect_context_reset", label: "上下文重置检测", type: "bool" },
-      { k: "detect_system_prompt_change", label: "system prompt 变更检测", type: "bool" },
-      { k: "detect_tools_change", label: "工具定义变更检测", type: "bool" },
-      { k: "detect_order_drift", label: "上下文顺序漂移检测", type: "bool" },
-      { k: "cache_hit_rate_alert_threshold", label: "命中率告警阈值 (%)，0=不告警", type: "int" },
+      {
+        k: "detect_context_reset",
+        label: "对话历史被重置",
+        type: "bool",
+        help: "新一轮历史突变或被清空时标记——此前缓存的上下文失效。",
+      },
+      {
+        k: "detect_system_prompt_change",
+        label: "系统提示词变更",
+        type: "bool",
+        help: "system prompt 发生变化时标记——缓存 key 改变而失效。",
+      },
+      {
+        k: "detect_tools_change",
+        label: "工具定义变更",
+        type: "bool",
+        help: "function calling 的工具列表发生变化时标记——缓存失效。",
+      },
+      {
+        k: "detect_order_drift",
+        label: "消息顺序漂移",
+        type: "bool",
+        help: "历史消息顺序被打乱时标记——请求前缀与已缓存内容对不上。",
+      },
+      {
+        k: "cache_hit_rate_alert_threshold",
+        label: "命中率告警阈值 (%)",
+        type: "int",
+        width: 100,
+        help: "缓存命中率低于此值时告警；0 = 不告警。",
+      },
     ],
   },
   {
     key: "alerts",
-    title: "告警",
+    title: "告警与日报",
+    desc: "超预算提醒的推送策略，以及日报的推送时间与接收方。",
     fields: [
-      { k: "enabled", label: "启用超预算主动推送", type: "bool" },
-      { k: "cooldown_seconds", label: "冷却时间（秒）", type: "int" },
-      { k: "daily_report_time", label: "日报推送时间 (HH:MM，空=不推)", type: "str" },
-      { k: "daily_report_to", label: "日报目标 UMO（逗号分隔）", type: "csv" },
+      {
+        k: "enabled",
+        label: "启用超预算主动推送",
+        type: "bool",
+        help: "超限时主动发消息提醒。关闭后仍会按策略拦截请求，只是不再推送提醒。",
+      },
+      {
+        k: "cooldown_seconds",
+        label: "告警冷却（秒）",
+        type: "int",
+        width: 100,
+        help: "同一告警的最短重复间隔，避免刷屏；0 = 不冷却（每次超限都推）。",
+      },
+      {
+        k: "daily_report_time",
+        label: "日报推送时间",
+        type: "str",
+        width: 100,
+        help: "本地时区 HH:MM。需同时开启「定时任务 → 启用每日用量日报」才会到点自动推送。",
+      },
+      {
+        k: "daily_report_to",
+        label: "日报接收方",
+        type: "csv",
+        help: "日报接收方的会话 / UMO ID 列表，逗号分隔。",
+      },
     ],
   },
   {
     key: "prompt_optimizer",
     title: "提示词优化",
+    desc: "/optimize 命令：分析并改写 system prompt，帮助降低 token 占用。",
     fields: [
-      { k: "enabled", label: "启用 /optimize", type: "bool" },
-      { k: "provider_id", label: "改写 Provider ID（空=当前会话）", type: "str" },
-      { k: "max_static_analysis_length", label: "静态分析最大长度（字符）", type: "int" },
+      {
+        k: "enabled",
+        label: "启用 /optimize 命令",
+        type: "bool",
+        help: "关闭后 /optimize 命令不可用。",
+      },
+      {
+        k: "provider_id",
+        label: "改写 Provider ID",
+        type: "str",
+        width: 180,
+        help: "执行改写所用的 LLM Provider；留空 = 使用当前会话的 Provider。",
+      },
+      {
+        k: "max_static_analysis_length",
+        label: "静态分析最大长度（字符）",
+        type: "int",
+        width: 120,
+        help: "静态分析阶段读取 system prompt 的最大字符数。",
+      },
     ],
   },
   {
     key: "attribution",
-    title: "上下文分析",
+    title: "上下文归因",
+    desc: "拆分每次请求的 token 来源占比（系统提示词 / 工具 / 历史对话 / 用户输入），看清上下文膨胀的构成。",
     fields: [
-      { k: "enabled", label: "启用上下文注入归因", type: "bool" },
-      { k: "sample_rate", label: "采样率 (%)，100=全采样", type: "int" },
+      {
+        k: "enabled",
+        label: "启用上下文归因分析",
+        type: "bool",
+        help: "开启后会估算并拆分每次 LLM 请求的 token 来源占比。",
+      },
+      {
+        k: "sample_rate",
+        label: "采样率 (%)",
+        type: "int",
+        width: 100,
+        help: "归因分析的采样百分比，100 = 每次都分析；调低可减少开销。",
+      },
     ],
   },
   {
     key: "schedule",
     title: "定时任务",
+    desc: "每日用量日报与过期数据的自动清理。",
     fields: [
-      { k: "enable_daily_report", label: "启用每日报告 CronJob", type: "bool" },
-      { k: "retain_days", label: "历史保留天数（0=永不清理）", type: "int" },
+      {
+        k: "enable_daily_report",
+        label: "启用每日用量日报",
+        type: "bool",
+        help: "开启后，每天到「告警与日报 → 日报推送时间」自动推送一次用量汇总。",
+      },
+      {
+        k: "retain_days",
+        label: "历史保留天数",
+        type: "int",
+        width: 100,
+        help: "补充记录的保留天数，到期后定时清理；0 = 永不清理。",
+      },
     ],
   },
 ];
@@ -154,62 +266,75 @@ export function SettingsView() {
   };
 
   return (
-    <div>
+    <div className="settings-view">
+      <div className="settings-hint">
+        此处为插件的全部详细配置，保存后热生效（无需重载）。预算阈值与模型单价请在「预算」「定价」标签页调整。
+      </div>
+
       {SECTIONS.map((sec) => (
         <Panel key={sec.key}>
           <h2>{sec.title}</h2>
-          {sec.fields.map((f) => {
-            const v = valOf(edit, sec.key, f.k);
-            if (f.type === "bool") {
+          {sec.desc && <p className="section-desc">{sec.desc}</p>}
+          <div className="set-fields">
+            {sec.fields.map((f) => {
+              const v = valOf(edit, sec.key, f.k);
+              if (f.type === "bool") {
+                return (
+                  <div className="set-field" key={f.k}>
+                    <div className="set-field-text">
+                      <div className="set-field-label">{f.label}</div>
+                      {f.help && <div className="set-field-help">{f.help}</div>}
+                    </div>
+                    <label className="switch set-field-control">
+                      <input
+                        type="checkbox"
+                        checked={!!v}
+                        onChange={(e) => setField(sec.key, f.k, "bool", e.target.checked)}
+                      />
+                      <span className="slider" />
+                    </label>
+                  </div>
+                );
+              }
+              if (f.type === "csv") {
+                return (
+                  <div className="set-field" key={f.k}>
+                    <div className="set-field-text">
+                      <div className="set-field-label">{f.label}</div>
+                      {f.help && <div className="set-field-help">{f.help}</div>}
+                      <input
+                        type="text"
+                        className="budget-input set-csv-input"
+                        defaultValue={Array.isArray(v) ? v.join(", ") : String(v || "")}
+                        onBlur={(e) => setField(sec.key, f.k, "csv", e.target.value)}
+                      />
+                    </div>
+                  </div>
+                );
+              }
               return (
-                <div className="set-row" key={f.k}>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={!!v}
-                      onChange={(e) => setField(sec.key, f.k, "bool", e.target.checked)}
-                    />{" "}
-                    {f.label}
-                  </label>
-                </div>
-              );
-            }
-            if (f.type === "csv") {
-              return (
-                <div className="set-row" key={f.k}>
-                  <label style={{ flex: 1 }}>
-                    {f.label}{" "}
-                    <input
-                      type="text"
-                      className="budget-input"
-                      defaultValue={Array.isArray(v) ? v.join(", ") : String(v || "")}
-                      onBlur={(e) => setField(sec.key, f.k, "csv", e.target.value)}
-                      style={{ width: "100%" }}
-                    />
-                  </label>
-                </div>
-              );
-            }
-            return (
-              <div className="set-row" key={f.k}>
-                <label style={{ flex: 1 }}>
-                  {f.label}{" "}
+                <div className="set-field" key={f.k}>
+                  <div className="set-field-text">
+                    <div className="set-field-label">{f.label}</div>
+                    {f.help && <div className="set-field-help">{f.help}</div>}
+                  </div>
                   <input
                     type={f.type === "int" ? "number" : "text"}
-                    className="budget-input"
+                    className="budget-input set-field-control"
                     value={v === "" ? "" : String(v)}
                     onChange={(e) => setField(sec.key, f.k, f.type, e.target.value)}
-                    style={{ width: 160 }}
+                    style={{ width: f.width ?? 140 }}
                   />
-                </label>
-              </div>
-            );
-          })}
+                </div>
+              );
+            })}
+          </div>
         </Panel>
       ))}
 
       <Panel>
         <h2>手动操作</h2>
+        <p className="section-desc">立即执行一次清理或推送，无需等待定时任务。</p>
         <div className="row">
           <Button onClick={cleanup}>清理过期数据</Button>
           <Button onClick={report}>推送日报</Button>
@@ -219,7 +344,7 @@ export function SettingsView() {
         </div>
       </Panel>
 
-      <div className="row" style={{ alignItems: "center", gap: 12, marginTop: 4 }}>
+      <div className="settings-save">
         <Button variant="primary" onClick={save}>
           保存（热生效）
         </Button>

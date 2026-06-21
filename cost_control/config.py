@@ -9,7 +9,9 @@
 由于 AstrBot 重载时会裁剪 ``_conf_schema.json`` 之外的配置键（``check_config_integrity``），
 本插件的**详细配置**（budgets / pricing / budget_overrides / 各模块阈值等）存于
 插件自有的 ``config.json``（data 目录，:func:`load_plugin_config` / :func:`save_plugin_config`），
-运行时由 ``Main`` 合并为 ``self.cfg`` 供读取；``_conf_schema.json`` 仅保留各功能开关。
+运行时由 ``Main`` 合并为 ``self.cfg`` 供读取；``_conf_schema.json`` 仅保留总开关
+``enabled``，其余所有参数（含各功能开关与详细配置）均由仪表盘「设置」页编辑并写入
+``config.json``。
 
 阶段 1：默认值结构 + 定价表 + 读取函数 + 插件自有配置文件读写。
 """
@@ -279,18 +281,11 @@ def _to_float_or_zero(v: Any) -> float:
 
 
 # schema 中保留的「功能开关」键（保存时分离开关与详细配置）。
-# 顶层标量开关 + 各 object 内的 enable/detect 布尔（路径以 tuple 表示嵌套）。
+# schema 仅保留总开关 enabled，其余所有参数走插件自有 config.json；
+# 故此处只同步 enabled（由 AstrBot 持久化到 <plugin>_config.json，
+# 供 WebUI 插件配置页显示）。
 SWITCH_KEYS: tuple[tuple[str | int, ...], ...] = (
     ("enabled",),
-    ("platforms",),
-    ("alerts", "enabled"),
-    ("cache_diag", "detect_context_reset"),
-    ("cache_diag", "detect_system_prompt_change"),
-    ("cache_diag", "detect_tools_change"),
-    ("cache_diag", "detect_order_drift"),
-    ("prompt_optimizer", "enabled"),
-    ("attribution", "enabled"),
-    ("schedule", "enable_daily_report"),
 )
 
 

@@ -79,19 +79,17 @@ def test_coerce_dict_empty_accepts_any():
 # ===== switches_from_config =====
 
 
-def test_switches_from_config_extracts_only_switches():
+def test_switches_from_config_extracts_only_enabled():
+    # schema 只保留总开关 enabled；其余键（即便存在）一律不抽取，
+    # 它们的值由插件自有 config.json 承载。
     raw = {
         "enabled": False,
-        "alerts": {"enabled": True, "cooldown_seconds": 99},  # cooldown 非 switch，不抽
+        "alerts": {"enabled": True, "cooldown_seconds": 99},
         "cache_diag": {"detect_context_reset": False, "cache_hit_rate_alert_threshold": 50},
-        "budgets": {"global_daily": 1000},  # 非 switch，整体不抽
+        "budgets": {"global_daily": 1000},
     }
     sw = switches_from_config(raw)
-    assert sw == {
-        "enabled": False,
-        "alerts": {"enabled": True},
-        "cache_diag": {"detect_context_reset": False},
-    }
+    assert sw == {"enabled": False}
 
 
 def test_switches_from_config_empty():

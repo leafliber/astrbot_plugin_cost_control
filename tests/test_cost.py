@@ -84,6 +84,47 @@ def test_resolve_per_turn():
     assert rule == {"mode": "per_turn", "price": 0.01}
 
 
+# ===== resolve_pricing 的 provider_id 模糊匹配（精确 > 前缀 > 子串，最长优先）=====
+
+
+def test_resolve_user_provider_id_prefix():
+    user = {"deepseek": {"mode": "per_turn", "price": 0.02}}
+    # provider_id 以配置 key 开头（带后缀），前缀匹配命中
+    rule = resolve_pricing("deepseek-official-01", "anything", pricing_struct(user))
+    assert rule == {"mode": "per_turn", "price": 0.02}
+
+
+def test_resolve_user_provider_id_substring():
+    user = {"glm": {"mode": "per_token", "input": 5.0, "input_cached": 0, "output": 0}}
+    # provider_id 包含配置 key 作为子串
+    rule = resolve_pricing("my-zhipu-glm-provider", "anything", pricing_struct(user))
+    assert rule is not None
+    assert rule["input"] == 5.0
+
+
+def test_resolve_user_provider_id_longest_wins():
+    user = {
+        "gpt": {"mode": "per_turn", "price": 0.001},
+        "gpt-4": {"mode": "per_turn", "price": 0.01},
+    }
+    # 两个 key 都是前缀，取最长（最具体）的 gpt-4
+    rule = resolve_pricing("gpt-4o-mini-proc", "anything", pricing_struct(user))
+    assert rule == {"mode": "per_turn", "price": 0.01}
+
+
+def test_resolve_user_provider_id_case_insensitive():
+    user = {"openai": {"mode": "per_turn", "price": 0.03}}
+    # 前缀 / 子串匹配大小写不敏感
+    rule = resolve_pricing("OpenAI-Prod", "anything", pricing_struct(user))
+    assert rule == {"mode": "per_turn", "price": 0.03}
+
+
+def test_resolve_user_provider_id_no_false_substring():
+    # 配置 key 是 provider_id 的超集时不应误匹配（仅 key-in-provider_id 方向）
+    user = {"openai-chat-prod": {"mode": "per_turn", "price": 0.05}}
+    assert resolve_pricing("openai", "anything", pricing_struct(user)) is None
+
+
 # ===== compute_cost_value（新签名：usage, provider_id, model, pricing）=====
 
 

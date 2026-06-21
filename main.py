@@ -70,8 +70,8 @@ class Main(
         任一步失败仅记录日志，不阻断插件加载（降级：相应能力不可用，其余正常）。
 
         ``self.cfg`` = ``CONFIG_DEFAULTS`` ⊕ 插件自有配置文件(``config.json``) ⊕
-        AstrBot 开关(``self.config``)。详细配置存插件文件（不被 AstrBot schema 裁剪），
-        schema 仅保留开关。
+        AstrBot 开关(``self.config``)。详细配置存插件文件（不被 AstrBot schema 裁剪）；
+        schema 仅保留总开关 ``enabled``，其余所有参数一律走 ``config.json``（仪表盘「设置」页编辑）。
         """
         try:
             from .cost_control.config import (

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从 OpenRouter ``/api/v1/models`` 同步最新模型定价到 ``default_pricing.py``。
+"""从 OpenRouter ``/api/v1/models`` 全量同步模型定价到 ``default_pricing.py``。
 
 用法::
 
@@ -8,12 +8,16 @@
 数据源是 OpenRouter 公开端点（无需 API key），其 ``pricing`` 字段以 USD / token
 计，脚本换算为 USD / 百万 token。
 
-- ``TARGETS``：插件 model key → OpenRouter slug 映射。key 取各厂商官方 API 常见形式，
-  便于 :func:`cost_control.cost.match_pricing`（精确 > 前缀 > 关键词模糊）命中实际
-  调用名。改这里即可增删模型。
-- ``MANUAL``：OpenRouter 未覆盖的模型（人工维护，随厂商调价更新）。
-- cache 字段（``input_cache_read`` / ``input_cache_write``）缺失时按 input 价占位
-  （保守不低估成本）。
+- **全量拉取**：遍历 OpenRouter 目录的**全部**模型，不再维护手挑清单。每个模型的
+  key 取 slug 去掉厂商前缀（``z-ai/glm-5.2`` → ``glm-5.2``）并小写，便于
+  :func:`cost_control.cost.match_pricing`（精确 > 前缀 > 子串，最长优先）命中实际调用名。
+- **过滤无价条目**：input 与 output 均为 0 的模型（``:free`` 免费版 / 无定价数据）跳过
+  ——它们对成本核算无贡献，计入等于当作「未定价」噪声。
+- **键冲突保守取高**：不同厂商重托管同一模型名会产生键冲突，此时**保留 input 单价
+  更高者**（与 cache 字段缺省按 input 价占位一致的「保守不低估成本」哲学），并在末尾
+  报告冲突数。迭代顺序按 slug 排序保证可复现。
+- ``MANUAL``：OpenRouter 未上架的模型（人工维护，随厂商调价更新），合并时覆盖同名自动条目。
+- cache 字段（``input_cache_read`` / ``input_cache_write``）缺失时按 input 价占位。
 
 生成后建议运行::
 
@@ -29,40 +33,8 @@ from typing import Any
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
-# 插件 model key → OpenRouter slug。
-TARGETS: dict[str, str] = {
-    # Anthropic（官方 API 用连字符版本号，如 claude-sonnet-4-5-20250929）
-    "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
-    "claude-opus-4": "anthropic/claude-opus-4",
-    "claude-haiku-4-5": "anthropic/claude-haiku-4.5",
-    # OpenAI
-    "gpt-4o": "openai/gpt-4o",
-    "gpt-4o-mini": "openai/gpt-4o-mini",
-    "gpt-4.1": "openai/gpt-4.1",
-    "gpt-4.1-mini": "openai/gpt-4.1-mini",
-    # Google
-    "gemini-2.5-pro": "google/gemini-2.5-pro",
-    "gemini-2.5-flash": "google/gemini-2.5-flash",
-    # DeepSeek（官方 API：deepseek-chat / deepseek-reasoner）
-    "deepseek-chat": "deepseek/deepseek-chat",
-    "deepseek-reasoner": "deepseek/deepseek-r1",
-    # 智谱 GLM
-    "glm-4.5": "z-ai/glm-4.5",
-    "glm-4.5-air": "z-ai/glm-4.5-air",
-    "glm-4.6": "z-ai/glm-4.6",
-    "glm-4.7": "z-ai/glm-4.7",
-    # 阿里通义千问 Qwen（最新 Qwen3.x 系列）
-    "qwen3-max": "qwen/qwen3-max",
-    "qwen3.7-max": "qwen/qwen3.7-max",
-    "qwen3.6-plus": "qwen/qwen3.6-plus",
-    "qwen3.7-plus": "qwen/qwen3.7-plus",
-    "qwen3.6-flash": "qwen/qwen3.6-flash",
-    # 月之暗面 Kimi
-    "kimi-k2": "moonshotai/kimi-k2",
-    "kimi-k2.6": "moonshotai/kimi-k2.6",
-}
-
 # OpenRouter 未上架的模型（人工维护；参考各厂商官方定价，人民币按 ≈7.2 折算 USD）。
+# 合并时覆盖同名自动条目（厂商官方价优先于第三方重托管）。
 MANUAL: dict[str, dict[str, float]] = {
     # 字节豆包 Doubao（火山引擎）
     "doubao-pro-32k": {
@@ -122,6 +94,18 @@ def extract_prices(pricing: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def bare_key(slug: str) -> str:
+    """slug → 匹配用 key：去掉前导 ``~``（OpenRouter 别名 / 下架标记）与厂商前缀，小写。
+
+    ``z-ai/glm-5.2`` → ``glm-5.2``；``openai/gpt-4o:free`` → ``gpt-4o:free``。
+    保留 ``:free`` / ``:nitro`` / ``:thinking`` 等后缀（各自有独立定价）。
+    """
+    name = slug.lstrip("~")
+    if "/" in name:
+        name = name.split("/", 1)[1]
+    return name.lower()
+
+
 def render_entry(key: str, prices: dict[str, float], indent: str = "    ") -> str:
     """渲染单条 ``"key": {...},``；超 100 字符时拆多行（避免 E501）。"""
     inner = ", ".join(f'"{f}": {prices[f]!r}' for f in FIELDS)
@@ -137,10 +121,9 @@ def render_entry(key: str, prices: dict[str, float], indent: str = "    ") -> st
 
 HEADER = '''"""内置常见模型的默认定价（USD / 百万 token）。
 
-由 ``scripts/sync_pricing.py`` 从 OpenRouter ``/api/v1/models`` 自动生成（最新快照）。
-**请勿手改 OpenRouter 拉取的条目**——调整 ``scripts/sync_pricing.py`` 的 ``TARGETS``
-后重跑 ``uv run python scripts/sync_pricing.py`` 即可刷新；``MANUAL`` 区为 OpenRouter
-未覆盖的模型（如豆包），需人工维护。OpenRouter 未提供 cache 字段时按 input 价占位。
+由 ``scripts/sync_pricing.py`` 从 OpenRouter ``/api/v1/models`` **全量**自动生成
+（最新快照）。**请勿手改**——重跑 ``uv run python scripts/sync_pricing.py`` 即可刷新；
+OpenRouter 未覆盖的模型（如豆包）在脚本的 ``MANUAL`` 区人工维护。
 
 字段含义：
     input          —— 非缓存输入 token（对应 ``ProviderStat.token_input_other``）
@@ -149,10 +132,11 @@ HEADER = '''"""内置常见模型的默认定价（USD / 百万 token）。
     cache_creation —— 缓存写入 token（Anthropic 原生字段；非 Anthropic 模型无此概念，
                       OpenRouter 未提供时按 input 价占位，保守不低估成本）
 
-运行时由 :func:`cost_control.config.get_pricing` 合并：本表（出厂默认）⊕ 用户在
-``pricing`` 配置项的自定义覆盖。模型名匹配走 :func:`cost_control.cost.match_pricing`
-（精确 > 前缀 > 关键词模糊），故实际调用中的变体名（厂商前缀、版本 / 日期后缀、大小写
-差异）通常能自动命中预设，无需逐个配置。
+key 取 slug 去厂商前缀后的小写名（``z-ai/glm-5.2`` → ``glm-5.2``），不同厂商重托管
+同名模型冲突时保留 input 单价更高者（保守）。运行时由 :func:`cost_control.config.get_pricing`
+合并：本表（出厂默认）⊕ 用户在 ``pricing`` 配置项的自定义覆盖。模型名匹配走
+:func:`cost_control.cost.match_pricing`（精确 > 前缀 > 子串，最长优先），故实际调用中的
+变体名（厂商前缀、版本 / 日期后缀、大小写差异）通常能自动命中预设，无需逐个配置。
 """
 '''
 
@@ -160,24 +144,28 @@ HEADER = '''"""内置常见模型的默认定价（USD / 百万 token）。
 def main() -> None:
     models = fetch_models()
     table: dict[str, dict[str, float]] = {}
-    missing: list[str] = []
-    for key, slug in TARGETS.items():
-        model = models.get(slug)
-        if not model:
-            missing.append(f"{key} -> {slug}")
+    collisions = 0
+    skipped_unpriced = 0
+    for slug in sorted(models):
+        prices = extract_prices(models[slug].get("pricing") or {})
+        if prices["input"] == 0 and prices["output"] == 0:
+            skipped_unpriced += 1
             continue
-        table[key] = extract_prices(model.get("pricing") or {})
-    table.update(MANUAL)
-
-    if missing:
-        print("⚠️  OpenRouter 未找到以下映射（已跳过，可在脚本中修正 slug）：")
-        for item in missing:
-            print(f"   - {item}")
+        key = bare_key(slug)
+        existing = table.get(key)
+        if existing is None:
+            table[key] = prices
+        elif prices["input"] > existing["input"]:
+            table[key] = prices  # 保守：保留单价更高的重托管版本
+            collisions += 1
+        else:
+            collisions += 1
+    table.update(MANUAL)  # 厂商官方价覆盖同名自动条目
 
     lines: list[str] = [HEADER, "from __future__ import annotations", ""]
     lines.append("DEFAULT_PRICING: dict[str, dict[str, float]] = {")
-    for key, prices in table.items():
-        lines.append(render_entry(key, prices))
+    for key in sorted(table):
+        lines.append(render_entry(key, table[key]))
     lines.append("}")
     lines.append("")
 
@@ -187,7 +175,11 @@ def main() -> None:
     synced = len(table) - len(MANUAL)
     print(
         f"✅ 已写入 {out_path}：{len(table)} 个模型"
-        f"（{synced} 个来自 OpenRouter，{len(MANUAL)} 个人工维护）"
+        f"（{synced} 个来自 OpenRouter 全量，{len(MANUAL)} 个人工维护）"
+    )
+    print(
+        f"   OpenRouter 总模型 {len(models)}，跳过无价 {skipped_unpriced}，"
+        f"键冲突 {collisions}（保守取高）"
     )
 
 
