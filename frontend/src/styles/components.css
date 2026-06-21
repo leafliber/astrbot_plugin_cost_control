@@ -147,6 +147,13 @@ tr:hover td {
   background: var(--bad);
 }
 
+/* 占比双条：token 占比 + 成本占比竖直堆叠 */
+.ratio-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 /* ===== 徽标 ===== */
 .tag {
   display: inline-block;
@@ -580,64 +587,25 @@ tr:hover td {
 /* ===== 预算页重构样式 ===== */
 
 /* 5 张全局默认卡片网格 */
-.budget-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
+/* 全局预算表格 */
+.budget-table tr.exceeded {
+  background: var(--accent-weak);
 }
 
-.budget-card {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--panel-2);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.budget-card.exceeded {
-  border-color: var(--bad);
-}
-
-.budget-card-head {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.budget-card-label {
+.budget-dim-label {
   font-weight: 600;
   font-size: 13px;
 }
 
-.budget-card-metric {
+.budget-cell {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 4px 0;
-  border-top: 1px dashed var(--border);
+  padding: 2px 0;
 }
 
-.budget-card-metric.dim {
-  opacity: 0.5;
-}
-
-.budget-card-metric.active {
-  background: var(--accent-weak);
-  border-radius: 4px;
-  padding: 4px 6px;
-  margin: 0 -6px;
-}
-
-.budget-card-input {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.budget-card-input input {
-  width: 100%;
+.budget-cell-used {
+  white-space: nowrap;
 }
 
 /* override 规则行 */
@@ -662,7 +630,7 @@ tr:hover td {
   grid-template-columns: 1fr 1fr 1fr;
   grid-template-areas:
     "head head head"
-    "limits limits action"
+    "limits limits limits"
     "extra extra extra"
     "progress progress move";
   gap: 8px 12px;
@@ -723,21 +691,16 @@ tr:hover td {
   background: var(--panel);
 }
 
-.limit-cell.dim {
-  opacity: 0.5;
-}
-
-.limit-cell.active {
-  border-color: var(--accent);
-  background: var(--accent-weak);
-}
-
 .override-action {
   grid-area: action;
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.override-on-label {
+  margin-left: 4px;
 }
 
 .override-extra {
@@ -769,15 +732,6 @@ tr:hover td {
   background: var(--panel);
 }
 
-.progress-cell.dim {
-  opacity: 0.5;
-}
-
-.progress-cell.active {
-  border-color: var(--accent);
-  background: var(--accent-weak);
-}
-
 .override-move {
   grid-area: move;
   display: flex;
@@ -799,19 +753,6 @@ tr:hover td {
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  border-radius: 12px;
-  padding: 2px 8px;
-  font-size: 12px;
-  cursor: pointer;
 }
 
 .chip:hover {

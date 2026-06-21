@@ -1,11 +1,9 @@
 import type { BudgetOverrideRow, Provider } from "../lib/types";
 import { OverrideRow } from "./OverrideRow";
 import type { FallbackProvider } from "../lib/types";
-import type { Metric } from "../lib/types";
 
 export function OverridesPanel({
   overrides,
-  metric,
   providers,
   fallbackProviders,
   onChange,
@@ -14,7 +12,6 @@ export function OverridesPanel({
   onAdd,
 }: {
   overrides: BudgetOverrideRow[];
-  metric: Metric;
   providers?: Provider[];
   fallbackProviders: FallbackProvider[];
   onChange: (i: number, patch: Partial<BudgetOverrideRow>) => void;
@@ -39,7 +36,6 @@ export function OverridesPanel({
             <OverrideRow
               key={o.id || `ov-${i}`}
               row={o}
-              metric={metric}
               index={i}
               total={overrides.length}
               providers={providers}

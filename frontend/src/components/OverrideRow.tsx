@@ -3,7 +3,6 @@ import { fmtCost, fmtNum } from "../lib/format";
 import type {
   BudgetOverrideRow,
   FallbackProvider,
-  Metric,
   OnExceeded,
   OverrideTarget,
   Provider,
@@ -21,12 +20,11 @@ const ON_EXCEEDED_LABELS: Record<OnExceeded, string> = {
   warn: "仅警告（不中断）",
 };
 
-// 单条 override 规则的 inline 编辑行。展开为：启用 / 类型 / 目标值 / token / cost /
-// on_exceeded / 条件字段 / 进度 / 上下移 / 删除。token / cost 始终同时显示；
-// metric 切换只影响进度高亮。
+// 单条 override 规则的 inline 编辑行。
+// head 行：启用 / 序号 / 目标类型 / 目标值 / 超限处理 —— 突出「匹配谁 → 怎么处理」。
+// limits 行：Token / Cost 阈值并排。extra 行：处理方案的条件字段。progress 行：实时消耗。
 export function OverrideRow({
   row,
-  metric,
   index,
   total,
   providers,
@@ -36,7 +34,6 @@ export function OverrideRow({
   onDelete,
 }: {
   row: BudgetOverrideRow;
-  metric: Metric;
   index: number;
   total: number;
   providers?: Provider[];
@@ -47,8 +44,6 @@ export function OverrideRow({
 }) {
   const tgt = row.target_type;
   const onExc = row.on_exceeded;
-  const activeT = metric === "token";
-  const activeC = metric === "cost";
 
   return (
     <div className={`override-row ${row.enabled ? "" : "is-disabled"}`}>
@@ -98,36 +93,7 @@ export function OverrideRow({
             style={{ flex: 1, minWidth: 200 }}
           />
         )}
-      </div>
-
-      <div className="override-limits">
-        <label className={`limit-cell ${activeT ? "active" : "dim"}`}>
-          <span className="muted small">Token 上限</span>
-          <input
-            type="number"
-            min="0"
-            className="budget-input"
-            value={row.token_limit || 0}
-            onChange={(e) => onChange({ token_limit: Math.max(0, +e.target.value || 0) })}
-            style={{ width: 110 }}
-          />
-        </label>
-        <label className={`limit-cell ${activeC ? "active" : "dim"}`}>
-          <span className="muted small">花费上限 $</span>
-          <input
-            type="number"
-            min="0"
-            step="0.01"
-            className="budget-input"
-            value={row.cost_limit || 0}
-            onChange={(e) => onChange({ cost_limit: Math.max(0, +e.target.value || 0) })}
-            style={{ width: 110 }}
-          />
-        </label>
-      </div>
-
-      <div className="override-action">
-        <span className="muted small">超限处理</span>
+        <span className="override-on-label muted small">超限处理</span>
         <select
           className="override-on"
           value={onExc}
@@ -139,6 +105,32 @@ export function OverrideRow({
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="override-limits">
+        <label className="limit-cell">
+          <span className="muted small">Token 上限</span>
+          <input
+            type="number"
+            min="0"
+            className="budget-input"
+            value={row.token_limit || 0}
+            onChange={(e) => onChange({ token_limit: Math.max(0, +e.target.value || 0) })}
+            style={{ width: 110 }}
+          />
+        </label>
+        <label className="limit-cell">
+          <span className="muted small">花费上限 $</span>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            className="budget-input"
+            value={row.cost_limit || 0}
+            onChange={(e) => onChange({ cost_limit: Math.max(0, +e.target.value || 0) })}
+            style={{ width: 110 }}
+          />
+        </label>
       </div>
 
       {onExc === "stop" && (
@@ -179,7 +171,7 @@ export function OverrideRow({
       )}
 
       <div className="override-progress">
-        <div className={`progress-cell ${activeT ? "active" : "dim"}`}>
+        <div className="progress-cell">
           <div className="muted small">
             token {fmtNum(row.current?.token?.used || 0)} / {fmtNum(row.token_limit || 0)}
           </div>
@@ -191,7 +183,7 @@ export function OverrideRow({
             <div className="muted small">不限</div>
           )}
         </div>
-        <div className={`progress-cell ${activeC ? "active" : "dim"}`}>
+        <div className="progress-cell">
           <div className="muted small">
             cost {fmtCost(row.current?.cost?.used || 0)} / {fmtCost(row.cost_limit || 0)}
           </div>
@@ -241,11 +233,12 @@ function FallbackProviderPicker({
   candidates: FallbackProvider[];
   onChange: (ids: string[]) => void;
 }) {
+  const empty = candidates.length === 0;
   return (
     <div className="fb-picker">
       {selected.length === 0 && (
         <span className="muted small" style={{ marginRight: 6 }}>
-          （空，将降级为 stop）
+          {empty ? "（未配备用，将降级为 stop）" : "（空，将降级为 stop）"}
         </span>
       )}
       {selected.map((id, j) => (
@@ -264,25 +257,31 @@ function FallbackProviderPicker({
           </button>
         </span>
       ))}
-      <select
-        className="fb-add"
-        value=""
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v && !selected.includes(v)) {
-            onChange([...selected, v]);
-          }
-          e.target.value = "";
-        }}
-      >
-        <option value="">+ 从备用库添加</option>
-        {candidates.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.id}
-            {c.note ? ` · ${c.note}` : ""}
-          </option>
-        ))}
-      </select>
+      {empty ? (
+        <select className="fb-add" disabled value="">
+          <option value="">请先在下方「备用 Provider 库」添加</option>
+        </select>
+      ) : (
+        <select
+          className="fb-add"
+          value=""
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v && !selected.includes(v)) {
+              onChange([...selected, v]);
+            }
+            e.target.value = "";
+          }}
+        >
+          <option value="">+ 从备用库添加</option>
+          {candidates.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.id}
+              {c.note ? ` · ${c.note}` : ""}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

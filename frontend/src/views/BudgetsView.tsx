@@ -5,13 +5,11 @@ import type {
   BudgetOverrideRow,
   BudgetResponse,
   FallbackProvider,
-  Metric,
   OnExceeded,
   OverrideTarget,
   Provider,
 } from "../lib/types";
 import { Panel } from "../components/Panel";
-import { Segmented } from "../components/Segmented";
 import { GlobalDefaultsPanel } from "../components/GlobalDefaultsPanel";
 import { OverridesPanel } from "../components/OverridesPanel";
 import { FallbackProvidersPanel } from "../components/FallbackProvidersPanel";
@@ -44,7 +42,6 @@ export function BudgetsView() {
   const provsRes = useApi(() => api.getProviders(), []);
   const data = budgetsRes.data;
 
-  const [metric, setMetric] = useState<Metric>("token");
   const [tokens, setTokens] = useState<Record<string, number>>({});
   const [cost, setCost] = useState<Record<string, number>>({});
   const [overrides, setOverrides] = useState<BudgetOverrideRow[]>([]);
@@ -131,27 +128,14 @@ export function BudgetsView() {
   return (
     <div>
       <Panel>
-        <div className="budget-head">
-          <h2>预算总览（5 维全局默认）</h2>
-          <Segmented
-            variant="weak"
-            value={metric}
-            onChange={(v) => setMetric(v as Metric)}
-            options={[
-              { value: "token", label: "Token" },
-              { value: "cost", label: "花费 $" },
-            ]}
-          />
-        </div>
+        <h2>预算总览（5 维全局默认）</h2>
         <div className="muted small" style={{ marginBottom: 8 }}>
-          切换顶部指标后，每张卡片的 token / cost 两行分别高亮。
-          <code> per_*_daily </code>类维度显示的是本周期消耗最多的代表会话 / 模型，并非该维度的全量聚合（运行时按当前请求实时拦截）。
+          Token 与花费两列均可填写。<code> per_*_daily </code>类维度显示的是本周期消耗最多的代表会话 / 模型，并非该维度的全量聚合（运行时按当前请求实时拦截）。
         </div>
         <GlobalDefaultsPanel
           limits={tokens}
           limitsCost={cost}
           dimensions={dimensions}
-          metric={metric}
           onChangeLimit={updateLimit}
           onChangeLimitCost={updateLimitCost}
         />
@@ -161,7 +145,6 @@ export function BudgetsView() {
         <h2>局部阈值（优先级高于全局）</h2>
         <OverridesPanel
           overrides={overrides}
-          metric={metric}
           providers={provs}
           fallbackProviders={sortedFallbackIds.map((id) => ({ id, enabled: true }))}
           onChange={updateOverride}

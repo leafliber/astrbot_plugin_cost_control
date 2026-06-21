@@ -101,6 +101,7 @@ export function RecordsView() {
 
   const groups = aggRes.data?.groups || [];
   const rows = rowsRes.data || [];
+  const totalCost = groups.reduce((acc, g) => acc + (g.cost || 0), 0);
   const sums = rows.reduce<{ input: number; cached: number; output: number; creation: number; cost: number }>(
     (acc, r) => {
       acc.input += r.token_input_other || 0;
@@ -226,10 +227,22 @@ export function RecordsView() {
                   <td>{fmtNum(g.count)}</td>
                   <td>{fmtNum(g.tokens)}</td>
                   <td>{fmtCost(g.cost)}</td>
-                  <td style={{ minWidth: 160 }}>
-                    <ProgressBar ratio={g.pct} warnAt={25} badAt={50}>
-                      {g.pct}%
-                    </ProgressBar>
+                  <td style={{ minWidth: 180 }}>
+                    {(() => {
+                      const costPct = totalCost
+                        ? Math.round((g.cost * 1000) / totalCost) / 10
+                        : 0;
+                      return (
+                        <div className="ratio-stack">
+                          <ProgressBar ratio={g.pct} warnAt={25} badAt={50}>
+                            T {g.pct}%
+                          </ProgressBar>
+                          <ProgressBar ratio={costPct} warnAt={25} badAt={50}>
+                            C {costPct}%
+                          </ProgressBar>
+                        </div>
+                      );
+                    })()}
                   </td>
                 </tr>
               ))}
