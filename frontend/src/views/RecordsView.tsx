@@ -24,6 +24,8 @@ const DEFAULT_FILTER: RecordsFilter = {
   order_dir: "desc",
 };
 
+const PAGE_SIZE = 50;
+
 function rangeParams(filter: RecordsFilter): { start: string; end: string } {
   const now = new Date();
   const end = now.toISOString().slice(0, 10);
@@ -44,6 +46,7 @@ function rangeParams(filter: RecordsFilter): { start: string; end: string } {
 export function RecordsView() {
   const [filter, setFilter] = useState<RecordsFilter>(DEFAULT_FILTER);
   const [aggMode, setAggMode] = useState<"model" | "umo">("model");
+  const [page, setPage] = useState(1);
 
   const range = useMemo(
     () => rangeParams(filter),
@@ -84,7 +87,7 @@ export function RecordsView() {
         end: range.end,
         order_by: filter.order_by,
         order_dir: filter.order_dir,
-        limit: 300,
+        limit: 1000,
       }),
     [
       filter.umo,
@@ -97,7 +100,10 @@ export function RecordsView() {
     ],
   );
 
-  const update = (patch: Partial<RecordsFilter>) => setFilter((f) => ({ ...f, ...patch }));
+  const update = (patch: Partial<RecordsFilter>) => {
+    setFilter((f) => ({ ...f, ...patch }));
+    setPage(1);
+  };
 
   const groups = aggRes.data?.groups || [];
   const rows = rowsRes.data || [];
@@ -113,6 +119,10 @@ export function RecordsView() {
     },
     { input: 0, cached: 0, output: 0, creation: 0, cost: 0 },
   );
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const curPage = Math.min(page, totalPages);
+  const pageRows = rows.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
 
   return (
     <div>
@@ -215,37 +225,36 @@ export function RecordsView() {
                 <th>调用</th>
                 <th>token 合计</th>
                 <th>成本</th>
-                <th>占比</th>
+                <th>token 占比</th>
+                <th>费用占比</th>
               </tr>
             </thead>
             <tbody>
-              {groups.map((g) => (
-                <tr key={g.key}>
-                  <td className="mono">
-                    {aggMode === "model" ? shortModelName(g.key) : shortUmo(g.key)}
-                  </td>
-                  <td>{fmtNum(g.count)}</td>
-                  <td>{fmtNum(g.tokens)}</td>
-                  <td>{fmtCost(g.cost)}</td>
-                  <td style={{ minWidth: 180 }}>
-                    {(() => {
-                      const costPct = totalCost
-                        ? Math.round((g.cost * 1000) / totalCost) / 10
-                        : 0;
-                      return (
-                        <div className="ratio-stack">
-                          <ProgressBar ratio={g.pct} warnAt={25} badAt={50}>
-                            T {g.pct}%
-                          </ProgressBar>
-                          <ProgressBar ratio={costPct} warnAt={25} badAt={50}>
-                            C {costPct}%
-                          </ProgressBar>
-                        </div>
-                      );
-                    })()}
-                  </td>
-                </tr>
-              ))}
+              {groups.map((g) => {
+                const costPct = totalCost
+                  ? Math.round((g.cost * 1000) / totalCost) / 10
+                  : 0;
+                return (
+                  <tr key={g.key}>
+                    <td className="mono">
+                      {aggMode === "model" ? shortModelName(g.key) : shortUmo(g.key)}
+                    </td>
+                    <td>{fmtNum(g.count)}</td>
+                    <td>{fmtNum(g.tokens)}</td>
+                    <td>{fmtCost(g.cost)}</td>
+                    <td style={{ minWidth: 120 }}>
+                      <ProgressBar ratio={g.pct} warnAt={25} badAt={50}>
+                        {g.pct}%
+                      </ProgressBar>
+                    </td>
+                    <td style={{ minWidth: 120 }}>
+                      <ProgressBar ratio={costPct} warnAt={25} badAt={50}>
+                        {costPct}%
+                      </ProgressBar>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -275,7 +284,7 @@ export function RecordsView() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {pageRows.map((r, i) => (
                 <tr key={i}>
                   <td>{shortTime(r.created_at)}</td>
                   <td className="mono" title={r.umo || ""}>
@@ -306,6 +315,43 @@ export function RecordsView() {
               </tr>
             </tfoot>
           </table>
+        )}
+        {rows.length > PAGE_SIZE && (
+          <div className="pager">
+            <div className="pager-nav">
+              <button
+                type="button"
+                className="btn"
+                disabled={curPage <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                ‹ 上一页
+              </button>
+              <select
+                className="pager-jump"
+                value={curPage}
+                onChange={(e) => setPage(+e.target.value)}
+              >
+                {Array.from({ length: totalPages }, (_, i) => (
+                  <option key={i} value={i + 1}>
+                    第 {i + 1} / {totalPages} 页
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="btn"
+                disabled={curPage >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              >
+                下一页 ›
+              </button>
+            </div>
+            <span className="muted small">
+              共 {rows.length} 条 · 每页 {PAGE_SIZE} 条
+              {rows.length >= 1000 ? "（仅最近 1000 条）" : ""}
+            </span>
+          </div>
         )}
       </Panel>
     </div>

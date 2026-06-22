@@ -31,7 +31,7 @@ export function App() {
   const colors = useChartColors(!!ctx?.isDark);
 
   const [tab, setTab] = useState<TabKey>("overview");
-  const [win, setWin] = useState<Window>("daily");
+  const [win, setWin] = useState<Window>("weekly");
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   const refresh = () => setRefreshNonce((n) => n + 1);

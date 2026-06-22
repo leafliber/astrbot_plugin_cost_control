@@ -101,7 +101,7 @@ export function BudgetsView() {
   const addFallback = (id = "") =>
     setFallbacks((prev) => [
       ...prev,
-      { id: id || `prov_${prev.length + 1}`, enabled: true, note: "" },
+      { id: id || "", enabled: true, note: "" },
     ]);
 
   // 自动保存 payload（剥离仅用于展示的 current / 客户端临时 id；过滤空 target）。

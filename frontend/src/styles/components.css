@@ -270,6 +270,33 @@ tr:hover td {
   margin-top: 12px;
 }
 
+/* 分页控件 */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.pager-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pager-jump {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 13px;
+}
+
 .agg-head {
   display: flex;
   justify-content: space-between;
