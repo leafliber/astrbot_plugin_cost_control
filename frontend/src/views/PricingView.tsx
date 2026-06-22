@@ -34,9 +34,6 @@ export function PricingView() {
     setReady(true);
   }, [data]);
 
-  if (res.loading && !data) return <Loading />;
-  if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
-
   const providerModels: ProviderModelInfo[] = data?.provider_models || [];
   const defaults: Record<string, PriceEntry> = data?.defaults || {};
   const unpriced = data?.unpriced || [];
@@ -94,6 +91,10 @@ export function PricingView() {
     },
     { enabled: ready },
   );
+
+  // early return 必须在所有 hook（useApi/useMemo/useAutoSave）之后，否则 hook 顺序错乱。
+  if (res.loading && !data) return <Loading />;
+  if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
   const reset = async () => {
     if (!confirm("确定清空所有自定义定价、恢复内置默认匹配？")) return;
