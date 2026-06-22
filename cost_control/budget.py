@@ -474,15 +474,27 @@ class BudgetMixin:
             used_t_map: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
             used_c_map: dict[str, float] = {d: 0.0 for d in _DIM_ORDER}
             m_start = month_window_start(now, tz)
+            # per_user_daily 是否配置了限额（决定是否需要按 user_id 跨会话聚合）。
+            lt_user = int(limits_t.get("per_user_daily", 0) or 0)
+            lc_user = float(limits_c.get("per_user_daily", 0) or 0)
             if has_global_token:
                 session_usage = await self.query_usage(umo=umo, start=d_start)
                 session_total = total_tokens(session_usage)
                 model_total = session_total
                 if model:
                     model_total = total_tokens(await self.query_usage(model=model, start=d_start))
+                # per_user_daily：有 user_id 且配置了限额时，从补充表按 user_id
+                # 聚合该用户今日跨所有会话的 token（ProviderStat 无 user_id，唯此
+                # 路径可得真实用户用量）；否则退化为会话维度（已知局限，与展示端一致）。
+                user_total_t = session_total
+                if user_id and lt_user > 0:
+                    try:
+                        user_total_t = await self.query_user_token_total(user_id, d_start)
+                    except Exception:
+                        user_total_t = session_total
                 used_t_map = {
                     "per_session_daily": session_total,
-                    "per_user_daily": session_total,
+                    "per_user_daily": user_total_t,
                     "per_model_daily": model_total,
                     "global_daily": total_tokens(await self.query_usage(start=d_start)),
                     "global_monthly": total_tokens(await self.query_usage(start=m_start)),
@@ -501,9 +513,19 @@ class BudgetMixin:
                         ),
                         pricing,
                     )
+                # per_user_daily cost：同 token，有 user_id 时从补充表精确聚合
+                # （含 per_request 按 distinct request_id 计数）。
+                user_total_c = ses_cost
+                if user_id and lc_user > 0:
+                    try:
+                        user_total_c = float(
+                            await self.query_user_cost_total(user_id, d_start, pricing)
+                        )
+                    except Exception:
+                        user_total_c = ses_cost
                 used_c_map = {
                     "per_session_daily": ses_cost,
-                    "per_user_daily": ses_cost,
+                    "per_user_daily": user_total_c,
                     "per_model_daily": mod_cost,
                     "global_daily": _groups_cost(
                         await self.query_usage_grouped(by="provider_model", start=d_start),
@@ -550,14 +572,20 @@ class BudgetMixin:
                     str(p) for p in (result.get("fallback_provider_ids") or []) if str(p).strip()
                 ]
                 if pids:
-                    return await self._try_fallback(
+                    handled = await self._try_fallback(
                         event,
                         req,
                         pids,
                         int(result.get("fallback_token_limit") or 0),
                     )
-                # fallback 但没配 provider 列表 → 兜底 stop
-                logger.warning("[cost_control] fallback 未配置 provider，降级 stop")
+                    if handled:
+                        return True
+                # fallback 未配 provider 列表，或全部备用 provider 调用失败 →
+                # 降级 stop。绝不让已超限的原 Provider 继续执行（违背成本拦截意图）。
+                if not pids:
+                    logger.warning("[cost_control] fallback 未配置 provider，降级 stop")
+                else:
+                    logger.warning("[cost_control] fallback 全部 provider 失败，降级 stop")
                 await self._do_stop(event, result, str(result.get("stop_message") or ""))
                 return True
             if action == "warn":
@@ -585,7 +613,8 @@ class BudgetMixin:
         limit = result.get("limit")
         if result.get("metric") == "cost":
             return f"⏸ 已超出花费预算（{dim}）：${float(used or 0):.4f} / ${float(limit or 0):.2f}"
-        return f"⏸ 已超出预算（{dim}）：用 {used} / 限 {limit} token"
+        # token 维度的 used/limit 来自 float() 包装，转 int 避免显示 "150.0"。
+        return f"⏸ 已超出预算（{dim}）：用 {int(used or 0)} / 限 {int(limit or 0)} token"
 
     async def _try_fallback(
         self,

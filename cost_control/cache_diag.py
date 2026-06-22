@@ -312,12 +312,18 @@ class CacheDiagMixin:
     def check_hit_rate(self, record: dict[str, Any]) -> tuple[float, bool]:
         """基于补充记录的 cache 字段计算命中率，判断是否低于阈值需告警。
 
+        ``cache_read`` 显式为 0（provider 报告零命中）时按 0 参与计算；仅当其缺失
+        （None）时才回退到 ``token_input_cached``（TokenUsage 的缓存 token 数）。
+
         Returns:
             ``(rate, should_alert)``。``rate`` 为百分比；无数据时 -1 且不告警。
         """
         try:
+            cache_read = record.get("cache_read")
+            if cache_read is None:
+                cache_read = record.get("token_input_cached")
             rate = hit_rate(
-                record.get("cache_read") or record.get("token_input_cached"),
+                cache_read,
                 record.get("token_input_other"),
                 record.get("cache_creation"),
             )

@@ -667,7 +667,7 @@ class WebApiMixin:
                             ses_used,
                             ses_cost,
                             ses_key,
-                            "退化为会话维度（按用户 override 走 CostSupplement.user_id）",
+                            "展示为今日消耗最多的会话；运行时按请求 user_id 跨会话聚合拦截",
                         ),
                         "per_model_daily": _dim_entry(
                             "per_model_daily",
@@ -806,8 +806,11 @@ class WebApiMixin:
             total_input_cached = 0
             total_output = 0
             for s in sups:
+                cache_read = getattr(s, "cache_read", None)
+                if cache_read is None:
+                    cache_read = getattr(s, "token_input_cached", None)
                 rate = hit_rate(
-                    getattr(s, "cache_read", None) or getattr(s, "token_input_cached", None),
+                    cache_read,
                     getattr(s, "token_input_other", None),
                     getattr(s, "cache_creation", None),
                 )

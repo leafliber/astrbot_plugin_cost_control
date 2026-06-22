@@ -108,8 +108,11 @@ def _aggregate_supplements(
     injections: list[int] = []
     sessions: dict[str, dict[str, Any]] = {}
     for s in sups or []:
+        cache_read = getattr(s, "cache_read", None)
+        if cache_read is None:
+            cache_read = getattr(s, "token_input_cached", None)
         rate = hit_rate(
-            getattr(s, "cache_read", None) or getattr(s, "token_input_cached", None),
+            cache_read,
             getattr(s, "token_input_other", None),
             getattr(s, "cache_creation", None),
         )

@@ -81,19 +81,23 @@ class NotifierMixin:
             getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", None) or ""
         )
         now = datetime.now(UTC)
-        if not await self._check_and_mark_cooldown(umo, now):
+        # 先检查冷却（不写入）：发送成功后再标记，避免发送失败却消耗冷却窗口，
+        # 导致后续告警被静默。
+        if not await self._check_cooldown(umo, now):
             return False
         try:
             from astrbot.api.event import MessageChain
 
             chain = MessageChain().message(message)
             send = getattr(event, "send", None)
-            if send is not None:
-                await send(chain)
-                return True
+            if send is None:
+                return False
+            await send(chain)
         except Exception:
-            pass
-        return False
+            return False
+        # 发送成功后才标记冷却（失败不消耗窗口，下次仍可重试）。
+        await self._mark_cooldown(umo, now)
+        return True
 
     async def push_to_session(self, umo: str, message: str) -> bool:
         """无 event 主动推送（CronJob / 跨会话场景），不做冷却。
@@ -115,10 +119,10 @@ class NotifierMixin:
         except Exception:
             return False
 
-    async def _check_and_mark_cooldown(self, umo: str, now: datetime) -> bool:
-        """检查冷却并（若通过）写入新的时间戳。返回是否通过冷却。
+    async def _check_cooldown(self, umo: str, now: datetime) -> bool:
+        """检查是否已过冷却期（不写入）。读失败时放行（不阻断推送）。
 
-        冷却读 / 写失败时一律放行（不阻断推送），保证告警可达。
+        与 :meth:`_mark_cooldown` 分离，使发送失败不消耗冷却窗口。
         """
         if not umo:
             return True
@@ -126,14 +130,21 @@ class NotifierMixin:
         try:
             last = await self.get_pref("umo", umo, _COOLDOWN_KEY)
             last_ts = last.get("ts") if isinstance(last, dict) else None
-            now_ts = now.timestamp()
             if not cooldown_elapsed(
                 float(last_ts) if last_ts is not None else None,
-                now_ts,
+                now.timestamp(),
                 cd,
             ):
                 return False
-            await self.set_pref("umo", umo, _COOLDOWN_KEY, {"ts": now_ts})
             return True
         except Exception:
             return True
+
+    async def _mark_cooldown(self, umo: str, now: datetime) -> None:
+        """写入新的冷却时间戳（仅在告警发送成功后调用）。写失败静默。"""
+        if not umo:
+            return
+        try:
+            await self.set_pref("umo", umo, _COOLDOWN_KEY, {"ts": now.timestamp()})
+        except Exception:
+            pass
