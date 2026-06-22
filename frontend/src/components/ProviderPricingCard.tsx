@@ -1,5 +1,5 @@
 import { Segmented } from "./Segmented";
-import type { PriceEntry, PricingMode, UserPricingEntry } from "../lib/types";
+import type { MatchedDefault, PriceEntry, PricingMode, UserPricingEntry } from "../lib/types";
 
 // 编辑中的临时态：mode + 该 mode 下所有可能字段（字符串形式便于空值处理）。
 // collect 时按 mode 只取相关字段、空值不写入。
@@ -96,12 +96,15 @@ const MODE_HINT: Record<PricingMode, string> = {
   per_request: "USD / 次。每次用户请求固定费用（一次请求含多步调用只计一次）。",
 };
 
+const fmtPrice = (v?: number | null): string => (v == null ? "—" : String(v));
+
 export function ProviderPricingCard({
   providerId,
   type,
   candidates,
   draft,
-  defaults,
+  matchedDefault,
+  hasUserOverride,
   onChange,
   onClear,
 }: {
@@ -109,20 +112,16 @@ export function ProviderPricingCard({
   type?: string;
   candidates: string[];
   draft: DraftEntry;
-  defaults: Record<string, PriceEntry>;
+  matchedDefault?: MatchedDefault | null;
+  hasUserOverride?: boolean;
   onChange: (patch: Partial<DraftEntry>) => void;
   onClear: () => void;
 }) {
-  // per_token 时，按候选模型匹配内置默认作占位提示
+  // 输入框占位：用后端算出的实际匹配默认（与计费同口径）作填写参考。
   const placeholder = (field: keyof DraftEntry): string => {
-    for (const c of candidates) {
-      const d = defaults[c];
-      if (d) {
-        const v = d[field as keyof PriceEntry];
-        if (v != null) return String(v);
-      }
-    }
-    return "";
+    if (field === "price" || !matchedDefault?.entry) return "";
+    const v = matchedDefault.entry[field as keyof PriceEntry];
+    return v != null ? String(v) : "";
   };
 
   const setMode = (mode: PricingMode) => {
@@ -140,30 +139,52 @@ export function ProviderPricingCard({
     }
   };
 
-  const fieldStyle = { width: 90 };
-
   return (
-    <div className="override-row">
-      <div className="override-head">
-        <span className="mono" style={{ fontWeight: 600 }}>
-          {providerId}
-        </span>
-        {type && <span className="muted small"> · {type}</span>}
+    <div className="pricing-card">
+      <div className="pricing-card-head">
+        <div className="pricing-id-wrap">
+          <span className="mono pricing-id">{providerId}</span>
+          {type && <span className="muted small">{type}</span>}
+        </div>
+        <button
+          type="button"
+          className="move-btn del"
+          onClick={onClear}
+          title="清除该 Provider 定价（回退默认）"
+        >
+          ✕
+        </button>
       </div>
 
       {candidates.length > 0 && (
-        <div className="muted small" style={{ margin: "4px 0" }}>
-          候选模型：
+        <div className="pricing-candidates">
           {candidates.map((c) => (
-            <span key={c} className="provider-tag" style={{ marginRight: 4 }}>
+            <span key={c} className="provider-tag">
               {c}
             </span>
           ))}
         </div>
       )}
 
-      <div className="override-action" style={{ margin: "4px 0" }}>
-        <span className="muted small">计费模式</span>
+      {matchedDefault ? (
+        <div className={`pricing-default-tip ${hasUserOverride ? "is-overridden" : ""}`}>
+          <span className="muted small pdt-label">默认匹配</span>
+          <span className="mono pdt-model">{matchedDefault.model}</span>
+          <span className="muted small pdt-prices">
+            输入 {fmtPrice(matchedDefault.entry.input)} · 缓存{" "}
+            {fmtPrice(matchedDefault.entry.input_cached)} · 输出{" "}
+            {fmtPrice(matchedDefault.entry.output)} · 写入{" "}
+            {fmtPrice(matchedDefault.entry.cache_creation)}
+          </span>
+          {hasUserOverride && <span className="pdt-tag">已自定义覆盖</span>}
+        </div>
+      ) : (
+        <div className="pricing-default-tip is-missing">
+          <span className="muted small">无内置匹配 · 未设自定义时成本计为 $0</span>
+        </div>
+      )}
+
+      <div className="pricing-mode-row">
         <Segmented
           options={MODE_OPTIONS}
           value={draft.mode}
@@ -171,15 +192,12 @@ export function ProviderPricingCard({
           variant="weak"
         />
       </div>
+      <div className="muted small pricing-mode-hint">{MODE_HINT[draft.mode]}</div>
 
-      <div className="muted small" style={{ marginBottom: 6 }}>
-        {MODE_HINT[draft.mode]}
-      </div>
-
-      {draft.mode === "per_token" ? (
-        <div className="override-limits">
-          {TOKEN_FIELDS.map((f) => (
-            <label key={f.key} className="limit-cell">
+      <div className={`pricing-fields pf-${draft.mode}`}>
+        {draft.mode === "per_token" ? (
+          TOKEN_FIELDS.map((f) => (
+            <label key={f.key} className="pricing-field">
               <span className="muted small">{f.label}</span>
               <input
                 type="number"
@@ -189,14 +207,11 @@ export function ProviderPricingCard({
                 value={draft[f.key]}
                 placeholder={placeholder(f.key)}
                 onChange={(e) => onChange({ [f.key]: e.target.value } as Partial<DraftEntry>)}
-                style={fieldStyle}
               />
             </label>
-          ))}
-        </div>
-      ) : (
-        <div className="override-limits">
-          <label className="limit-cell">
+          ))
+        ) : (
+          <label className="pricing-field">
             <span className="muted small">
               {draft.mode === "per_turn" ? "USD / 每轮" : "USD / 每次请求"}
             </span>
@@ -207,16 +222,9 @@ export function ProviderPricingCard({
               className="budget-input"
               value={draft.price}
               onChange={(e) => onChange({ price: e.target.value } as Partial<DraftEntry>)}
-              style={fieldStyle}
             />
           </label>
-        </div>
-      )}
-
-      <div className="override-move">
-        <button type="button" className="move-btn del" onClick={onClear} title="清除该 Provider 定价（回退默认）">
-          ✕
-        </button>
+        )}
       </div>
     </div>
   );

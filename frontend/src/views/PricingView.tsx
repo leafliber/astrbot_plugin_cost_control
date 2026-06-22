@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
-import type { PriceEntry, ProviderModelInfo, UserPricingEntry } from "../lib/types";
+import type { MatchedDefault, PriceEntry, ProviderModelInfo, UserPricingEntry } from "../lib/types";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
 import { SaveToast } from "../components/SaveToast";
@@ -42,9 +42,19 @@ export function PricingView() {
   const orphanIds = Object.keys(drafts).filter(
     (pid) => !providerModels.some((p) => p.id === pid),
   );
-  const displayList: { id: string; type?: string; candidates: string[] }[] = [
-    ...providerModels.map((p) => ({ id: p.id, type: p.type, candidates: p.candidates })),
-    ...orphanIds.map((id) => ({ id, type: undefined, candidates: [] })),
+  const displayList: {
+    id: string;
+    type?: string;
+    candidates: string[];
+    matchedDefault: MatchedDefault | null;
+  }[] = [
+    ...providerModels.map((p) => ({
+      id: p.id,
+      type: p.type,
+      candidates: p.candidates,
+      matchedDefault: p.matched_default ?? null,
+    })),
+    ...orphanIds.map((id) => ({ id, type: undefined, candidates: [], matchedDefault: null })),
   ];
 
   const updateDraft = (pid: string, patch: Partial<DraftEntry>) =>
@@ -161,7 +171,8 @@ export function PricingView() {
               type={p.type}
               candidates={p.candidates}
               draft={ensureDraft(p.id)}
-              defaults={defaults}
+              matchedDefault={p.matchedDefault}
+              hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
               onChange={(patch) => updateDraft(p.id, patch)}
               onClear={() => clearDraft(p.id)}
             />

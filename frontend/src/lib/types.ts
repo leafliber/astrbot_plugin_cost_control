@@ -259,12 +259,19 @@ export interface PerRequestEntry {
 }
 export type UserPricingEntry = PerTokenEntry | PerTurnEntry | PerRequestEntry;
 
+// provider 实际匹配到的内置默认（主模型经 _best_match_key 模糊匹配，与后端计费同口径）
+export interface MatchedDefault {
+  model: string;
+  entry: PriceEntry;
+}
+
 // provider 及其候选模型（GET /providers / GET /pricing.provider_models）
 export interface ProviderModelInfo {
   id: string;
   model?: string;
   type?: string;
   candidates: string[];
+  matched_default?: MatchedDefault | null;
 }
 
 export interface PricingUnpriced {

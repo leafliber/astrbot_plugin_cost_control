@@ -403,6 +403,26 @@ tr:hover td {
   color: var(--warn);
 }
 
+.potential-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 2px 0 10px;
+}
+
+.potential-pct {
+  font-size: 30px;
+  font-weight: 600;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.potential-caption {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
 /* ===== 归因堆叠条 ===== */
 .stacked-bar {
   display: flex;
@@ -766,6 +786,121 @@ tr:hover td {
   gap: 4px;
   align-items: stretch;
   justify-self: end;
+}
+
+/* ===== 定价卡（独立布局，不复用 override-row 的 grid）===== */
+.pricing-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pricing-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pricing-id-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pricing-id {
+  font-weight: 600;
+}
+
+.pricing-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pricing-default-tip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.pricing-default-tip .pdt-model {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pricing-default-tip .pdt-prices {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.pricing-default-tip.is-overridden {
+  opacity: 0.7;
+}
+
+.pdt-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  white-space: nowrap;
+}
+
+.pricing-default-tip.is-missing {
+  border-style: dashed;
+  border-color: rgba(224, 49, 49, 0.3);
+}
+
+.pricing-mode-row {
+  display: flex;
+  align-items: center;
+}
+
+.pricing-mode-hint {
+  margin-top: -4px;
+}
+
+.pricing-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.pricing-fields.pf-per_token {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.pricing-fields.pf-per_turn,
+.pricing-fields.pf-per_request {
+  grid-template-columns: 1fr;
+}
+
+.pricing-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pricing-field .budget-input {
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  .pricing-fields.pf-per_token {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 /* ===== 局部阈值紧凑卡（OverrideRow v2，与定价卡的 .override-row 解耦）===== */

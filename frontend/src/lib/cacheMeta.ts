@@ -115,14 +115,20 @@ export function buildCollapsedView(
   segments: CollapsedSegment[],
   collapsed: boolean,
 ): CollapsedLine[] {
+  // 折叠态：每个过长的 context 段只保留首尾各 KEEP 行，中间收起为 placeholder
+  // （含首段 / 尾段——长前导上下文同样折叠，避免一展开就刷满屏）。
+  const KEEP = 3;
   const out: CollapsedLine[] = [];
-  segments.forEach((s, idx) => {
+  segments.forEach((s) => {
     const isLongContext =
       s.lines.every((l) => l.op === " ") && s.lines.length > CONTEXT_COLLAPSE_THRESHOLD;
-    // 收尾段保留展开：避免用户失去变更的上下文边界
-    const isBoundary = idx === 0 || idx === segments.length - 1;
-    if (collapsed && isLongContext && !isBoundary) {
-      out.push({ kind: "placeholder", count: s.lines.length, segments: [s] });
+    if (collapsed && isLongContext && s.lines.length > KEEP * 2) {
+      const head = s.lines.slice(0, KEEP);
+      const tail = s.lines.slice(s.lines.length - KEEP);
+      const hidden = s.lines.length - KEEP * 2;
+      out.push(...head);
+      out.push({ kind: "placeholder", count: hidden, segments: [s] });
+      out.push(...tail);
     } else {
       out.push(...s.lines);
     }

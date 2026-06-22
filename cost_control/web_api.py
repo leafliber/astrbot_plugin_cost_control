@@ -942,9 +942,27 @@ class WebApiMixin:
                 unpriced.sort(key=lambda x: x["tokens"], reverse=True)
             except Exception:
                 pass  # 用量查询失败不阻断定价表展示
+            from .cost import _best_match_key
+
+            provider_models = self._collect_provider_models()
+            # 为每个 provider 附「实际匹配到的内置默认」(主模型经 _best_match_key
+            # 模糊匹配,与 resolve_pricing / match_pricing 同口径),供前端定价卡
+            # 提示当前生效基准——解决前端精确匹配 placeholder 与后端模糊计费脱节。
+            for p in provider_models:
+                try:
+                    candidates = p.get("candidates") or []
+                    model = p.get("model") or (candidates[0] if candidates else "")
+                    md: Any = None
+                    if model:
+                        key = _best_match_key(model, DEFAULT_PRICING)
+                        if key:
+                            md = {"model": key, "entry": DEFAULT_PRICING[key]}
+                    p["matched_default"] = md
+                except Exception:
+                    p["matched_default"] = None
             return self._ok(
                 {
-                    "provider_models": self._collect_provider_models(),
+                    "provider_models": provider_models,
                     "user_pricing": pricing.get("user", {}),
                     "defaults": DEFAULT_PRICING,
                     "unpriced": unpriced,

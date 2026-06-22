@@ -25,6 +25,12 @@ export function CacheView({
   const tOther = r?.total_input_other || 0;
   const tOut = r?.total_output || 0;
   const totalTokens = tCached + tOther + tOut;
+  // 优化潜力:缓存命中单价约为非缓存的 1/10,若非缓存输入全部命中,
+  // 输入成本可降低的比例 = 0.9×非缓存 / (0.1×缓存命中 + 非缓存)。
+  const inputTotal = tCached + tOther;
+  const otherRatio = inputTotal > 0 ? Math.round((tOther / inputTotal) * 100) : 0;
+  const costDenom = 0.1 * tCached + tOther;
+  const potentialPct = costDenom > 0 ? Math.round(((0.9 * tOther) / costDenom) * 100) : 0;
   const segs = [
     { label: "缓存命中", value: tCached, color: "var(--ok)" },
     { label: "缓存未命中", value: tOther, color: "var(--warn)" },
@@ -59,11 +65,14 @@ export function CacheView({
 
       <Panel className="potential">
         <h2>优化潜力</h2>
+        <div className="potential-figure">
+          <span className="potential-pct">≈ {potentialPct}%</span>
+          <span className="potential-caption">若全部命中缓存，输入成本可降低</span>
+        </div>
         <div className="alert-body">
-          缓存命中单价通常为非缓存的 <strong>1/10</strong>。当前非缓存输入{" "}
-          <strong>{fmtNum(r?.total_input_other || 0)}</strong>{" "}
-          token，提升命中率可直接降低这部分输入成本。重点排查：system prompt
-          稳定性、上下文是否被重置、工具定义是否频繁变化。
+          缓存命中单价仅为非缓存的 <strong>1/10</strong>。当前非缓存输入{" "}
+          <strong>{fmtNum(tOther)}</strong> token，占输入总量{" "}
+          <strong>{otherRatio}%</strong>。重点排查：system prompt 稳定性、上下文是否被重置、工具定义是否频繁变化。
         </div>
       </Panel>
 
