@@ -26,34 +26,70 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any
 
 from .config import get_pricing
 
 
+@lru_cache(maxsize=4096)
+def _normalize_model_name(name: str) -> str:
+    """把模型名 / provider_id 规范化为统一比较形式（用于模糊匹配）。
+
+    处理实际调用中常见的写法差异：
+
+    - **去命名空间前缀**：取最后一段路径（``a/b/c`` → ``c``）——剥离 OpenRouter /
+      NewAPI 风格的厂商前缀（``minimax/MiniMax-M2.7`` → ``MiniMax-M2.7``、
+      ``newapi/moonshotai/kimi-k2.6`` → ``kimi-k2.6``）。
+    - **统一分隔符**：下划线 / 空格 / 点 → 连字符（``MiniMax_M2.7`` → ``MiniMax-M2-7``），
+      随后折叠重复连字符、去首尾连字符——让 ``claude-sonnet-4-5``（连字符）与
+      ``claude-sonnet-4.5``（点）这类版本号写法对齐。
+    - **小写**。
+
+    内置 ``DEFAULT_PRICING`` 的 key 是小写、连字符分隔、无前缀的 slug；本函数把 target
+    拉到同形态，使精确 / 前缀匹配能直接命中（而非仅靠子串兜底）。对 key 自身也规范一遍，
+    保证双向一致。结果带 ``lru_cache``，DEFAULT_PRICING 约 300 键重复调用零开销。
+    """
+    s = name.rsplit("/", 1)[-1].strip()
+    s = s.replace("_", "-").replace(" ", "-").replace(".", "-")
+    while "--" in s:
+        s = s.replace("--", "-")
+    return s.strip("-").lower()
+
+
 def _best_match_key(target: str | None, table: Mapping[str, Any]) -> str | None:
-    """在 ``table`` 的键中为 ``target`` 选最佳匹配键（大小写：精确敏感，其余不敏感）。
+    """在 ``table`` 的键中为 ``target`` 选最佳匹配键（模糊匹配，应对各种写法）。
 
-    三级回退，每级取**最长候选**（最具体优先），命中即返回：
+    四级回退，每级取**最长候选**（最具体优先），命中即返回：
 
-    1. **精确匹配**（原名，大小写敏感）；
-    2. **前缀匹配**：``target`` 以某键开头——处理带日期 / 版本后缀的名称
-       （如 ``claude-sonnet-4-5-20250929`` → ``claude-sonnet-4-5``）；
-    3. **子串匹配**：``target`` 包含某键——让实际调用中的变体名命中内置预设
-       （如厂商前缀 ``provider/qwen-max``、带后缀 ``qwen-max-20241115``、
-       大小写差异 ``GLM-4.5``）。
+    1. **原样精确**（大小写敏感）：``target`` 原形直接命中 table；
+    2. **规范化精确**：target 与 key 经 :func:`_normalize_model_name` 拉到同形态
+       （剥前缀、统一分隔符、小写）后相等——命中厂商前缀（``minimax/MiniMax-M2.7``）、
+       多层命名空间（``newapi/moonshotai/kimi-k2.6``）、下划线 / 空格分隔
+       （``MiniMax_M2.7``）、大小写差异（``GLM-4.5``）；
+    3. **规范化前缀**：规范化后的 target 以规范化后的 key 开头——处理版本 / 日期后缀
+       （``claude-sonnet-4-5-20250929`` → ``claude-sonnet-4.5``、
+       ``anthropic/claude-sonnet-4-5-20250929``、``qwen3-max-20241115``）；
+    4. **规范化学串**：规范化后的 target 包含规范化后的 key——最后兜底。
 
-    该函数同时驱动 :func:`match_pricing`（默认价按模型名匹配）与
-    :func:`resolve_pricing` 的用户定价 provider_id 模糊匹配，故两者规则一致。
+    该函数同时驱动 :func:`match_pricing`（默认价按模型名匹配）与 :func:`resolve_pricing`
+    的用户定价 provider_id 模糊匹配，故两者规则一致。
     """
     if not target:
         return None
     if target in table:
         return target
-    tl = target.lower()
-    candidates = [k for k in table if tl.startswith(k.lower())]
+    nt = _normalize_model_name(target)
+    if not nt:
+        return None
+    normed = [(_normalize_model_name(k), k) for k in table]
+    exact = [k for nk, k in normed if nk == nt]
+    if exact:
+        exact.sort(key=len, reverse=True)
+        return exact[0]
+    candidates = [k for nk, k in normed if nk and nt.startswith(nk)]
     if not candidates:
-        candidates = [k for k in table if k.lower() in tl]
+        candidates = [k for nk, k in normed if nk and nk in nt]
     if candidates:
         candidates.sort(key=len, reverse=True)
         return candidates[0]
