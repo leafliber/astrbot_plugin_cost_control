@@ -91,12 +91,10 @@ const MODE_OPTIONS: { value: PricingMode; label: string }[] = [
 ];
 
 const MODE_HINT: Record<PricingMode, string> = {
-  per_token: "USD / 百万 token。按 input / 缓存命中 / output / 缓存写入 分别计价。",
+  per_token: "USD / 百万 token。留空字段 = 用内置默认价。输入即覆盖默认。",
   per_turn: "USD / 次。每次 LLM 调用（含 function-calling 每一步）固定费用。",
   per_request: "USD / 次。每次用户请求固定费用（一次请求含多步调用只计一次）。",
 };
-
-const fmtPrice = (v?: number | null): string => (v == null ? "—" : String(v));
 
 export function ProviderPricingCard({
   providerId,
@@ -117,7 +115,8 @@ export function ProviderPricingCard({
   onChange: (patch: Partial<DraftEntry>) => void;
   onClear: () => void;
 }) {
-  // 输入框占位：用后端算出的实际匹配默认（与计费同口径）作填写参考。
+  // 输入框背景提示：用后端算出的实际匹配默认价（与计费同口径）作 placeholder。
+  // 用户输入即覆盖、placeholder 自动消失。
   const placeholder = (field: keyof DraftEntry): string => {
     if (field === "price" || !matchedDefault?.entry) return "";
     const v = matchedDefault.entry[field as keyof PriceEntry];
@@ -145,14 +144,22 @@ export function ProviderPricingCard({
         <div className="pricing-id-wrap">
           <span className="mono pricing-id">{providerId}</span>
           {type && <span className="muted small">{type}</span>}
+          {matchedDefault ? (
+            <span className={`pricing-match ${hasUserOverride ? "is-overridden" : ""}`}>
+              默认匹配 <span className="mono">{matchedDefault.model}</span>
+              {hasUserOverride && <span className="pm-ov">已覆盖</span>}
+            </span>
+          ) : (
+            <span className="pricing-match is-missing">无内置匹配</span>
+          )}
         </div>
         <button
           type="button"
-          className="move-btn del"
+          className="pricing-clear"
           onClick={onClear}
           title="清除该 Provider 定价（回退默认）"
         >
-          ✕
+          清除
         </button>
       </div>
 
@@ -166,31 +173,8 @@ export function ProviderPricingCard({
         </div>
       )}
 
-      {matchedDefault ? (
-        <div className={`pricing-default-tip ${hasUserOverride ? "is-overridden" : ""}`}>
-          <span className="muted small pdt-label">默认匹配</span>
-          <span className="mono pdt-model">{matchedDefault.model}</span>
-          <span className="muted small pdt-prices">
-            输入 {fmtPrice(matchedDefault.entry.input)} · 缓存{" "}
-            {fmtPrice(matchedDefault.entry.input_cached)} · 输出{" "}
-            {fmtPrice(matchedDefault.entry.output)} · 写入{" "}
-            {fmtPrice(matchedDefault.entry.cache_creation)}
-          </span>
-          {hasUserOverride && <span className="pdt-tag">已自定义覆盖</span>}
-        </div>
-      ) : (
-        <div className="pricing-default-tip is-missing">
-          <span className="muted small">无内置匹配 · 未设自定义时成本计为 $0</span>
-        </div>
-      )}
-
       <div className="pricing-mode-row">
-        <Segmented
-          options={MODE_OPTIONS}
-          value={draft.mode}
-          onChange={setMode}
-          variant="weak"
-        />
+        <Segmented options={MODE_OPTIONS} value={draft.mode} onChange={setMode} variant="weak" />
       </div>
       <div className="muted small pricing-mode-hint">{MODE_HINT[draft.mode]}</div>
 

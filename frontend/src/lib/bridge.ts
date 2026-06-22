@@ -68,63 +68,6 @@ function createDevMockBridge(): BridgePage {
       if (endpoint === "overview") return { success: true, data: emptyOverview };
       if (endpoint === "timeline")
         return { success: true, data: { series: [], bucket: "day", days: 7 } };
-      if (endpoint === "pricing")
-        return {
-          success: true,
-          data: {
-            provider_models: [
-              {
-                id: "openai-gpt4o",
-                model: "gpt-4o",
-                type: "openai_chat_completion",
-                candidates: ["gpt-4o", "gpt-4o-mini"],
-                matched_default: {
-                  model: "gpt-4o",
-                  entry: { input: 2.5, input_cached: 1.25, output: 10, cache_creation: null },
-                },
-              },
-              {
-                id: "claude-sonnet",
-                model: "claude-sonnet-4-5-20250929",
-                type: "anthropic",
-                candidates: ["claude-sonnet-4-5-20250929", "claude-haiku-4-5"],
-                matched_default: {
-                  model: "claude-sonnet-4-5",
-                  entry: { input: 3, input_cached: 0.3, output: 15, cache_creation: 3.75 },
-                },
-              },
-              {
-                id: "deepseek-chat",
-                model: "deepseek-chat",
-                type: "deepseek",
-                candidates: ["deepseek-chat"],
-                matched_default: {
-                  model: "deepseek-chat",
-                  entry: { input: 0.27, input_cached: 0.07, output: 1.1, cache_creation: null },
-                },
-              },
-              {
-                id: "custom-finetune",
-                model: "my-finetune-v2",
-                type: "openai_chat_completion",
-                candidates: ["my-finetune-v2"],
-                matched_default: null,
-              },
-            ],
-            user_pricing: {
-              "deepseek-chat": { mode: "per_token", input: 0.14, input_cached: 0.014, output: 0.28 },
-            },
-            defaults: {
-              "gpt-4o": { input: 2.5, input_cached: 1.25, output: 10 },
-              "gpt-4o-mini": { input: 0.15, input_cached: 0.075, output: 0.6 },
-              "claude-sonnet-4-5": { input: 3, input_cached: 0.3, output: 15, cache_creation: 3.75 },
-              "deepseek-chat": { input: 0.27, input_cached: 0.07, output: 1.1 },
-            },
-            unpriced: [
-              { provider_id: "custom-finetune", model: "my-finetune-v2", tokens: 15200, count: 8 },
-            ],
-          },
-        };
       return { success: true, data: null };
     },
     async apiPost() {
