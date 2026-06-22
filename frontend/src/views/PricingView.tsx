@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
+import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
 import type { PriceEntry, ProviderModelInfo, UserPricingEntry } from "../lib/types";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
+import { SaveToast } from "../components/SaveToast";
 import { Loading, ErrorBox } from "../components/Feedback";
 import {
   DraftEntry,
@@ -18,7 +20,8 @@ export function PricingView() {
   const res = useApi(() => api.getPricing(), []);
   const data = res.data;
   const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
-  const [result, setResult] = useState("");
+  const [resetResult, setResetResult] = useState("");
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     if (!data) return;
@@ -28,6 +31,7 @@ export function PricingView() {
       next[pid] = entryToDraft(entry);
     }
     setDrafts(next);
+    setReady(true);
   }, [data]);
 
   if (res.loading && !data) return <Loading />;
@@ -71,33 +75,35 @@ export function PricingView() {
     return out;
   };
 
-  const save = async () => {
-    let body;
+  // 自动保存 payload。draftToEntry 对非法数值会抛错——包裹后把错误塞进 payload，
+  // onSave 见到即抛出，由 useAutoSave 转成错误浮层提示用户修正。
+  const payload = useMemo<{ pricing: Record<string, UserPricingEntry> | null; error?: string }>(() => {
     try {
-      body = { pricing: collect() };
+      return { pricing: collect() };
     } catch (e) {
-      setResult(`❌ ${e instanceof Error ? e.message : String(e)}`);
-      return;
+      return { pricing: null, error: e instanceof Error ? e.message : String(e) };
     }
-    setResult("保存中…");
-    try {
-      await api.postSaveConfig(body);
-      setResult("✅ 已保存，立即生效");
-      res.refetch();
-    } catch (e) {
-      setResult(`❌ 保存失败：${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
+    // eslint-disable-next-line react-hooks/exhausting-deps
+  }, [drafts]);
+
+  const { status, error } = useAutoSave(
+    payload,
+    async (p) => {
+      if (p.error) throw new Error(p.error);
+      void (await api.postSaveConfig({ pricing: p.pricing }));
+    },
+    { enabled: ready },
+  );
 
   const reset = async () => {
     if (!confirm("确定清空所有自定义定价、恢复内置默认匹配？")) return;
-    setResult("重置中…");
+    setResetResult("重置中…");
     try {
       await api.postSaveConfig({ pricing: {} });
-      setResult("✅ 已重置，立即生效");
+      setResetResult("✅ 已重置，立即生效");
       res.refetch();
     } catch (e) {
-      setResult(`❌ 重置失败：${e instanceof Error ? e.message : String(e)}`);
+      setResetResult(`❌ 重置失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -139,7 +145,7 @@ export function PricingView() {
         <h2>Provider 定价</h2>
         <div className="muted small" style={{ marginBottom: 8 }}>
           按 <strong>provider_id</strong> 设置定价：命中则按其计费模式生效；未设置时按模型名
-          匹配下方内置默认（per_token）。修改后点「保存」即时热生效。
+          匹配下方内置默认（per_token）。修改后自动保存、即时热生效。
         </div>
         {displayList.length === 0 && (
           <div className="muted small" style={{ margin: "8px 0" }}>
@@ -161,13 +167,10 @@ export function PricingView() {
           ))}
         </div>
         <div className="row" style={{ marginTop: 8, gap: 10, alignItems: "center" }}>
-          <Button variant="primary" onClick={save}>
-            保存定价（热生效）
-          </Button>
           <Button onClick={reset} title="清空自定义定价，恢复内置默认匹配">
             重置全部
           </Button>
-          <span className="muted">{result}</span>
+          <span className="muted">{resetResult}</span>
         </div>
       </Panel>
 
@@ -206,6 +209,8 @@ export function PricingView() {
           </table>
         </details>
       )}
+
+      <SaveToast status={status} error={error} />
     </div>
   );
 }

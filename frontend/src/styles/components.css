@@ -741,6 +741,133 @@ tr:hover td {
   justify-self: end;
 }
 
+/* ===== 局部阈值紧凑卡（OverrideRow v2，与定价卡的 .override-row 解耦）===== */
+.override-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.override-card.is-disabled {
+  opacity: 0.55;
+}
+
+.override-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.override-main .override-idx {
+  margin-right: 2px;
+}
+
+.override-main .override-target,
+.override-main .override-on {
+  padding: 3px 6px;
+}
+
+.ov-enable {
+  margin: 0;
+}
+
+.ov-sep {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ov-sep-dot {
+  margin: 0 2px;
+}
+
+.ov-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.ov-limit .budget-input {
+  width: 84px;
+  padding: 2px 6px;
+}
+
+.override-ops {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.override-ops .move-btn {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+/* 紧凑状态行：仅当设了上限时渲染 */
+.override-status {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+
+.ov-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.ov-pct {
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-stat.warn .ov-pct {
+  color: var(--warn);
+}
+
+.ov-stat.bad .ov-pct {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.ov-bar {
+  display: inline-block;
+  width: 48px;
+  height: 6px;
+  border-radius: 3px;
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  background-image: linear-gradient(var(--accent), var(--accent));
+  background-repeat: no-repeat;
+}
+
+.ov-stat.warn .ov-bar {
+  background-image: linear-gradient(var(--warn), var(--warn));
+}
+
+.ov-stat.bad .ov-bar {
+  background-image: linear-gradient(var(--bad), var(--bad));
+}
+
+/* OverrideRow v2 的 extra 行：复用 .override-extra 的 flex 样式，重置 grid-area */
+.override-card .override-extra {
+  grid-area: auto;
+}
+
 /* 备用 Provider 多选（tag 风格） */
 .fb-picker {
   display: inline-flex;
@@ -1050,4 +1177,50 @@ tr:hover td {
 
 .pr-suggest-item:hover {
   background: rgba(127, 127, 127, 0.14);
+}
+
+/* ===== 自动保存提示浮层（非阻塞 toast） ===== */
+.save-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  animation: save-toast-in 0.16s ease-out;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.save-toast-saving {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.save-toast-saved {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.save-toast-error {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+@keyframes save-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }

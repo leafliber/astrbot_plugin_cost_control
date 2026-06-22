@@ -1,4 +1,3 @@
-import { ProgressBar } from "./ProgressBar";
 import { fmtCost, fmtNum } from "../lib/format";
 import type {
   BudgetOverrideRow,
@@ -9,20 +8,26 @@ import type {
 } from "../lib/types";
 
 const TARGET_LABELS: Record<OverrideTarget, string> = {
-  umo: "会话（umo）",
+  umo: "会话",
   provider: "Provider",
-  user: "用户（user_id）",
+  user: "用户",
+};
+
+const TARGET_PLACEHOLDERS: Record<OverrideTarget, string> = {
+  umo: "如 qq:12345 / platform:session_id",
+  provider: "",
+  user: "发送者 ID（QQ / 微信 / 钉钉）",
 };
 
 const ON_EXCEEDED_LABELS: Record<OnExceeded, string> = {
   stop: "硬拦截",
-  fallback: "切换备用 Provider",
-  warn: "仅警告（不中断）",
+  fallback: "切备用",
+  warn: "仅警告",
 };
 
-// 单条 override 规则的 inline 编辑行。
-// head 行：启用 / 序号 / 目标类型 / 目标值 / 超限处理 —— 突出「匹配谁 → 怎么处理」。
-// limits 行：Token / Cost 阈值并排。extra 行：处理方案的条件字段。progress 行：实时消耗。
+// 单条 override 规则的紧凑编辑卡。
+// 主行按自然语序「当 [谁] · Token≤[x] $≤[y] → [处理]」排列，操作按钮内联到行末。
+// 状态行：仅当设了上限时显示紧凑 mini bar。extra 行：仅当选中对应处理时显示其条件字段。
 export function OverrideRow({
   row,
   index,
@@ -44,21 +49,28 @@ export function OverrideRow({
 }) {
   const tgt = row.target_type;
   const onExc = row.on_exceeded;
+  const hasTokenLimit = (row.token_limit || 0) > 0;
+  const hasCostLimit = (row.cost_limit || 0) > 0;
+  const showStatus = hasTokenLimit || hasCostLimit;
 
   return (
-    <div className={`override-row ${row.enabled ? "" : "is-disabled"}`}>
-      <div className="override-head">
+    <div className={`override-card ${row.enabled ? "" : "is-disabled"}`}>
+      <div className="override-main">
         <input
           type="checkbox"
+          className="ov-enable"
           checked={row.enabled}
           onChange={(e) => onChange({ enabled: e.target.checked })}
           title="启用"
         />
         <span className="override-idx">{index + 1}</span>
+        <span className="ov-sep">当</span>
         <select
           className="override-target"
           value={tgt}
-          onChange={(e) => onChange({ target_type: e.target.value as OverrideTarget, target_value: "" })}
+          onChange={(e) =>
+            onChange({ target_type: e.target.value as OverrideTarget, target_value: "" })
+          }
         >
           {(Object.keys(TARGET_LABELS) as OverrideTarget[]).map((t) => (
             <option key={t} value={t}>
@@ -85,42 +97,24 @@ export function OverrideRow({
             className="override-value"
             value={row.target_value}
             onChange={(e) => onChange({ target_value: e.target.value })}
-            placeholder={
-              tgt === "umo"
-                ? "如 qq:123456 或 platform:session_id"
-                : "发送者 ID（QQ/微信/钉钉 等）"
-            }
-            style={{ flex: 1, minWidth: 200 }}
+            placeholder={TARGET_PLACEHOLDERS[tgt]}
           />
         )}
-        <span className="override-on-label muted small">超限处理</span>
-        <select
-          className="override-on"
-          value={onExc}
-          onChange={(e) => onChange({ on_exceeded: e.target.value as OnExceeded })}
-        >
-          {(Object.keys(ON_EXCEEDED_LABELS) as OnExceeded[]).map((a) => (
-            <option key={a} value={a}>
-              {ON_EXCEEDED_LABELS[a]}
-            </option>
-          ))}
-        </select>
-      </div>
 
-      <div className="override-limits">
-        <label className="limit-cell">
-          <span className="muted small">Token 上限</span>
+        <span className="ov-sep ov-sep-dot">·</span>
+        <label className="ov-limit">
+          <span className="muted small">Token≤</span>
           <input
             type="number"
             min="0"
             className="budget-input"
             value={row.token_limit || 0}
             onChange={(e) => onChange({ token_limit: Math.max(0, +e.target.value || 0) })}
-            style={{ width: 110 }}
+            placeholder="0"
           />
         </label>
-        <label className="limit-cell">
-          <span className="muted small">花费上限 $</span>
+        <label className="ov-limit">
+          <span className="muted small">$≤</span>
           <input
             type="number"
             min="0"
@@ -128,10 +122,74 @@ export function OverrideRow({
             className="budget-input"
             value={row.cost_limit || 0}
             onChange={(e) => onChange({ cost_limit: Math.max(0, +e.target.value || 0) })}
-            style={{ width: 110 }}
+            placeholder="0"
           />
         </label>
+
+        <span className="ov-sep">→</span>
+        <select
+          className="override-on"
+          value={onExc}
+          onChange={(e) => onChange({ on_exceeded: e.target.value as OnExceeded })}
+          title="超限处理"
+        >
+          {(Object.keys(ON_EXCEEDED_LABELS) as OnExceeded[]).map((a) => (
+            <option key={a} value={a}>
+              {ON_EXCEEDED_LABELS[a]}
+            </option>
+          ))}
+        </select>
+
+        <div className="override-ops">
+          <button
+            type="button"
+            className="move-btn"
+            disabled={index === 0}
+            onClick={() => onMove("up")}
+            title="上移"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            className="move-btn"
+            disabled={index === total - 1}
+            onClick={() => onMove("down")}
+            title="下移"
+          >
+            ↓
+          </button>
+          <button type="button" className="move-btn del" onClick={onDelete} title="删除">
+            ✕
+          </button>
+        </div>
       </div>
+
+      {showStatus && (
+        <div className="override-status">
+          {hasTokenLimit && (
+            <StatLine
+              label="token"
+              used={row.current?.token?.used || 0}
+              limit={row.token_limit || 0}
+              ratio={row.current?.token?.ratio || 0}
+              exceeded={!!row.current?.token?.exceeded}
+              fmt={fmtNum}
+            />
+          )}
+          {hasCostLimit && (
+            <StatLine
+              label="cost"
+              used={row.current?.cost?.used || 0}
+              limit={row.cost_limit || 0}
+              ratio={row.current?.cost?.ratio || 0}
+              exceeded={!!row.current?.cost?.exceeded}
+              fmt={fmtCost}
+              prefix="$"
+            />
+          )}
+        </div>
+      )}
 
       {onExc === "stop" && (
         <div className="override-extra">
@@ -139,22 +197,21 @@ export function OverrideRow({
           <input
             className="budget-input"
             value={row.stop_message || ""}
-            placeholder="留空 = 默认文案（含 dim / used / limit）"
+            placeholder="留空 = 默认文案（含维度 / used / limit）"
             onChange={(e) => onChange({ stop_message: e.target.value })}
-            style={{ flex: 1, minWidth: 240 }}
           />
         </div>
       )}
       {onExc === "fallback" && (
         <div className="override-extra">
-          <span className="muted small">备用 Provider（按序）</span>
+          <span className="muted small">备用（按序）</span>
           <FallbackProviderPicker
             selected={row.fallback_provider_ids}
             candidates={fallbackProviders}
             onChange={(ids) => onChange({ fallback_provider_ids: ids })}
           />
-          <label className="limit-cell" style={{ marginLeft: 8 }}>
-            <span className="muted small">history token 截断</span>
+          <label className="ov-limit" style={{ marginLeft: "auto" }}>
+            <span className="muted small">history 截断</span>
             <input
               type="number"
               min="0"
@@ -169,58 +226,40 @@ export function OverrideRow({
           </label>
         </div>
       )}
-
-      <div className="override-progress">
-        <div className="progress-cell">
-          <div className="muted small">
-            token {fmtNum(row.current?.token?.used || 0)} / {fmtNum(row.token_limit || 0)}
-          </div>
-          {row.token_limit > 0 ? (
-            <ProgressBar ratio={row.current?.token?.ratio || 0}>
-              {row.current?.token?.ratio || 0}%
-            </ProgressBar>
-          ) : (
-            <div className="muted small">不限</div>
-          )}
-        </div>
-        <div className="progress-cell">
-          <div className="muted small">
-            cost {fmtCost(row.current?.cost?.used || 0)} / {fmtCost(row.cost_limit || 0)}
-          </div>
-          {row.cost_limit > 0 ? (
-            <ProgressBar ratio={row.current?.cost?.ratio || 0}>
-              {row.current?.cost?.ratio || 0}%
-            </ProgressBar>
-          ) : (
-            <div className="muted small">不限</div>
-          )}
-        </div>
-      </div>
-
-      <div className="override-move">
-        <button
-          type="button"
-          className="move-btn"
-          disabled={index === 0}
-          onClick={() => onMove("up")}
-          title="上移"
-        >
-          ↑
-        </button>
-        <button
-          type="button"
-          className="move-btn"
-          disabled={index === total - 1}
-          onClick={() => onMove("down")}
-          title="下移"
-        >
-          ↓
-        </button>
-        <button type="button" className="move-btn del" onClick={onDelete} title="删除">
-          ✕
-        </button>
-      </div>
     </div>
+  );
+}
+
+function StatLine({
+  label,
+  used,
+  limit,
+  ratio,
+  exceeded,
+  fmt,
+  prefix = "",
+}: {
+  label: string;
+  used: number;
+  limit: number;
+  ratio: number;
+  exceeded: boolean;
+  fmt: (n: number) => string;
+  prefix?: string;
+}) {
+  const pct = Math.min(100, Math.max(0, ratio || 0));
+  const cls = exceeded ? "bad" : pct >= 80 ? "warn" : "";
+  return (
+    <span className={`ov-stat ${cls}`}>
+      <span className="muted small">{label}</span>
+      <i className="ov-bar" style={{ backgroundSize: `${pct}% 100%` }} />
+      <span className="ov-pct">{pct}%</span>
+      <span className="muted small">
+        {prefix}
+        {fmt(used)} / {prefix}
+        {fmt(limit)}
+      </span>
+    </span>
   );
 }
 
@@ -236,11 +275,6 @@ function FallbackProviderPicker({
   const empty = candidates.length === 0;
   return (
     <div className="fb-picker">
-      {selected.length === 0 && (
-        <span className="muted small" style={{ marginRight: 6 }}>
-          {empty ? "（未配备用，将降级为 stop）" : "（空，将降级为 stop）"}
-        </span>
-      )}
       {selected.map((id, j) => (
         <span key={`${id}-${j}`} className="provider-tag">
           {id}
@@ -258,9 +292,7 @@ function FallbackProviderPicker({
         </span>
       ))}
       {empty ? (
-        <select className="fb-add" disabled value="">
-          <option value="">请先在下方「备用 Provider 库」添加</option>
-        </select>
+        <span className="muted small">请先在下方「备用 Provider 库」添加（否则将降级为硬拦截）</span>
       ) : (
         <select
           className="fb-add"

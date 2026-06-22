@@ -22,9 +22,7 @@ export function OverridesPanel({
   return (
     <div className="overrides-panel">
       <div className="muted small" style={{ marginBottom: 8 }}>
-        局部阈值（优先级高于全局 5 维）。按序求值：第一条匹配的规则生效；命中且
-        token / cost 任一超限 → 立即短路 → 走该规则自带的
-        <b> 超限处理 </b>（不评估全局）。规则未匹配或命中未超限 → 继续走全局。
+        按序匹配，第一条命中即生效：token / cost 任一超限 → 按本规则的<b> 超限处理 </b>执行（不走全局）；未命中或未超限 → 回落全局。
       </div>
       {overrides.length === 0 ? (
         <div className="muted small" style={{ textAlign: "center", padding: "20px 0" }}>

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
+import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
+import { SaveToast } from "../components/SaveToast";
 import { Loading, ErrorBox } from "../components/Feedback";
 
 type FieldType = "bool" | "str" | "int" | "csv";
@@ -202,12 +204,23 @@ function valOf(cfg: Record<string, unknown>, sec: string, k: string): unknown {
 export function SettingsView() {
   const res = useApi(() => api.getConfig(), []);
   const [edit, setEdit] = useState<Record<string, unknown>>({});
-  const [result, setResult] = useState("");
+  const [ready, setReady] = useState(false);
   const [actionResult, setActionResult] = useState("");
 
   useEffect(() => {
-    if (res.data) setEdit(JSON.parse(JSON.stringify(res.data)));
+    if (res.data) {
+      setEdit(JSON.parse(JSON.stringify(res.data)));
+      setReady(true);
+    }
   }, [res.data]);
+
+  const { status, error } = useAutoSave(
+    edit,
+    async (p) => {
+      void (await api.postSaveConfig(p));
+    },
+    { enabled: ready },
+  );
 
   if (res.loading && !res.data) return <Loading />;
   if (res.error) return <ErrorBox message={`加载设置失败：${res.error}`} />;
@@ -234,17 +247,6 @@ export function SettingsView() {
     });
   };
 
-  const save = async () => {
-    setResult("保存中…");
-    try {
-      const r = await api.postSaveConfig(edit);
-      setResult(`✅ 已保存（${(r.saved || []).join(", ")}），立即生效`);
-      res.refetch();
-    } catch (e) {
-      setResult(`❌ 保存失败：${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
   const cleanup = async () => {
     setActionResult("执行中…");
     try {
@@ -268,7 +270,7 @@ export function SettingsView() {
   return (
     <div className="settings-view">
       <div className="settings-hint">
-        此处为插件的全部详细配置，保存后热生效（无需重载）。预算阈值与模型单价请在「预算」「定价」标签页调整。
+        此处为插件的全部详细配置，修改后自动保存、即时热生效（无需重载）。预算阈值与模型单价请在「预算」「定价」标签页调整。
       </div>
 
       {SECTIONS.map((sec) => (
@@ -344,12 +346,7 @@ export function SettingsView() {
         </div>
       </Panel>
 
-      <div className="settings-save">
-        <Button variant="primary" onClick={save}>
-          保存（热生效）
-        </Button>
-        <span className="muted">{result}</span>
-      </div>
+      <SaveToast status={status} error={error} />
     </div>
   );
 }

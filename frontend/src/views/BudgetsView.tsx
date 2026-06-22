@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
+import { useAutoSave } from "../hooks/useAutoSave";
 import type {
   BudgetOverrideRow,
   BudgetResponse,
@@ -13,6 +14,7 @@ import { Panel } from "../components/Panel";
 import { GlobalDefaultsPanel } from "../components/GlobalDefaultsPanel";
 import { OverridesPanel } from "../components/OverridesPanel";
 import { FallbackProvidersPanel } from "../components/FallbackProvidersPanel";
+import { SaveToast } from "../components/SaveToast";
 import { Loading, ErrorBox } from "../components/Feedback";
 
 const OVERRIDE_PRESETS: Record<OverrideTarget, string> = {
@@ -47,7 +49,7 @@ export function BudgetsView() {
   const [overrides, setOverrides] = useState<BudgetOverrideRow[]>([]);
   const [fallbacks, setFallbacks] = useState<FallbackProvider[]>([]);
   const [defaultOn, setDefaultOn] = useState<OnExceeded>("stop");
-  const [saveResult, setSaveResult] = useState("");
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     if (!data) return;
@@ -56,6 +58,9 @@ export function BudgetsView() {
     setOverrides((data.overrides || []).map((o) => ({ ...o })));
     setFallbacks((data.fallback_providers || []).map((f) => ({ ...f })));
     setDefaultOn(data.global_default_on_exceeded || "stop");
+    // hydrate 与 setReady 在同一 effect 内 batch → 一次 re-render，
+    // useAutoSave 的 seeding layout effect 读到 hydrate 后的 serialized。
+    setReady(true);
   }, [data]);
 
   const provs: Provider[] = provsRes.data?.providers || [];
@@ -64,10 +69,6 @@ export function BudgetsView() {
     () => fallbacks.filter((f) => f.enabled).map((f) => f.id),
     [fallbacks],
   );
-
-  if (budgetsRes.loading && !data) return <Loading />;
-  if (budgetsRes.error)
-    return <ErrorBox message={`加载预算失败：${budgetsRes.error}`} />;
 
   const dimensions = (data as BudgetResponse | undefined)?.dimensions || {};
 
@@ -103,34 +104,40 @@ export function BudgetsView() {
       { id: id || `prov_${prev.length + 1}`, enabled: true, note: "" },
     ]);
 
-  const save = async () => {
-    setSaveResult("保存中…");
-    try {
-      // 清理 overrides 中 target_value 为空的非法行
-      const cleaned = overrides
+  // 自动保存 payload（剥离仅用于展示的 current / 客户端临时 id；过滤空 target）。
+  const payload = useMemo(
+    () => ({
+      budgets: tokens,
+      budgets_cost: cost,
+      budget_overrides: overrides
         .filter((o) => o.target_value && o.target_value.trim())
-        .map(({ current: _c, id: _id, ...rest }) => rest);
-      const cleanedFb = fallbacks.filter((f) => f.id && f.id.trim());
-      const res = await api.postSaveConfig({
-        budgets: tokens,
-        budgets_cost: cost,
-        budget_overrides: cleaned,
-        fallback_providers: cleanedFb,
-        default_on_exceeded: defaultOn,
-      });
-      setSaveResult(`✅ 已保存（${(res.saved || []).join(", ")}），立即生效`);
-      budgetsRes.refetch();
-    } catch (e) {
-      setSaveResult(`❌ 保存失败：${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
+        .map(({ current: _c, id: _id, ...rest }) => rest),
+      fallback_providers: fallbacks.filter((f) => f.id && f.id.trim()),
+      default_on_exceeded: defaultOn,
+    }),
+    [tokens, cost, overrides, fallbacks, defaultOn],
+  );
+
+  const { status, error } = useAutoSave(
+    payload,
+    async (p) => {
+      void (await api.postSaveConfig(p));
+      // 不 refetch：避免服务端归一化往返触发回环。运行时消耗展示由 ↻ 刷新更新。
+    },
+    { enabled: ready },
+  );
+
+  // early return 必须在所有 hook（useApi/useMemo/useAutoSave）之后，否则 hook 顺序错乱。
+  if (budgetsRes.loading && !data) return <Loading />;
+  if (budgetsRes.error)
+    return <ErrorBox message={`加载预算失败：${budgetsRes.error}`} />;
 
   return (
     <div>
       <Panel>
         <h2>预算总览（5 维全局默认）</h2>
         <div className="muted small" style={{ marginBottom: 8 }}>
-          Token 与花费两列均可填写。<code> per_*_daily </code>类维度显示的是本周期消耗最多的代表会话 / 模型，并非该维度的全量聚合（运行时按当前请求实时拦截）。
+          Token 与花费两列均可填写，修改后自动保存。 <code> per_*_daily </code>类维度显示的是本周期消耗最多的代表会话 / 模型，并非该维度的全量聚合（运行时按当前请求实时拦截）。
         </div>
         <GlobalDefaultsPanel
           limits={tokens}
@@ -182,12 +189,7 @@ export function BudgetsView() {
         </select>
       </Panel>
 
-      <div className="row" style={{ alignItems: "center", gap: 12, marginTop: 4 }}>
-        <button className="btn primary" onClick={save}>
-          保存（热生效）
-        </button>
-        <span className="muted">{saveResult}</span>
-      </div>
+      <SaveToast status={status} error={error} />
     </div>
   );
 }
