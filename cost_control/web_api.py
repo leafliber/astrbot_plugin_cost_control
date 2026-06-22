@@ -945,18 +945,21 @@ class WebApiMixin:
             from .cost import _best_match_key
 
             provider_models = self._collect_provider_models()
-            # 为每个 provider 附「实际匹配到的内置默认」(主模型经 _best_match_key
-            # 模糊匹配,与 resolve_pricing / match_pricing 同口径),供前端定价卡
-            # 提示当前生效基准——解决前端精确匹配 placeholder 与后端模糊计费脱节。
+            # 为每个 provider 附「实际匹配到的内置默认」(经 _best_match_key 模糊匹配,
+            # 与 resolve_pricing / match_pricing 同口径),供前端定价卡提示当前生效基准。
+            # 主模型优先,失败则逐个回退候选模型——解决主模型为路由名 / auto / 空时
+            # 卡片误显示"无内置匹配"(只要主模型或任一候选命中内置预设即展示)。
             for p in provider_models:
                 try:
                     candidates = p.get("candidates") or []
-                    model = p.get("model") or (candidates[0] if candidates else "")
+                    model = p.get("model") or ""
+                    tried = [model] + [c for c in candidates if c and c != model]
                     md: Any = None
-                    if model:
-                        key = _best_match_key(model, DEFAULT_PRICING)
+                    for m in tried:
+                        key = _best_match_key(m, DEFAULT_PRICING)
                         if key:
                             md = {"model": key, "entry": DEFAULT_PRICING[key]}
+                            break
                     p["matched_default"] = md
                 except Exception:
                     p["matched_default"] = None
