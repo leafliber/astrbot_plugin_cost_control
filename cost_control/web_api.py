@@ -688,13 +688,15 @@ class WebApiMixin:
     def _collect_provider_models(self) -> list[dict[str, Any]]:
         """从 ``context.get_config()`` 遍历 provider 配置，返回 provider + 候选模型列表。
 
-        每个 provider 读 ``id`` / ``type`` / ``model_config.model``（主模型）/
-        ``model_config.model_list``（候选模型数组，每项 ``model_name`` / ``enable``），
-        合并主模型 + 启用候选，按 id 去重，返回
-        ``[{id, model, type, candidates: [str, ...]}]``。
+        每个 provider 读 ``id`` / ``type`` / 顶层 ``model``（主模型，回退
+        ``model_config.model``）/ 顶层 ``model_list``（候选模型数组，回退
+        ``model_config.model_list``，每项 ``model_name`` / ``enable``），合并主模型
+        + 启用候选，按 id 去重，返回 ``[{id, model, type, candidates: [str, ...]}]``。
 
-        三级降级：读 model_config.model → 回退 ``get_all_providers().meta()`` 单 model
-        → 空列表。全步骤 try 包裹，绝不抛异常（配置结构跨 AstrBot 版本可能差异）。
+        字段位置：4.25.5 起 provider 的 ``model`` / ``model_list`` 在顶层（已核对
+        ``astrbot/core/config/default.py``），旧版在 ``model_config`` 内，故两层兼容。
+        三级降级：顶层/model_config 读 model → 回退 ``get_all_providers().meta()``
+        单 model → 空列表。全步骤 try 包裹，绝不抛异常。
         """
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -713,9 +715,15 @@ class WebApiMixin:
                         seen.add(pid)
                         ptype = str(p.get("type") or "")
                         mc = p.get("model_config") or {}
-                        main_model = str(mc.get("model") or "").strip() or None
+                        if not isinstance(mc, dict):
+                            mc = {}
+                        # 主模型:顶层 model(4.25.5+) → model_config.model(旧版)
+                        main_model = str(p.get("model") or mc.get("model") or "").strip() or None
                         candidates: list[str] = []
-                        ml = mc.get("model_list")
+                        # 候选列表:顶层 model_list → model_config.model_list
+                        ml = p.get("model_list")
+                        if ml is None:
+                            ml = mc.get("model_list")
                         if isinstance(ml, list):
                             for it in ml:
                                 if not isinstance(it, dict):
@@ -739,30 +747,42 @@ class WebApiMixin:
                         continue
         except Exception:
             pass
-        # 2. 降级：主配置读不到时，用 get_all_providers().meta() 补单 model 的 provider
-        if not out:
+        # 2. 运行时 get_all_providers().meta() 兜底:补 model 为空的 provider,并追加
+        #    配置里没有的运行时 provider(meta() 字段最可靠,解决个别 provider type
+        #    配置结构特殊导致顶层 model 读不到的情况)。
+        try:
+            all_provs = self.context.get_all_providers()
+        except Exception:
+            all_provs = []
+        by_id: dict[str, dict[str, Any]] = {e["id"]: e for e in out}
+        for p in all_provs or []:
             try:
-                all_provs = self.context.get_all_providers()
-            except Exception:
-                all_provs = []
-            for p in all_provs or []:
-                try:
-                    meta = p.meta()
-                    pid = str(getattr(meta, "id", "") or "")
-                    if not pid or pid in seen:
-                        continue
-                    seen.add(pid)
-                    model = str(getattr(meta, "model", "") or "")
-                    out.append(
-                        {
-                            "id": pid,
-                            "model": model,
-                            "type": str(getattr(meta, "type", "") or ""),
-                            "candidates": [model] if model else [],
-                        }
-                    )
-                except Exception:
+                meta = p.meta()
+                pid = str(getattr(meta, "id", "") or "").strip()
+                if not pid:
                     continue
+                model = str(getattr(meta, "model", "") or "").strip()
+                mtype = str(getattr(meta, "type", "") or "")
+                if pid in by_id:
+                    entry = by_id[pid]
+                    if not entry["model"] and model:
+                        entry["model"] = model
+                    if model and model not in entry["candidates"]:
+                        entry["candidates"].insert(0, model)
+                    if not entry["type"] and mtype:
+                        entry["type"] = mtype
+                elif pid not in seen:
+                    seen.add(pid)
+                    entry = {
+                        "id": pid,
+                        "model": model,
+                        "type": mtype,
+                        "candidates": [model] if model else [],
+                    }
+                    by_id[pid] = entry
+                    out.append(entry)
+            except Exception:
+                continue
         return out
 
     async def api_providers(self, **kwargs: Any) -> dict[str, Any]:
@@ -920,6 +940,10 @@ class WebApiMixin:
 
             pricing = self.get_pricing()
             unpriced: list[dict[str, Any]] = []
+            # provider_id → 实际运行时模型名列表（来自用量记录，与成本计算同源）。
+            # 配置里的 model / candidates 可能是路由名 / auto / 空，但运行时实际
+            # 调用的模型名能匹配内置默认——用这些名字作为 matched_default 的回退。
+            runtime_models: dict[str, list[str]] = {}
             try:
                 rows = await self.query_usage_grouped(by="provider_model")
                 for r in rows:
@@ -939,6 +963,12 @@ class WebApiMixin:
                                 "count": int(r.get("count", 0) or 0),
                             }
                         )
+                    if (
+                        provider_id
+                        and model
+                        and model not in runtime_models.setdefault(provider_id, [])
+                    ):
+                        runtime_models[provider_id].append(model)
                 unpriced.sort(key=lambda x: x["tokens"], reverse=True)
             except Exception:
                 pass  # 用量查询失败不阻断定价表展示
@@ -946,14 +976,23 @@ class WebApiMixin:
 
             provider_models = self._collect_provider_models()
             # 为每个 provider 附「实际匹配到的内置默认」(经 _best_match_key 模糊匹配,
-            # 与 resolve_pricing / match_pricing 同口径),供前端定价卡提示当前生效基准。
-            # 主模型优先,失败则逐个回退候选模型——解决主模型为路由名 / auto / 空时
-            # 卡片误显示"无内置匹配"(只要主模型或任一候选命中内置预设即展示)。
+            # 与 resolve_pricing / match_pricing 同口径),供前端定价卡提示当前生效基准，
+            # 并把命中单价作为编辑框 placeholder（用户输入即覆盖）。
+            # 依次尝试：主模型 → 候选模型 → 运行时实际模型（用量记录，与计费同源）
+            # → provider id 自身（部分 id 直接含模型名，如 minimax/MiniMax-M2.7）。
+            # 后两级解决配置 model 为路由名 / auto / 空但实际命中的模型能匹配内置默认、
+            # 卡片却误显示"无内置匹配"的问题。
             for p in provider_models:
                 try:
                     candidates = p.get("candidates") or []
                     model = p.get("model") or ""
+                    pid = p.get("id") or ""
                     tried = [model] + [c for c in candidates if c and c != model]
+                    for m in runtime_models.get(pid, []):
+                        if m and m not in tried:
+                            tried.append(m)
+                    if pid and pid not in tried:
+                        tried.append(pid)
                     md: Any = None
                     for m in tried:
                         key = _best_match_key(m, DEFAULT_PRICING)
