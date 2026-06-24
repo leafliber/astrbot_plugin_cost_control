@@ -315,6 +315,9 @@ class CacheDiagMixin:
         ``cache_read`` 显式为 0（provider 报告零命中）时按 0 参与计算；仅当其缺失
         （None）时才回退到 ``token_input_cached``（TokenUsage 的缓存 token 数）。
 
+        告警需同时满足：``cache_hit_rate_alert_enabled`` 开关开启 + 阈值 > 0 +
+        命中率低于阈值。开关默认关闭，避免误刷屏。
+
         Returns:
             ``(rate, should_alert)``。``rate`` 为百分比；无数据时 -1 且不告警。
         """
@@ -328,6 +331,9 @@ class CacheDiagMixin:
                 record.get("cache_creation"),
             )
             if rate < 0:
+                return rate, False
+            cfg = self._cache_diag_flags()
+            if not bool(cfg.get("cache_hit_rate_alert_enabled", False)):
                 return rate, False
             threshold = self._hit_rate_threshold()
             return rate, threshold > 0 and rate < threshold

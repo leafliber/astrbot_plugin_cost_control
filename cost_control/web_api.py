@@ -89,6 +89,12 @@ class WebApiMixin:
             prefix = f"/{PLUGIN_NAME}"
             routes: list[tuple[str, Any, list[str], str]] = [
                 (f"{prefix}/overview", self.api_overview, ["GET"], "总览聚合报表"),
+                (
+                    f"{prefix}/alerts",
+                    self.api_alerts,
+                    ["GET"],
+                    "总览告警列表（缓存率/未定价/预算等）",
+                ),
                 (f"{prefix}/report", self.api_report, ["GET"], "综合报表（同 overview）"),
                 (f"{prefix}/compare", self.api_compare, ["GET"], "环比对比（当前 vs 上一窗口）"),
                 (f"{prefix}/timeline", self.api_timeline, ["GET"], "时序趋势（按天/小时分桶）"),
@@ -230,6 +236,184 @@ class WebApiMixin:
             return self._ok(report)
         except Exception as e:
             return self._err(str(e))
+
+    async def api_alerts(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /alerts``：总览页顶部告警列表（黄色提醒，引导用户处理）。
+
+        Query：``window``（daily|weekly|monthly，默认 daily）—— 仅影响缓存率
+        统计的窗口；未定价 / 预算告警基于全量历史与当前配置，不受窗口影响。
+
+        每条告警：``{level, code, title, detail, tab}``。``tab`` 为前端目标页
+        （cache|pricing|budgets），用于点击跳转。任一子检查异常降级跳过，绝不
+        阻断其它告警。
+        """
+        alerts: list[dict[str, Any]] = []
+        window = self._param("window", "daily") or "daily"
+
+        # 1. 缓存命中率偏低（与 /cache 同口径，但独立查询避免互相依赖）
+        try:
+            from datetime import UTC, datetime
+
+            from .analytics import report_window_start
+            from .cache_diag import hit_rate
+
+            now = datetime.now(UTC)
+            tz = resolve_tz(self.context)
+            refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
+            start = report_window_start(window, now, tz, refresh)
+            sups = await self.query_supplements(start=start, limit=5000)
+            rates: list[float] = []
+            for s in sups:
+                cache_read = getattr(s, "cache_read", None)
+                if cache_read is None:
+                    cache_read = getattr(s, "token_input_cached", None)
+                rate = hit_rate(
+                    cache_read,
+                    getattr(s, "token_input_other", None),
+                    getattr(s, "cache_creation", None),
+                )
+                if rate >= 0:
+                    rates.append(rate)
+            samples = len(rates)
+            avg = round(sum(rates) / samples, 1) if samples else 0.0
+            # 样本>=5 且命中率<30% 才告警，避免小样本噪音
+            if samples >= 5 and avg < 30:
+                alerts.append(
+                    {
+                        "level": "warn",
+                        "code": "low_cache_rate",
+                        "title": "缓存命中率偏低",
+                        "detail": (
+                            f"当前窗口平均缓存命中率 {avg}%（{samples} 样本）。"
+                            "缓存命中单价仅为非缓存的 1/10，提升命中率可显著降低成本。"
+                            "排查 system prompt 稳定性、上下文重置、工具定义频繁变化。"
+                        ),
+                        "tab": "cache",
+                    }
+                )
+        except Exception:
+            pass
+
+        # 2. 存在未定价模型（与 /pricing 同口径）
+        try:
+            from .cost import resolve_pricing
+
+            pricing = self.get_pricing()
+            unpriced_count = 0
+            unpriced_tokens = 0
+            rows = await self.query_usage_grouped(by="provider_model")
+            for r in rows:
+                provider_id = r.get("provider_id") or ""
+                model = r.get("provider_model") or ""
+                if model and resolve_pricing(provider_id or None, model, pricing) is None:
+                    unpriced_count += 1
+                    unpriced_tokens += (
+                        int(r.get("token_input_other", 0) or 0)
+                        + int(r.get("token_input_cached", 0) or 0)
+                        + int(r.get("token_output", 0) or 0)
+                    )
+            if unpriced_count > 0:
+                alerts.append(
+                    {
+                        "level": "warn",
+                        "code": "unpriced_models",
+                        "title": "存在未定价模型",
+                        "detail": (
+                            f"检测到 {unpriced_count} 个模型未配置定价"
+                            f"（涉及 {unpriced_tokens} token 用量），其成本被计为 $0，"
+                            "导致成本统计偏低。请前往定价页为对应 provider 设置单价。"
+                        ),
+                        "tab": "pricing",
+                    }
+                )
+        except Exception:
+            pass
+
+        # 3. 预算超限 / 接近超限（复用 /budgets 的全局维度判定）
+        try:
+            from .budget import _DIM_ORDER, day_window_start, month_window_start, total_tokens
+
+            cfg = getattr(self, "cfg", None)
+            limits = self.get_budgets()
+            limits_cost = self.get_budgets_cost()
+            now = datetime.now(UTC)
+            tz = resolve_tz(self.context)
+            refresh = str(get_config(cfg, "refresh_time", "00:00"))
+            d_start = day_window_start(refresh, now, tz)
+            m_start = month_window_start(now, tz)
+            day_total = total_tokens(await self.query_usage(start=d_start))
+            month_total = total_tokens(await self.query_usage(start=m_start))
+
+            has_cost = any(float(limits_cost.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
+            if has_cost:
+                from .budget import _groups_cost
+
+                pricing = self.get_pricing()
+                day_cost = _groups_cost(
+                    await self.query_usage_grouped(by="provider_model", start=d_start), pricing
+                )
+                month_cost = _groups_cost(
+                    await self.query_usage_grouped(by="provider_model", start=m_start), pricing
+                )
+            else:
+                day_cost = month_cost = 0.0
+
+            dim_used_t = {"global_daily": day_total, "global_monthly": month_total}
+            dim_used_c = {"global_daily": day_cost, "global_monthly": month_cost}
+            dim_label = {"global_daily": "每日全局", "global_monthly": "每月全局"}
+
+            exceeded_dims: list[str] = []
+            near_dims: list[str] = []
+            for d in _DIM_ORDER:
+                lt = float(limits.get(d, 0) or 0)
+                lc = float(limits_cost.get(d, 0) or 0)
+                for metric, limit, used in (
+                    ("token", lt, dim_used_t.get(d, 0)),
+                    ("cost", lc, dim_used_c.get(d, 0)),
+                ):
+                    if limit <= 0:
+                        continue
+                    ratio = used * 100.0 / limit
+                    label = f"{dim_label.get(d, d)}·{metric}"
+                    if used >= limit:
+                        exceeded_dims.append(f"{label}（{ratio:.0f}%）")
+                    elif ratio >= 80:
+                        near_dims.append(f"{label}（{ratio:.0f}%）")
+
+            if exceeded_dims:
+                alerts.append(
+                    {
+                        "level": "warn",
+                        "code": "budget_exceeded",
+                        "title": "预算已超限",
+                        "detail": (
+                            f"以下 {len(exceeded_dims)} 项预算已超限："
+                            + "、".join(exceeded_dims[:4])
+                            + ("…" if len(exceeded_dims) > 4 else "")
+                            + "。请前往预算页调整限额或超限策略。"
+                        ),
+                        "tab": "budgets",
+                    }
+                )
+            if near_dims:
+                alerts.append(
+                    {
+                        "level": "warn",
+                        "code": "budget_near_limit",
+                        "title": "预算接近超限",
+                        "detail": (
+                            f"以下 {len(near_dims)} 项预算使用率超过 80%："
+                            + "、".join(near_dims[:4])
+                            + ("…" if len(near_dims) > 4 else "")
+                            + "。建议提前关注用量趋势。"
+                        ),
+                        "tab": "budgets",
+                    }
+                )
+        except Exception:
+            pass
+
+        return self._ok(alerts)
 
     async def api_report(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /report``：综合报表（与 overview 等价，保留独立语义）。"""

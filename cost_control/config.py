@@ -69,6 +69,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "detect_system_prompt_change": True,
         "detect_tools_change": True,
         "detect_order_drift": True,
+        "cache_hit_rate_alert_enabled": False,
         "cache_hit_rate_alert_threshold": 0,
     },
     "alerts": {

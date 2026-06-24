@@ -84,7 +84,12 @@ export function App() {
         ) : !ready ? (
           <Loading />
         ) : tab === "overview" ? (
-          <OverviewView window={win} refreshNonce={refreshNonce} colors={colors} />
+          <OverviewView
+            window={win}
+            refreshNonce={refreshNonce}
+            colors={colors}
+            onNavigate={(t) => setTab(t)}
+          />
         ) : tab === "records" ? (
           <RecordsView />
         ) : tab === "budgets" ? (

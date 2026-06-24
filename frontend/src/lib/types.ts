@@ -35,6 +35,18 @@ export interface OverviewReport {
   top_sessions_by_cost?: TopSession[];
 }
 
+// ===== alerts =====
+// 总览页顶部黄色告警条目，引导用户跳转对应页处理
+export type AlertTab = "cache" | "pricing" | "budgets";
+
+export interface AlertItem {
+  level: "warn";
+  code: string;
+  title: string;
+  detail: string;
+  tab: AlertTab;
+}
+
 export interface TimelinePoint {
   bucket: string;
   count: number;

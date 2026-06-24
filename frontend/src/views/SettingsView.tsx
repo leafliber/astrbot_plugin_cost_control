@@ -83,11 +83,17 @@ const SECTIONS: SettingSection[] = [
         help: "历史消息顺序被打乱时标记——请求前缀与已缓存内容对不上。",
       },
       {
+        k: "cache_hit_rate_alert_enabled",
+        label: "启用命中率告警推送",
+        type: "bool",
+        help: "开启后，当本轮缓存命中率低于下方阈值时，会向当前会话推送一条告警消息。默认关闭，避免刷屏。",
+      },
+      {
         k: "cache_hit_rate_alert_threshold",
         label: "命中率告警阈值 (%)",
         type: "int",
         width: 100,
-        help: "缓存命中率低于此值时告警；0 = 不告警。",
+        help: "缓存命中率低于此值时告警；0 = 不告警。需先开启上方「启用命中率告警推送」开关。",
       },
     ],
   },

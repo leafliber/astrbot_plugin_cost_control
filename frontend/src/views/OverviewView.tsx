@@ -9,12 +9,13 @@ import {
   windowLabel,
   windowToDays,
 } from "../lib/format";
-import type { Window } from "../lib/types";
+import type { AlertTab, Window } from "../lib/types";
 import type { ChartColors } from "../hooks/useChartColors";
 import { StatCardGrid } from "../components/StatCardGrid";
 import { DeltaBadge } from "../components/DeltaBadge";
 import { Panel } from "../components/Panel";
 import { Loading, ErrorBox, Empty } from "../components/Feedback";
+import { AlertsBar } from "../components/AlertsBar";
 import { LineTrend } from "../components/charts/LineTrend";
 import { ModelCostBar } from "../components/charts/ModelCostBar";
 import { TokenStack } from "../components/charts/TokenStack";
@@ -24,10 +25,12 @@ export function OverviewView({
   window: win,
   refreshNonce,
   colors,
+  onNavigate,
 }: {
   window: Window;
   refreshNonce: number;
   colors: ChartColors;
+  onNavigate?: (tab: AlertTab) => void;
 }) {
   const days = windowToDays(win);
   const overview = useApi(() => api.getOverview(win), [win, refreshNonce]);
@@ -36,13 +39,15 @@ export function OverviewView({
     refreshNonce,
   ]);
   const compare = useApi(() => api.getCompare(win), [win, refreshNonce]);
+  const alerts = useApi(() => api.getAlerts(win), [win, refreshNonce]);
 
-  // 仅总览轮询：30s 刷新三路数据；组件卸载自动停。
+  // 仅总览轮询：30s 刷新四路数据；组件卸载自动停。
   usePolling(
     () => {
       overview.refetch();
       timeline.refetch();
       compare.refetch();
+      alerts.refetch();
     },
     30000,
     true,
@@ -100,9 +105,13 @@ export function OverviewView({
     .slice(0, 8)
     .map((s) => ({ model: shortUmo(s.umo), cost: s.cost || 0 }));
   const series = timeline.data?.series ?? [];
+  const alertItems = alerts.data || [];
 
   return (
     <div>
+      {alertItems.length > 0 && onNavigate && (
+        <AlertsBar alerts={alertItems} onNavigate={onNavigate} />
+      )}
       <StatCardGrid items={cards} />
       <div className="grid-2">
         <Panel title={`用量趋势（近 ${days} 天）`}>

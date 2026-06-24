@@ -3,6 +3,7 @@
 
 import { getBridge } from "./bridge";
 import type {
+  AlertItem,
   AttributionResponse,
   Bucket,
   BudgetResponse,
@@ -44,6 +45,7 @@ async function post<T>(endpoint: string, body?: unknown): Promise<T> {
 export const api = {
   // overview
   getOverview: (window: Window) => get<OverviewReport>("overview", { window }),
+  getAlerts: (window: Window) => get<AlertItem[]>("alerts", { window }),
   getCompare: (window: Window) => get<CompareResult | null>("compare", { window }),
   getTimeline: (
     days: number,

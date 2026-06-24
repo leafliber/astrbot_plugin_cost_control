@@ -375,6 +375,79 @@ tr:hover td {
 }
 
 /* ===== 告警 / 优化潜力 ===== */
+
+/* 总览页顶部黄色告警条 */
+.alerts-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.alert-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid rgba(240, 140, 0, 0.45);
+  border-radius: 8px;
+  background: rgba(240, 140, 0, 0.08);
+}
+
+.alert-icon {
+  color: var(--warn);
+  font-size: 16px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+
+.alert-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.alert-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--warn);
+}
+
+.alert-detail {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+}
+
+.alert-link {
+  flex-shrink: 0;
+  align-self: center;
+  background: transparent;
+  border: 1px solid rgba(240, 140, 0, 0.5);
+  color: var(--warn);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.alert-link:hover {
+  background: rgba(240, 140, 0, 0.12);
+  border-color: var(--warn);
+}
+
+@media (max-width: 640px) {
+  .alert-item {
+    flex-wrap: wrap;
+  }
+  .alert-link {
+    align-self: flex-start;
+  }
+}
+
 .alert-panel {
   border-color: rgba(224, 49, 49, 0.35);
   background: rgba(224, 49, 49, 0.04);
