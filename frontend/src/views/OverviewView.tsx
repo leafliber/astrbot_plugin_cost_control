@@ -18,6 +18,7 @@ import { Panel } from "../components/Panel";
 import { Loading, ErrorBox, Empty } from "../components/Feedback";
 import { AlertsBar } from "../components/AlertsBar";
 import { LineTrend } from "../components/charts/LineTrend";
+import { CostTrend } from "../components/charts/CostTrend";
 import { ModelCostBar } from "../components/charts/ModelCostBar";
 import { TokenStack } from "../components/charts/TokenStack";
 import { TopSessionsBar } from "../components/charts/TopSessionsBar";
@@ -106,6 +107,7 @@ export function OverviewView({
     .slice(0, 8)
     .map((s) => ({ model: shortUmo(s.umo), cost: s.cost || 0 }));
   const series = timeline.data?.series ?? [];
+  const costSeries = timeline.data?.cost_series ?? [];
   const alertItems = alerts.data || [];
 
   return (
@@ -124,6 +126,17 @@ export function OverviewView({
             <Empty text="暂无时序数据" />
           )}
         </Panel>
+        <Panel title={`成本趋势（近 ${days} 天）`}>
+          {costSeries.length ? (
+            <div className="chart-box">
+              <CostTrend data={costSeries} colors={colors} />
+            </div>
+          ) : (
+            <Empty text="暂无成本时序数据" />
+          )}
+        </Panel>
+      </div>
+      <div className="grid-2">
         <Panel title="按模型成本">
           {byModel.length ? (
             <div className="chart-box">
@@ -133,8 +146,6 @@ export function OverviewView({
             <Empty text="暂无模型成本数据" />
           )}
         </Panel>
-      </div>
-      <div className="grid-2">
         <Panel title="Top 会话（按成本）">
           {byCost.length ? (
             <div className="chart-box">
@@ -144,6 +155,8 @@ export function OverviewView({
             <Empty text="暂无会话数据" />
           )}
         </Panel>
+      </div>
+      <div className="grid-2">
         <Panel title="Top 会话（按 token）">
           {top.length ? (
             <div className="chart-box">
@@ -153,8 +166,6 @@ export function OverviewView({
             <Empty text="暂无会话数据" />
           )}
         </Panel>
-      </div>
-      <div className="grid-2">
         <Panel title="Token 构成">
           {hasTokens ? (
             <div className="chart-box">

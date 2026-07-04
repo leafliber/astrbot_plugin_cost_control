@@ -55,8 +55,14 @@ export interface TimelinePoint {
   token_output?: number;
 }
 
+export interface CostTimelinePoint {
+  bucket: string;
+  cost: number;
+}
+
 export interface TimelineResponse {
   series: TimelinePoint[];
+  cost_series?: CostTimelinePoint[];
   bucket: Bucket;
   days: number;
   coverage_note?: string;

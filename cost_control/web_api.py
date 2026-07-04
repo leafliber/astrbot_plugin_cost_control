@@ -559,9 +559,43 @@ class WebApiMixin:
                 provider=provider,
                 model=model,
             )
+
+            # 按桶计算成本趋势：拉取 (bucket, model) 粒度用量 → 逐桶按模型定价核算
+            cost_series: list[dict[str, Any]] = []
+            try:
+                from .cost import compute_row_cost_in_main
+                from .exchange_rates import get_main_currency, get_rates
+
+                pricing = self.get_pricing()
+                _mc = get_main_currency(getattr(self, "cfg", None))
+                _rt = get_rates(getattr(self, "cfg", None))
+                model_rows = await self.query_usage_timeseries_by_model(
+                    start=start,
+                    end=end,
+                    bucket=bucket,
+                    umo=umo,
+                    provider=provider,
+                    model=model,
+                )
+                # 按 bucket 聚合成本
+                bucket_cost: dict[str, float] = {}
+                for mr in model_rows:
+                    bk = str(mr.get("bucket") or "")
+                    if not bk:
+                        continue
+                    c = compute_row_cost_in_main(mr, pricing, _mc, _rt)
+                    bucket_cost[bk] = bucket_cost.get(bk, 0.0) + c
+                cost_series = [
+                    {"bucket": bk, "cost": round(v, 6)}
+                    for bk, v in sorted(bucket_cost.items())
+                ]
+            except Exception:
+                pass
+
             return self._ok(
                 {
                     "series": series,
+                    "cost_series": cost_series,
                     "bucket": bucket,
                     "days": days,
                     "coverage_note": "基于 ProviderStat 全量历史（按 UTC 分桶，展示为本地日）",
