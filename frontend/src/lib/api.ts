@@ -81,4 +81,10 @@ export const api = {
       "actions/save_config",
       body,
     ),
+  postSyncRates: () =>
+    post<{
+      exchange_rates: Record<string, number>;
+      exchange_rates_updated_at: string;
+      count: number;
+    }>("actions/sync_rates"),
 };

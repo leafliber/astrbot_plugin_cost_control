@@ -299,7 +299,11 @@ export function RecordsView() {
                   <td>{fmtNum(r.token_output)}</td>
                   <td>{fmtNum(r.cache_creation)}</td>
                   <td>{r.injection_total == null ? "-" : fmtNum(r.injection_total)}</td>
-                  <td>{fmtCost(r.cost)}</td>
+                  <td>
+                    {r.cost_original != null && r.currency_symbol
+                      ? fmtCost(r.cost_original, r.currency_symbol)
+                      : fmtCost(r.cost)}
+                  </td>
                 </tr>
               ))}
             </tbody>

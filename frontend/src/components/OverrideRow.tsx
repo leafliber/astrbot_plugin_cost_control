@@ -1,4 +1,10 @@
-import { fmtCost, fmtNum } from "../lib/format";
+import {
+  CURRENCY_OPTIONS,
+  currencyToSymbol,
+  fmtCost,
+  fmtNum,
+  getCurrencyCode,
+} from "../lib/format";
 import type {
   BudgetOverrideRow,
   FallbackProvider,
@@ -114,7 +120,7 @@ export function OverrideRow({
           />
         </label>
         <label className="ov-limit">
-          <span className="muted small">$≤</span>
+          <span className="muted small">{currencyToSymbol(row.cost_currency || getCurrencyCode())}≤</span>
           <input
             type="number"
             min="0"
@@ -124,6 +130,19 @@ export function OverrideRow({
             onChange={(e) => onChange({ cost_limit: Math.max(0, +e.target.value || 0) })}
             placeholder="0"
           />
+          <select
+            className="budget-input"
+            value={row.cost_currency || ""}
+            onChange={(e) => onChange({ cost_currency: e.target.value })}
+            title="花费货币（留空=主货币）"
+          >
+            <option value="">主货币</option>
+            {CURRENCY_OPTIONS.map((c) => (
+              <option key={c} value={c}>
+                {c} ({currencyToSymbol(c)})
+              </option>
+            ))}
+          </select>
         </label>
 
         <span className="ov-sep">→</span>
@@ -185,7 +204,7 @@ export function OverrideRow({
               ratio={row.current?.cost?.ratio || 0}
               exceeded={!!row.current?.cost?.exceeded}
               fmt={fmtCost}
-              prefix="$"
+              prefix={currencyToSymbol(row.cost_currency || getCurrencyCode())}
             />
           )}
         </div>

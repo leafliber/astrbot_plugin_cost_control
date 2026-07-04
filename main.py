@@ -97,6 +97,14 @@ class Main(
             await self.init_store()
         except Exception as e:
             logger.warning("[cost_control] 初始化存储失败: %s", e)
+        # 一次性迁移：为历史无 cost_amount/currency_symbol 的记录补算
+        try:
+            pricing = self.get_pricing()
+            n = await self.backfill_cost_amounts(pricing)
+            if n > 0:
+                logger.info("[cost_control] 已为 %d 条历史记录补算 cost_amount", n)
+        except Exception as e:
+            logger.warning("[cost_control] 历史记录补算失败（不影响运行）: %s", e)
         try:
             await self.register_cron()
         except Exception as e:

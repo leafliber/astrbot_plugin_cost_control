@@ -4,6 +4,7 @@ import { usePolling } from "../hooks/usePolling";
 import {
   fmtCost,
   fmtNum,
+  getCurrencyCode,
   shortModelName,
   shortUmo,
   windowLabel,
@@ -69,7 +70,7 @@ export function OverviewView({
     {
       label: "成本",
       value: fmtCost(r?.cost),
-      sub: `USD · ${wl}`,
+      sub: `${getCurrencyCode()} · ${wl}`,
       delta: <DeltaBadge cmp={compare.data ?? null} field="cost" />,
     },
     {

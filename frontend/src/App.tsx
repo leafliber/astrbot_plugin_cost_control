@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useBridge } from "./hooks/useBridge";
 import { useTheme } from "./hooks/useTheme";
 import { useChartColors } from "./hooks/useChartColors";
@@ -11,6 +11,8 @@ import { CacheView } from "./views/CacheView";
 import { AttributionView } from "./views/AttributionView";
 import { PricingView } from "./views/PricingView";
 import { SettingsView } from "./views/SettingsView";
+import { api } from "./lib/api";
+import { setCurrencyCode } from "./lib/format";
 import type { Window } from "./lib/types";
 
 const TABS = [
@@ -33,6 +35,18 @@ export function App() {
   const [tab, setTab] = useState<TabKey>("overview");
   const [win, setWin] = useState<Window>("weekly");
   const [refreshNonce, setRefreshNonce] = useState(0);
+
+  // 挂载后拉取 config，注入主货币代码到 format 模块（全局 fmtCost 用）
+  useEffect(() => {
+    if (!ready) return;
+    api
+      .getConfig()
+      .then((cfg) => {
+        const cur = (cfg as Record<string, unknown>)?.currency_symbol;
+        if (typeof cur === "string" && cur) setCurrencyCode(cur);
+      })
+      .catch(() => {});
+  }, [ready]);
 
   const refresh = () => setRefreshNonce((n) => n + 1);
   const bridgeInfo = ctx

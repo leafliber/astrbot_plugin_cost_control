@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
-import { fmtNum } from "../lib/format";
+import { fmtNum, CURRENCY_OPTIONS, currencyToSymbol } from "../lib/format";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
 import { SaveToast } from "../components/SaveToast";
 import { Loading, ErrorBox } from "../components/Feedback";
 
-type FieldType = "bool" | "str" | "int" | "csv";
+type FieldType = "bool" | "str" | "int" | "csv" | "select";
 
 interface SettingField {
   k: string;
@@ -17,6 +17,8 @@ interface SettingField {
   help?: string;
   /** input 宽度（px），仅对 int/str 生效；csv 默认撑满。 */
   width?: number;
+  /** select 类型的可选值 */
+  options?: string[];
 }
 
 interface SettingSection {
@@ -50,6 +52,13 @@ const SECTIONS: SettingSection[] = [
         label: "生效平台",
         type: "csv",
         help: "限定插件只处理这些平台的请求（如 aiocqhttp、telegram_official、lark）；留空 = 对所有平台生效。",
+      },
+      {
+        k: "currency_symbol",
+        label: "主货币",
+        type: "select",
+        options: CURRENCY_OPTIONS,
+        help: "所有费用最终换算并以此货币结算和显示。内置定价以 USD 计价，切换后自动按汇率交叉换算。",
       },
     ],
   },
@@ -212,6 +221,8 @@ export function SettingsView() {
   const [edit, setEdit] = useState<Record<string, unknown>>({});
   const [ready, setReady] = useState(false);
   const [actionResult, setActionResult] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
 
   useEffect(() => {
     if (res.data) {
@@ -273,6 +284,30 @@ export function SettingsView() {
     }
   };
 
+  const syncRates = async () => {
+    setSyncing(true);
+    setSyncMsg("正在同步…");
+    try {
+      const r = await api.postSyncRates();
+      setSyncMsg(
+        `已同步 ${r.count} 种货币汇率（${r.exchange_rates_updated_at || "?"}）`,
+      );
+      // 刷新本地 config 副本（exchange_rates 已在后端持久化）
+      const cfg = await api.getConfig();
+      setEdit(JSON.parse(JSON.stringify(cfg)));
+    } catch (e) {
+      setSyncMsg(`同步失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const exchangeRates = (edit.exchange_rates || {}) as Record<string, number>;
+  const updatedAt = String(edit.exchange_rates_updated_at || "");
+  const sortedRates = Object.entries(exchangeRates)
+    .filter(([k]) => k !== "USD")
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
   return (
     <div className="settings-view">
       <div className="settings-hint">
@@ -320,6 +355,28 @@ export function SettingsView() {
                   </div>
                 );
               }
+              if (f.type === "select") {
+                return (
+                  <div className="set-field" key={f.k}>
+                    <div className="set-field-text">
+                      <div className="set-field-label">{f.label}</div>
+                      {f.help && <div className="set-field-help">{f.help}</div>}
+                    </div>
+                    <select
+                      className="budget-input set-field-control"
+                      value={String(v || "")}
+                      onChange={(e) => setField(sec.key, f.k, "select", e.target.value)}
+                      style={{ width: f.width ?? 140 }}
+                    >
+                      {(f.options || []).map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt} ({currencyToSymbol(opt)})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              }
               return (
                 <div className="set-field" key={f.k}>
                   <div className="set-field-text">
@@ -350,6 +407,38 @@ export function SettingsView() {
         <div className="muted" style={{ marginTop: 8 }}>
           {actionResult}
         </div>
+      </Panel>
+
+      <Panel>
+        <h2>汇率同步</h2>
+        <p className="section-desc">
+          点击「立即同步」从免费 API（open.er-api.com）刷新最新汇率。同步后所有费用将按新汇率换算到主货币。无网时使用内置静态汇率兜底。
+        </p>
+        <div className="row">
+          <Button onClick={syncRates} disabled={syncing}>
+            {syncing ? "同步中…" : "立即同步汇率"}
+          </Button>
+          {updatedAt && (
+            <span className="muted" style={{ alignSelf: "center" }}>
+              上次同步：{updatedAt}
+            </span>
+          )}
+        </div>
+        {syncMsg && (
+          <div className="muted" style={{ marginTop: 8 }}>
+            {syncMsg}
+          </div>
+        )}
+        {sortedRates.length > 0 && (
+          <div className="rate-grid" style={{ marginTop: 12 }}>
+            {sortedRates.map(([code, rate]) => (
+              <div key={code} className="rate-item">
+                <span className="rate-code">{code}</span>
+                <span className="rate-value">{rate.toFixed(4)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </Panel>
 
       <SaveToast status={status} error={error} />

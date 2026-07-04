@@ -142,8 +142,10 @@ class SupplementMixin:
         Returns:
             包含 umo / provider_id / provider_model / token 三类 /
             cache_creation / cache_read / raw_usage / response_id / created_at
-            的补充记录 dict。
+            / cost_amount / currency_symbol 的补充记录 dict。
         """
+        from .cost import compute_cost_with_currency
+
         usage = getattr(resp, "usage", None)
         token_input_other = int(getattr(usage, "input_other", 0) or 0)
         token_input_cached = int(getattr(usage, "input_cached", 0) or 0)
@@ -159,6 +161,20 @@ class SupplementMixin:
         user_id = _safe_sender_id(event)
         request_id = _read_request_id(event)
 
+        # 固化原始货币成本金额与符号（展示时按当前汇率换算到主货币）。
+        usage_dict = {
+            "token_input_other": token_input_other,
+            "token_input_cached": token_input_cached,
+            "token_output": token_output,
+            "cache_creation": cache_creation,
+        }
+        try:
+            raw_cost, cur = compute_cost_with_currency(
+                usage_dict, provider_id, provider_model, self.get_pricing()
+            )
+        except Exception:
+            raw_cost, cur = 0.0, "USD"
+
         return {
             "umo": umo,
             "provider_id": provider_id or "",
@@ -173,6 +189,8 @@ class SupplementMixin:
             "response_id": response_id,
             "request_id": request_id,
             "user_id": user_id,
+            "cost_amount": round(raw_cost, 6),
+            "currency_symbol": cur,
             "created_at": datetime.now(UTC),
         }
 

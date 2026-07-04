@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from .budget import day_window_start, resolve_tz
 from .cache_diag import hit_rate
 from .config import get_config, get_pricing
-from .cost import compute_cost_value, compute_row_cost
+from .cost import compute_cost_in_main, compute_cost_value, compute_row_cost, compute_row_cost_in_main
 
 
 def report_window_start(
@@ -87,9 +87,21 @@ def _row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
     return compute_row_cost(row, pricing)
 
 
+def _row_cost_in_main(
+    row: dict[str, Any],
+    pricing: dict[str, Any],
+    main_cur: str,
+    rates: dict[str, float],
+) -> float:
+    """按 (provider_id, model) 解析定价算单行成本并换算到主货币（纯函数辅助）。"""
+    return compute_row_cost_in_main(row, pricing, main_cur, rates)
+
+
 def _aggregate_supplements(
     sups: list[Any],
     pricing: dict[str, Any] | None = None,
+    main_cur: str = "$",
+    rates: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """从补充记录列表聚合缓存命中率与归因注入（纯函数）。
 
@@ -98,15 +110,18 @@ def _aggregate_supplements(
             ``cache_creation`` / ``token_input_cached`` / ``token_input_other`` /
             ``injection_total`` / ``umo`` / token 三类属性）。
         pricing: 模型单价表，非空时按模型算每条成本并按会话累加到
-            ``by_session[*].cost``（未定价为 0.0）。
+            ``by_session[*].cost``（未定价为 0.0）。成本换算到 ``main_cur``。
+        main_cur: 主货币代码。
+        rates: 生效汇率表。
 
     Returns:
         ``{"cache_hit_rate": float, "cache_samples": int, "avg_injection": float,
         "injection_samples": int, "by_session": [...]}``。无样本时各率 / 均值为 0。
     """
-    rates: list[float] = []
+    cache_rates: list[float] = []
     injections: list[int] = []
     sessions: dict[str, dict[str, Any]] = {}
+    _rates = rates or {}
     for s in sups or []:
         cache_read = getattr(s, "cache_read", None)
         if cache_read is None:
@@ -117,7 +132,7 @@ def _aggregate_supplements(
             getattr(s, "cache_creation", None),
         )
         if rate >= 0:
-            rates.append(rate)
+            cache_rates.append(rate)
         inj = getattr(s, "injection_total", None)
         if inj is not None:
             try:
@@ -132,7 +147,7 @@ def _aggregate_supplements(
         bucket["count"] += 1
         bucket["tokens"] += token_input_other + token_input_cached + token_output
         if pricing is not None:
-            bucket["cost"] += compute_cost_value(
+            bucket["cost"] += compute_cost_in_main(
                 {
                     "token_input_other": token_input_other,
                     "token_input_cached": token_input_cached,
@@ -142,6 +157,8 @@ def _aggregate_supplements(
                 getattr(s, "provider_id", None) or None,
                 getattr(s, "provider_model", None),
                 pricing,
+                main_cur,
+                _rates,
             )
     by_session: list[dict[str, Any]] = [
         {
@@ -153,8 +170,8 @@ def _aggregate_supplements(
         for umo, v in sorted(sessions.items(), key=lambda kv: kv[1]["tokens"], reverse=True)
     ]
     return {
-        "cache_hit_rate": round(sum(rates) / len(rates), 1) if rates else 0.0,
-        "cache_samples": len(rates),
+        "cache_hit_rate": round(sum(cache_rates) / len(cache_rates), 1) if cache_rates else 0.0,
+        "cache_samples": len(cache_rates),
         "avg_injection": round(sum(injections) / len(injections)) if injections else 0,
         "injection_samples": len(injections),
         "by_session": by_session,
@@ -192,6 +209,10 @@ class AnalyticsMixin:
         refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
         start = report_window_start(window, now, tz, refresh)
         pricing = get_pricing(getattr(self, "cfg", None))
+        from .config import get_currency_symbol, get_rates
+
+        main_cur = get_currency_symbol(getattr(self, "cfg", None))
+        rates = get_rates(getattr(self, "cfg", None))
 
         empty: dict[str, Any] = {
             "window": window,
@@ -225,13 +246,13 @@ class AnalyticsMixin:
                     + int(r.get("token_output", 0) or 0)
                 )
                 m["tokens"] += toks
-                m["cost"] += _row_cost(r, pricing)
+                m["cost"] += _row_cost_in_main(r, pricing, main_cur, rates)
             cost_by_model = [{**m, "cost": round(float(m["cost"]), 6)} for m in model_agg.values()]
             cost_by_model.sort(key=lambda m: m["cost"], reverse=True)
             total_cost = round(sum(m["cost"] for m in cost_by_model), 6)
 
             sups = await self.query_supplements(start=start, limit=5000)
-            agg = _aggregate_supplements(sups, pricing)
+            agg = _aggregate_supplements(sups, pricing, main_cur, rates)
 
             return {
                 "window": window,

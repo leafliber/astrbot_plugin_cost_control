@@ -23,12 +23,20 @@ import os
 from typing import Any
 
 from .default_pricing import DEFAULT_PRICING
+from .exchange_rates import DEFAULT_RATES
 
 # 配置默认值。键名与 ``_conf_schema.json`` 的顶层项一一对应。
 # object 类型的配置项用嵌套 dict 表示默认值。
 CONFIG_DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "platforms": [],
+    # 主货币代码（同时也是显示符号），默认美元。
+    "currency_symbol": "$",
+    # 各货币对 USD 汇率（1 USD = rate 单位货币X）。首次取内置静态表，
+    # 用户可在设置页「立即同步」刷新。空对象时回退 DEFAULT_RATES。
+    "exchange_rates": dict(DEFAULT_RATES),
+    # 汇率最近同步时间（ISO），空=未同步过（用静态表）。
+    "exchange_rates_updated_at": "",
     # 5 维全局默认预算（int token 上限）。
     "budgets": {
         "per_session_daily": 0,
@@ -45,6 +53,8 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "global_daily": 0.0,
         "global_monthly": 0.0,
     },
+    # 5 维全局默认花费预算的货币代码（dim -> 代码，空=主货币）。
+    "budgets_cost_currency": {},
     "pricing": {},  # 用户自定义定价，key=provider_id，value 按 mode（见 get_pricing）
     # 局部阈值（每条规则挂自己的 on_exceeded；优先级高于全局 5 维）。
     # 规则对象形如：
@@ -141,12 +151,15 @@ def normalize_budget_override(raw: Any) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         fallback_token_limit = 0
     enabled = bool(raw.get("enabled", True))
+    # 花费限额的货币代码（空=主货币）。
+    cost_currency = str(raw.get("cost_currency", "") or "").strip().upper()
     return {
         "enabled": enabled,
         "target_type": target_type,
         "target_value": target_value,
         "token_limit": token_limit,
         "cost_limit": cost_limit,
+        "cost_currency": cost_currency,
         "on_exceeded": on_exceeded,
         "stop_message": stop_message,
         "fallback_provider_ids": pids,
@@ -246,6 +259,41 @@ def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
     return {"defaults": defaults, "user": user}
 
 
+def get_currency_symbol(config: dict[str, Any] | None) -> str:
+    """返回主货币代码（默认 ``"USD"``）。
+
+    兼容历史 ``"$"`` 值——自动归一化为 ``"USD"``。
+    """
+    raw = get_config(config, "currency_symbol", "USD")
+    cur = str(raw or "USD").strip().upper()
+    # 兼容历史 "$" / "＄"
+    if cur in ("$", "＄", "USD"):
+        return "USD"
+    return cur
+
+
+def get_budgets_cost_currency(config: dict[str, Any] | None) -> dict[str, str]:
+    """返回 5 维花费限额的货币代码（dim -> 代码，空=主货币）。"""
+    raw = get_config(config, "budgets_cost_currency", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v or "").strip().upper() for k, v in raw.items()}
+
+
+def get_rates(config: dict[str, Any] | None) -> dict[str, float]:
+    """返回生效汇率表（合并 config 与 DEFAULT_RATES，config 优先）。"""
+    from .exchange_rates import get_rates as _get_rates
+
+    return _get_rates(config)
+
+
+def get_rate_updated_at(config: dict[str, Any] | None) -> str:
+    """返回汇率最近同步时间（ISO，空=未同步过）。"""
+    from .exchange_rates import get_rate_updated_at as _get_at
+
+    return _get_at(config)
+
+
 def _normalize_user_entry(entry: Any) -> dict[str, Any] | None:
     """规范化一条用户定价 entry（key=provider_id 的 value）。非法返回 ``None``。
 
@@ -268,9 +316,11 @@ def _normalize_user_entry(entry: Any) -> dict[str, Any] | None:
             out["cache_creation"] = None
         else:
             out["cache_creation"] = _to_float_or_zero(cc)
+        out["currency"] = str(entry.get("currency", "USD") or "USD").strip().upper() or "USD"
         return out
     # per_turn / per_request
-    return {"mode": mode, "price": _to_float_or_zero(entry.get("price"))}
+    cur = str(entry.get("currency", "USD") or "USD").strip().upper() or "USD"
+    return {"mode": mode, "price": _to_float_or_zero(entry.get("price")), "currency": cur}
 
 
 def _to_float_or_zero(v: Any) -> float:

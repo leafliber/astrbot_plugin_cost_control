@@ -1,5 +1,5 @@
 import { ProgressBar } from "./ProgressBar";
-import { fmtCost, fmtNum } from "../lib/format";
+import { CURRENCY_OPTIONS, currencyToSymbol, fmtCost, fmtNum } from "../lib/format";
 import type { BudgetDimension } from "../lib/types";
 
 export interface DimMeta {
@@ -20,15 +20,19 @@ const DEFAULT_DIMS: DimMeta[] = [
 export function GlobalDefaultsPanel({
   limits,
   limitsCost,
+  budgetsCostCurrency,
   dimensions,
   onChangeLimit,
   onChangeLimitCost,
+  onChangeCostCurrency,
 }: {
   limits: Record<string, number>;
   limitsCost: Record<string, number>;
+  budgetsCostCurrency: Record<string, string>;
   dimensions: Record<string, BudgetDimension>;
   onChangeLimit: (key: string, raw: string) => void;
   onChangeLimitCost: (key: string, raw: string) => void;
+  onChangeCostCurrency: (key: string, raw: string) => void;
 }) {
   return (
     <table className="budget-table">
@@ -74,6 +78,9 @@ export function GlobalDefaultsPanel({
               </td>
               <td>
                 <div className="budget-cell">
+                  <span className="muted small">
+                    {currencyToSymbol(budgetsCostCurrency[d.key] || "")}
+                  </span>
                   <input
                     type="number"
                     min="0"
@@ -83,8 +90,23 @@ export function GlobalDefaultsPanel({
                     onChange={(e) => onChangeLimitCost(d.key, e.target.value)}
                     style={{ width: 110 }}
                   />
+                  <select
+                    className="budget-input"
+                    value={budgetsCostCurrency[d.key] || ""}
+                    onChange={(e) => onChangeCostCurrency(d.key, e.target.value)}
+                    title="花费货币（留空=主货币）"
+                    style={{ width: 96 }}
+                  >
+                    <option value="">主货币</option>
+                    {CURRENCY_OPTIONS.map((c) => (
+                      <option key={c} value={c}>
+                        {c} ({currencyToSymbol(c)})
+                      </option>
+                    ))}
+                  </select>
                   <div className="muted small budget-cell-used">
-                    {fmtCost(c.used)} / {fmtCost(limitsCost[d.key] || 0)}
+                    {fmtCost(c.used, budgetsCostCurrency[d.key] || "")} /{" "}
+                    {fmtCost(limitsCost[d.key] || 0, budgetsCostCurrency[d.key] || "")}
                   </div>
                   {c.limit > 0 ? (
                     <ProgressBar ratio={c.ratio}>{c.ratio || 0}%</ProgressBar>

@@ -196,6 +196,12 @@ def compute_cost_value(
 
     Returns:
         USD 成本（float）。未匹配定价 / per_request 单条时返回 0.0。
+
+    .. note::
+
+        本函数返回的是**原始计费货币金额**（当 entry 指定了 ``currency`` 时，
+        实际是该货币金额而非 USD，但历史调用方均按 USD 处理）。新代码应优先使用
+        :func:`compute_cost_with_currency` 获取金额 + 货币代码，再按需换算。
     """
     rule = resolve_pricing(provider_id, model, pricing)
     if rule is None:
@@ -207,6 +213,72 @@ def compute_cost_value(
         return float(rule.get("price", 0.0) or 0.0)
     # per_request：单条无法独立计费，聚合在调用方处理
     return 0.0
+
+
+def compute_cost_with_currency(
+    usage: dict[str, Any],
+    provider_id: str | None,
+    model: str | None,
+    pricing: dict[str, Any],
+) -> tuple[float, str]:
+    """按生效定价把单条 usage 换算为**原始计费货币**成本，返回 (金额, 货币代码)（纯函数）。
+
+    与 :func:`compute_cost_value` 的区别：返回值附带定价规则的 ``currency`` 字段
+    （默认 ``"USD"``），便于调用方按汇率换算到主货币。
+
+    Args:
+        usage: 聚合用量 dict。
+        provider_id: Provider ID（用户定价匹配）。
+        model: 模型名（默认表匹配）。
+        pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。
+
+    Returns:
+        ``(原始货币金额, 货币代码)``。未匹配定价返回 ``(0.0, "USD")``。
+        per_request 单条返回 ``(0.0, 货币代码)``（聚合在调用方处理）。
+    """
+    rule = resolve_pricing(provider_id, model, pricing)
+    if rule is None:
+        return 0.0, "USD"
+    cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
+    mode = rule.get("mode", "per_token")
+    if mode == "per_token":
+        return _cost_per_token(usage, rule), cur
+    if mode == "per_turn":
+        return float(rule.get("price", 0.0) or 0.0), cur
+    # per_request：单条无法独立计费
+    return 0.0, cur
+
+
+def compute_cost_in_main(
+    usage: dict[str, Any],
+    provider_id: str | None,
+    model: str | None,
+    pricing: dict[str, Any],
+    main_currency: str,
+    rates: dict[str, float],
+) -> float:
+    """按生效定价算成本并换算到主货币（纯函数）。
+
+    先取原始计费货币金额（:func:`compute_cost_with_currency`），再按汇率换算到
+    ``main_currency``。未匹配定价返回 0.0。
+
+    Args:
+        usage: 聚合用量 dict。
+        provider_id: Provider ID（用户定价匹配）。
+        model: 模型名（默认表匹配）。
+        pricing: :func:`get_pricing` 返回的结构。
+        main_currency: 主货币代码。
+        rates: 生效汇率表。
+
+    Returns:
+        主货币成本（float，四舍五入 6 位）。
+    """
+    from .exchange_rates import convert
+
+    raw_cost, cur = compute_cost_with_currency(usage, provider_id, model, pricing)
+    if raw_cost <= 0:
+        return 0.0
+    return round(convert(raw_cost, cur, main_currency, rates), 6)
 
 
 def compute_row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
@@ -233,6 +305,36 @@ def compute_row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
         return 0.0
 
 
+def compute_row_cost_in_main(
+    row: dict[str, Any],
+    pricing: dict[str, Any],
+    main_currency: str,
+    rates: dict[str, float],
+) -> float:
+    """算单条聚合行的成本并换算到主货币（纯函数）。
+
+    与 :func:`compute_row_cost` 同，但先取原始计费货币金额，再按汇率换算到
+    ``main_currency``。
+    """
+    from .exchange_rates import convert
+
+    try:
+        provider_id = row.get("provider_id") or None
+        model = row.get("provider_model") or row.get("key")
+        rule = resolve_pricing(provider_id, model, pricing)
+        if rule is None:
+            return 0.0
+        cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
+        mode = rule.get("mode", "per_token")
+        if mode == "per_token":
+            raw = _cost_per_token(row, rule)
+        else:
+            raw = int(row.get("count", 0) or 0) * float(rule.get("price", 0.0) or 0.0)
+        return round(convert(raw, cur, main_currency, rates), 6)
+    except Exception:
+        return 0.0
+
+
 def compute_cost_grouped(
     rows: list[dict[str, Any]],
     pricing: dict[str, Any],
@@ -248,12 +350,40 @@ def compute_cost_grouped(
     return round(total, 6)
 
 
+def compute_cost_grouped_in_main(
+    rows: list[dict[str, Any]],
+    pricing: dict[str, Any],
+    main_currency: str,
+    rates: dict[str, float],
+) -> float:
+    """对聚合行求总成本并换算到主货币（纯函数）。
+
+    等于各行 :func:`compute_row_cost_in_main` 之和（四舍五入 6 位）。
+    """
+    total = 0.0
+    for r in rows or []:
+        total += compute_row_cost_in_main(r, pricing, main_currency, rates)
+    return round(total, 6)
+
+
 class CostMixin:
     """按生效定价计算 USD 成本的 Mixin。"""
 
     def get_pricing(self) -> dict[str, Any]:
         """返回当前生效的定价结构（``{"defaults", "user"}``，见 :func:`get_pricing`）。"""
         return get_pricing(getattr(self, "cfg", None))
+
+    def get_main_currency(self) -> str:
+        """返回当前主货币代码（默认 ``"$"``）。"""
+        from .config import get_currency_symbol
+
+        return get_currency_symbol(getattr(self, "cfg", None))
+
+    def get_rates(self) -> dict[str, float]:
+        """返回当前生效汇率表（合并 config 与 DEFAULT_RATES）。"""
+        from .config import get_rates
+
+        return get_rates(getattr(self, "cfg", None))
 
     async def compute_cost(
         self,

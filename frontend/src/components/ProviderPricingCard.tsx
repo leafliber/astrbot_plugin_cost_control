@@ -1,8 +1,18 @@
 import { Segmented } from "./Segmented";
-import type { MatchedDefault, PriceEntry, PricingMode, UserPricingEntry } from "../lib/types";
+import type {
+  MatchedDefault,
+  PerRequestEntry,
+  PerTokenEntry,
+  PerTurnEntry,
+  PriceEntry,
+  PricingMode,
+  UserPricingEntry,
+} from "../lib/types";
+import { CURRENCY_OPTIONS, currencyToSymbol } from "../lib/format";
 
 // 编辑中的临时态：mode + 该 mode 下所有可能字段（字符串形式便于空值处理）。
 // collect 时按 mode 只取相关字段、空值不写入。
+// currency: "" = USD（内部定价 USD 基准）；其它代码表示该 provider 以该货币计价，结算时换算到主货币。
 export interface DraftEntry {
   mode: PricingMode;
   input: string;
@@ -10,6 +20,7 @@ export interface DraftEntry {
   output: string;
   cache_creation: string;
   price: string;
+  currency: string;
 }
 
 const TOKEN_FIELDS: { key: keyof DraftEntry; label: string }[] = [
@@ -27,6 +38,7 @@ export function entryToDraft(entry?: UserPricingEntry): DraftEntry {
     output: "",
     cache_creation: "",
     price: "",
+    currency: entry?.currency ?? "",
   };
   if (!entry) return d;
   if (entry.mode === "per_token") {
@@ -54,7 +66,7 @@ export function isDraftEmpty(d: DraftEntry): boolean {
 export function draftToEntry(d: DraftEntry): UserPricingEntry | null {
   if (isDraftEmpty(d)) return null;
   if (d.mode === "per_token") {
-    const e: import("../lib/types").PerTokenEntry = {
+    const e: PerTokenEntry = {
       mode: "per_token",
       input: 0,
       input_cached: 0,
@@ -76,12 +88,19 @@ export function draftToEntry(d: DraftEntry): UserPricingEntry | null {
     assign("input_cached", d.input_cached);
     assign("output", d.output);
     assign("cache_creation", d.cache_creation);
-    return any ? e : null;
+    if (!any) return null;
+    // 空串 / "USD" = USD 基准，省略字段由后端兜底为 USD
+    if (d.currency && d.currency !== "USD") e.currency = d.currency;
+    return e;
   }
   const raw = d.price.trim();
   const n = parseFloat(raw);
   if (Number.isNaN(n) || n < 0) throw new Error("单价非法数值");
-  return { mode: d.mode, price: n };
+  const pe: PerTurnEntry | PerRequestEntry = { mode: d.mode, price: n } as
+    | PerTurnEntry
+    | PerRequestEntry;
+  if (d.currency && d.currency !== "USD") pe.currency = d.currency;
+  return pe;
 }
 
 const MODE_OPTIONS: { value: PricingMode; label: string }[] = [
@@ -90,11 +109,17 @@ const MODE_OPTIONS: { value: PricingMode; label: string }[] = [
   { value: "per_request", label: "按请求次数" },
 ];
 
-const MODE_HINT: Record<PricingMode, string> = {
-  per_token: "USD / 百万 token。留空字段 = 用内置默认价。输入即覆盖默认。",
-  per_turn: "USD / 次。每次 LLM 调用（含 function-calling 每一步）固定费用。",
-  per_request: "USD / 次。每次用户请求固定费用（一次请求含多步调用只计一次）。",
-};
+// 按当前选中货币生成计费提示（替换基准 "USD"）。
+function modeHint(mode: PricingMode, code: string, symbol: string): string {
+  const unit = `${symbol} (${code})`;
+  if (mode === "per_token") {
+    return `${unit} / 百万 token。留空字段 = 用内置默认价。输入即覆盖默认。`;
+  }
+  if (mode === "per_turn") {
+    return `${unit} / 次。每次 LLM 调用（含 function-calling 每一步）固定费用。`;
+  }
+  return `${unit} / 次。每次用户请求固定费用（一次请求含多步调用只计一次）。`;
+}
 
 export function ProviderPricingCard({
   providerId,
@@ -138,6 +163,10 @@ export function ProviderPricingCard({
     }
   };
 
+  // 空串 = USD（内部定价基准）。该 provider 以此货币计价，结算时换算到主货币。
+  const curCode = draft.currency || "USD";
+  const curSym = currencyToSymbol(curCode);
+
   return (
     <div className="pricing-card">
       <div className="pricing-card-head">
@@ -153,14 +182,34 @@ export function ProviderPricingCard({
             <span className="pricing-match is-missing">无内置匹配</span>
           )}
         </div>
-        <button
-          type="button"
-          className="pricing-clear"
-          onClick={onClear}
-          title="清除该 Provider 定价（回退默认）"
-        >
-          清除
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <label
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            title="该 Provider 计价使用的货币，结算时按汇率换算到主货币"
+          >
+            <span className="muted small">计价货币</span>
+            <select
+              className="budget-input"
+              value={draft.currency}
+              onChange={(e) => onChange({ currency: e.target.value } as Partial<DraftEntry>)}
+            >
+              <option value="">USD（默认）</option>
+              {CURRENCY_OPTIONS.filter((c) => c !== "USD").map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="pricing-clear"
+            onClick={onClear}
+            title="清除该 Provider 定价（回退默认）"
+          >
+            清除
+          </button>
+        </div>
       </div>
 
       {candidates.length > 0 && (
@@ -176,7 +225,7 @@ export function ProviderPricingCard({
       <div className="pricing-mode-row">
         <Segmented options={MODE_OPTIONS} value={draft.mode} onChange={setMode} variant="weak" />
       </div>
-      <div className="muted small pricing-mode-hint">{MODE_HINT[draft.mode]}</div>
+      <div className="muted small pricing-mode-hint">{modeHint(draft.mode, curCode, curSym)}</div>
 
       <div className={`pricing-fields pf-${draft.mode}`}>
         {draft.mode === "per_token" ? (
@@ -197,7 +246,7 @@ export function ProviderPricingCard({
         ) : (
           <label className="pricing-field">
             <span className="muted small">
-              {draft.mode === "per_turn" ? "USD / 每轮" : "USD / 每次请求"}
+              {curSym} / {draft.mode === "per_turn" ? "每轮" : "每次请求"}
             </span>
             <input
               type="number"

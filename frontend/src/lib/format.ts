@@ -1,15 +1,52 @@
 // 从原 app.js 平移的格式化纯函数。React 默认转义文本，无需 esc。
 
+// 货币代码 → 显示符号
+export const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: "$",
+  CNY: "¥",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+  KRW: "₩",
+  INR: "₹",
+  HKD: "HK$",
+  SGD: "S$",
+  TWD: "NT$",
+  RUB: "₽",
+  BRL: "R$",
+};
+
+// 可选货币列表（下拉选项用）
+export const CURRENCY_OPTIONS = Object.keys(CURRENCY_SYMBOLS);
+
+// 模块级主货币代码，App 挂载时通过 setCurrencyCode 注入
+let _currencyCode = "USD";
+
+export function setCurrencyCode(code: string): void {
+  const c = String(code || "").trim().toUpperCase();
+  if (c) _currencyCode = c;
+}
+
+export function getCurrencyCode(): string {
+  return _currencyCode;
+}
+
+export function currencyToSymbol(code?: string | null): string {
+  const c = String(code || "").trim().toUpperCase();
+  return CURRENCY_SYMBOLS[c] || c || "$";
+}
+
 export function fmtNum(n: number | undefined | null): string {
   const v = Number(n ?? 0);
   if (!Number.isFinite(v)) return "0";
   return v.toLocaleString("zh-CN");
 }
 
-export function fmtCost(n: number | undefined | null): string {
+export function fmtCost(n: number | undefined | null, symbolOrCode?: string): string {
   const v = Number(n ?? 0);
-  if (!Number.isFinite(v)) return "$0.0000";
-  return "$" + (v < 0.01 && v > 0 ? v.toFixed(6) : v.toFixed(4));
+  const sym = symbolOrCode ? currencyToSymbol(symbolOrCode) : currencyToSymbol(_currencyCode);
+  if (!Number.isFinite(v)) return sym + "0.0000";
+  return sym + (v < 0.01 && v > 0 ? v.toFixed(6) : v.toFixed(4));
 }
 
 export function fmtCompact(n: number | undefined | null): string {

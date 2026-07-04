@@ -331,8 +331,14 @@ class BudgetMixin:
         provider_id: str | None,
         d_start: datetime,
         pricing: dict[str, Any],
+        main_cur: str = "$",
+        rates: dict[str, float] | None = None,
     ) -> float:
-        """按 override target 聚合当前周期的 ``metric`` 用量（token 数 / USD 花费）。"""
+        """按 override target 聚合当前周期的 ``metric`` 用量（token 数 / 主货币花费）。
+
+        cost 维度按各行计费货币算出原始金额后换算到 ``main_cur`` 累加（需传入
+        ``main_cur`` 与 ``rates``；缺省时回退 USD 口径）。
+        """
         tt = str(ov.get("target_type") or "")
         tv = str(ov.get("target_value") or "")
         if metric == "token":
@@ -345,15 +351,20 @@ class BudgetMixin:
                     return 0.0
                 return float(await self.query_user_token_total(tv, d_start))
             return 0.0
-        # cost
+        # cost —— 换算到主货币
+        from .cost import compute_cost_grouped_in_main
+
+        _rates = rates if rates else {}
         if tt == "umo":
-            return _groups_cost(
+            return compute_cost_grouped_in_main(
                 await self.query_usage_grouped(by="provider_model", umo=tv, start=d_start),
                 pricing,
+                main_cur,
+                _rates,
             )
         if tt == "provider":
             rows = await self.query_usage_grouped(by="provider_model", provider=tv, start=d_start)
-            return _groups_cost(rows, pricing)
+            return compute_cost_grouped_in_main(rows, pricing, main_cur, _rates)
         if tt == "user":
             if not user_id:
                 return 0.0
@@ -382,12 +393,18 @@ class BudgetMixin:
             "stop_message": str}``。任何异常都降级为「未超限」，绝不阻断主流程。
         """
         cfg = getattr(self, "cfg", None)
+        # 主货币与汇率（用于 cost 维度换算）。
+        from .config import get_currency_symbol, get_rates
+
+        main_cur = get_currency_symbol(cfg)
+        rates = get_rates(cfg)
         zero: dict[str, Any] = {
             "exceeded": False,
             "dim": None,
             "metric": None,
             "limit": 0.0,
             "used": 0.0,
+            "currency": main_cur,
             "on_exceeded": default_on_exceeded(cfg),
             "fallback_provider_ids": [],
             "fallback_token_limit": 0,
@@ -396,12 +413,26 @@ class BudgetMixin:
         }
         try:
             limits_t = self.get_budgets()
-            limits_c = self.get_budgets_cost()
+            limits_c_raw = self.get_budgets_cost()
             overrides = get_budget_overrides(cfg)
             has_global_token = any(float(limits_t.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
-            has_global_cost = any(float(limits_c.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
+            has_global_cost = any(float(limits_c_raw.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
             if not has_global_token and not has_global_cost and not overrides:
                 return zero
+            # 全局 cost 限额可能带每维度货币（budgets_cost_currency），统一换算到主货币。
+            from .config import get_budgets_cost_currency
+            from .exchange_rates import convert as _convert
+
+            _bcc = get_budgets_cost_currency(cfg)
+            limits_c: dict[str, float] = {}
+            for _d in _DIM_ORDER:
+                _lc_raw = float(limits_c_raw.get(_d, 0) or 0)
+                _d_cur = str(_bcc.get(_d, "") or "") or main_cur
+                limits_c[_d] = (
+                    round(_convert(_lc_raw, _d_cur, main_cur, rates), 6)
+                    if _lc_raw > 0 and _d_cur != main_cur
+                    else _lc_raw
+                )
 
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
@@ -434,7 +465,16 @@ class BudgetMixin:
                         )
                     if lc > 0:
                         used_c = await self._override_used(
-                            ov, "cost", umo, model, user_id, provider_id, d_start, pricing
+                            ov,
+                            "cost",
+                            umo,
+                            model,
+                            user_id,
+                            provider_id,
+                            d_start,
+                            pricing,
+                            main_cur,
+                            rates,
                         )
                     if lt > 0 and used_t >= lt:
                         return {
@@ -449,19 +489,26 @@ class BudgetMixin:
                             "stop_message": str(ov.get("stop_message") or ""),
                             "rule_idx": idx,
                         }
-                    if lc > 0 and used_c >= lc:
-                        return {
-                            "exceeded": True,
-                            "dim": f"override:{idx}",
-                            "metric": "cost",
-                            "limit": lc,
-                            "used": used_c,
-                            "on_exceeded": str(ov.get("on_exceeded") or "stop"),
-                            "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
-                            "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
-                            "stop_message": str(ov.get("stop_message") or ""),
-                            "rule_idx": idx,
-                        }
+                    if lc > 0:
+                        # override 的 cost_limit 可能带 cost_currency，先换算到主货币再比较
+                        ov_cur = str(ov.get("cost_currency") or "") or main_cur
+                        from .exchange_rates import convert as _convert
+
+                        lc_main = _convert(lc, ov_cur, main_cur, rates) if ov_cur != main_cur else lc
+                        if used_c >= lc_main:
+                            return {
+                                "exceeded": True,
+                                "dim": f"override:{idx}",
+                                "metric": "cost",
+                                "limit": lc_main,
+                                "used": used_c,
+                                "currency": ov_cur,
+                                "on_exceeded": str(ov.get("on_exceeded") or "stop"),
+                                "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
+                                "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
+                                "stop_message": str(ov.get("stop_message") or ""),
+                                "rule_idx": idx,
+                            }
                     # 命中且未超限 → 不再继续扫其他 override，也不评估全局
                     return {
                         **zero,
@@ -501,43 +548,56 @@ class BudgetMixin:
                 }
             if has_global_cost:
                 pricing = self.get_pricing()
-                ses_cost = _groups_cost(
+                from .cost import compute_cost_grouped_in_main
+
+                ses_cost = compute_cost_grouped_in_main(
                     await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start),
                     pricing,
+                    main_cur,
+                    rates,
                 )
                 mod_cost = ses_cost
                 if model:
-                    mod_cost = compute_cost_grouped(
+                    mod_cost = compute_cost_grouped_in_main(
                         await self.query_usage_grouped(
                             by="provider_model", model=model, start=d_start
                         ),
                         pricing,
+                        main_cur,
+                        rates,
                     )
                 # per_user_daily cost：同 token，有 user_id 时从补充表精确聚合
                 # （含 per_request 按 distinct request_id 计数）。
                 user_total_c = ses_cost
                 if user_id and lc_user > 0:
                     try:
-                        user_total_c = float(
+                        # query_user_cost_total 返回 USD 口径，换算到主货币
+                        _uc = float(
                             await self.query_user_cost_total(user_id, d_start, pricing)
                         )
+                        user_total_c = round(_convert(_uc, "USD", main_cur, rates), 6)
                     except Exception:
                         user_total_c = ses_cost
                 used_c_map = {
                     "per_session_daily": ses_cost,
                     "per_user_daily": user_total_c,
                     "per_model_daily": mod_cost,
-                    "global_daily": _groups_cost(
+                    "global_daily": compute_cost_grouped_in_main(
                         await self.query_usage_grouped(by="provider_model", start=d_start),
                         pricing,
+                        main_cur,
+                        rates,
                     ),
-                    "global_monthly": _groups_cost(
+                    "global_monthly": compute_cost_grouped_in_main(
                         await self.query_usage_grouped(by="provider_model", start=m_start),
                         pricing,
+                        main_cur,
+                        rates,
                     ),
                 }
             result = check_dimensions_dual(used_t_map, used_c_map, limits_t, limits_c)
             result["on_exceeded"] = default_on_exceeded(cfg)
+            result["currency"] = main_cur
             result["fallback_provider_ids"] = []
             result["fallback_token_limit"] = 0
             result["stop_message"] = ""
@@ -612,7 +672,11 @@ class BudgetMixin:
         used = result.get("used")
         limit = result.get("limit")
         if result.get("metric") == "cost":
-            return f"⏸ 已超出花费预算（{dim}）：${float(used or 0):.4f} / ${float(limit or 0):.2f}"
+            from .exchange_rates import currency_to_symbol, get_main_currency
+
+            cur = str(result.get("currency") or "") or get_main_currency(getattr(self, "cfg", None))
+            sym = currency_to_symbol(cur)
+            return f"⏸ 已超出花费预算（{dim}）：{sym}{float(used or 0):.4f} / {sym}{float(limit or 0):.2f}"
         # token 维度的 used/limit 来自 float() 包装，转 int 避免显示 "150.0"。
         return f"⏸ 已超出预算（{dim}）：用 {int(used or 0)} / 限 {int(limit or 0)} token"
 
@@ -685,6 +749,7 @@ class BudgetMixin:
         resp: Any,
     ) -> None:
         """把 fallback 调用的 usage 落补充表。"""
+        from .cost import compute_cost_with_currency
         from .supplement import _extract_cache, _safe_sender_id
 
         usage = getattr(resp, "usage", None)
@@ -706,6 +771,21 @@ class BudgetMixin:
         umo = str(
             getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", None) or ""
         )
+
+        # 固化原始货币成本金额与符号。
+        usage_dict = {
+            "token_input_other": token_input_other,
+            "token_input_cached": token_input_cached,
+            "token_output": token_output,
+            "cache_creation": cache_creation,
+        }
+        try:
+            raw_cost, cur = compute_cost_with_currency(
+                usage_dict, provider_id or None, provider_model or None, self.get_pricing()
+            )
+        except Exception:
+            raw_cost, cur = 0.0, "USD"
+
         record = {
             "umo": umo,
             "provider_id": provider_id,
@@ -719,6 +799,8 @@ class BudgetMixin:
             "raw_usage": raw_usage,
             "response_id": getattr(resp, "id", None),
             "user_id": _safe_sender_id(event),
+            "cost_amount": round(raw_cost, 6),
+            "currency_symbol": cur,
             "created_at": datetime.now(UTC),
         }
         await self.save_supplement(record)

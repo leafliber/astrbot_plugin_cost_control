@@ -69,6 +69,11 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     # 局部阈值 override；ProviderStat 无此字段，存本表）。
     user_id: str | None = Field(default=None, index=True)
 
+    # 固化的原始货币成本金额（按当时计费货币算出，展示时按当前汇率换算到主货币）。
+    cost_amount: float | None = Field(default=None)
+    # 固化的原始计费货币代码（如 "USD"/"CNY"；NULL=历史数据，回退主货币）。
+    currency_symbol: str | None = Field(default=None)
+
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         index=True,
@@ -170,6 +175,12 @@ class StoreMixin:
                 await conn.execute(text("ALTER TABLE cost_supplements ADD COLUMN user_id TEXT"))
             if "request_id" not in cols:
                 await conn.execute(text("ALTER TABLE cost_supplements ADD COLUMN request_id TEXT"))
+            if "cost_amount" not in cols:
+                await conn.execute(text("ALTER TABLE cost_supplements ADD COLUMN cost_amount REAL"))
+            if "currency_symbol" not in cols:
+                await conn.execute(
+                    text("ALTER TABLE cost_supplements ADD COLUMN currency_symbol TEXT")
+                )
             # 索引（IF NOT EXISTS 在 SQLite 3.8+ 可用）
             await conn.execute(
                 text(
@@ -214,6 +225,8 @@ class StoreMixin:
             injection_total=record.get("injection_total"),
             attribution=record.get("attribution"),
             user_id=record.get("user_id"),
+            cost_amount=record.get("cost_amount"),
+            currency_symbol=record.get("currency_symbol"),
             created_at=record.get("created_at") or datetime.now(UTC),
         )
         maker = await self._ensure_session_maker()
@@ -385,6 +398,57 @@ class StoreMixin:
                     delete(CacheEvent).where(CacheEvent.created_at < before)  # type: ignore[arg-type]
                 )
                 n += int(r2.rowcount or 0)
+                await session.commit()
+                return n
+        except Exception:
+            return 0
+
+    async def backfill_cost_amounts(self, pricing: dict[str, Any]) -> int:
+        """一次性回填 ``cost_amount IS NULL`` 的存量记录（幂等）。
+
+        逐行按 ``(provider_id, provider_model)`` 解析定价规则（历史定价无 currency
+        字段，按 USD 口径算），把 USD 金额固化为 ``cost_amount``、
+        ``currency_symbol="USD"``。失败行跳过（保持 NULL，展示时按主货币回退重算）。
+        已有值的行不动。
+
+        Args:
+            pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。
+
+        Returns:
+            成功回填的行数（失败返回 0）。
+        """
+        try:
+            from .cost import compute_cost_value
+
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                # 仅取 cost_amount 为 NULL 的行
+                stmt = select(CostSupplement).where(CostSupplement.cost_amount.is_(None))  # type: ignore[union-attr]
+                result = await session.execute(stmt)
+                rows = list(result.scalars().all())
+                n = 0
+                for r in rows:
+                    try:
+                        usage = {
+                            "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
+                            "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
+                            "token_output": int(getattr(r, "token_output", 0) or 0),
+                            "cache_creation": getattr(r, "cache_creation", None),
+                        }
+                        cost_usd = round(
+                            compute_cost_value(
+                                usage,
+                                getattr(r, "provider_id", "") or None,
+                                getattr(r, "provider_model", None),
+                                pricing,
+                            ),
+                            6,
+                        )
+                        r.cost_amount = cost_usd  # type: ignore[assignment]
+                        r.currency_symbol = "USD"  # type: ignore[assignment]
+                        n += 1
+                    except Exception:
+                        continue
                 await session.commit()
                 return n
         except Exception:

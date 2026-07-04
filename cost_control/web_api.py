@@ -119,6 +119,12 @@ class WebApiMixin:
                     ["POST"],
                     "保存预算/策略配置（热生效）",
                 ),
+                (
+                    f"{prefix}/actions/sync_rates",
+                    self.api_action_sync_rates,
+                    ["POST"],
+                    "同步最新汇率",
+                ),
             ]
             for route, handler, methods, desc in routes:
                 try:
@@ -181,21 +187,42 @@ class WebApiMixin:
             return None
 
     @staticmethod
-    def _supplement_to_dict(s: Any, pricing: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _supplement_to_dict(
+        s: Any,
+        pricing: dict[str, Any] | None = None,
+        main_cur: str = "$",
+        rates: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         """把 ``CostSupplement`` 行序列化为 JSON 友好 dict。
 
         ``pricing`` 非空时按生效定价算出本条成本 ``cost``（未定价为 0.0）。per_request
         模式单条无法独立计费（需 distinct request_id 聚合），此处按 0 近似。
+
+        若记录有固化的 ``cost_amount`` + ``currency_symbol``，则 ``cost`` 按当前汇率
+        从固化的原始货币换算到主货币 ``main_cur``，``cost_original`` 保留原始金额；
+        否则 ``cost`` 由 pricing 即时算出（回退，用于历史未回填行）。
         """
         from .cost import compute_cost_value
+        from .exchange_rates import convert
 
         created = getattr(s, "created_at", None)
         token_input_other = int(getattr(s, "token_input_other", 0) or 0)
         token_input_cached = int(getattr(s, "token_input_cached", 0) or 0)
         token_output = int(getattr(s, "token_output", 0) or 0)
         cache_creation = getattr(s, "cache_creation", None)
+
+        cost_amount = getattr(s, "cost_amount", None)
+        currency_symbol = getattr(s, "currency_symbol", None)
+
         cost = 0.0
-        if pricing is not None:
+        cost_original = None
+        if cost_amount is not None:
+            # 有固化金额 → 按当前汇率换算到主货币
+            cost_original = round(float(cost_amount), 6)
+            cur = str(currency_symbol or "USD")
+            cost = round(convert(cost_original, cur, main_cur, rates or {}), 6)
+        elif pricing is not None:
+            # 回退：无固化金额，按定价即时算（USD 口径）
             cost = round(
                 compute_cost_value(
                     {
@@ -210,6 +237,7 @@ class WebApiMixin:
                 ),
                 6,
             )
+
         return {
             "umo": getattr(s, "umo", "") or "",
             "provider_id": getattr(s, "provider_id", "") or "",
@@ -223,6 +251,8 @@ class WebApiMixin:
             "injection_total": getattr(s, "injection_total", None),
             "attribution": getattr(s, "attribution", None),
             "cost": cost,
+            "cost_original": cost_original,
+            "currency_symbol": currency_symbol,
             "created_at": created.isoformat() if created else None,
         }
 
@@ -346,14 +376,23 @@ class WebApiMixin:
 
             has_cost = any(float(limits_cost.get(d, 0) or 0) > 0 for d in _DIM_ORDER)
             if has_cost:
-                from .budget import _groups_cost
+                from .cost import compute_cost_grouped_in_main
+                from .exchange_rates import get_main_currency, get_rates
 
+                _main_cur = get_main_currency(cfg)
+                _rates = get_rates(cfg)
                 pricing = self.get_pricing()
-                day_cost = _groups_cost(
-                    await self.query_usage_grouped(by="provider_model", start=d_start), pricing
+                day_cost = compute_cost_grouped_in_main(
+                    await self.query_usage_grouped(by="provider_model", start=d_start),
+                    pricing,
+                    _main_cur,
+                    _rates,
                 )
-                month_cost = _groups_cost(
-                    await self.query_usage_grouped(by="provider_model", start=m_start), pricing
+                month_cost = compute_cost_grouped_in_main(
+                    await self.query_usage_grouped(by="provider_model", start=m_start),
+                    pricing,
+                    _main_cur,
+                    _rates,
                 )
             else:
                 day_cost = month_cost = 0.0
@@ -362,11 +401,25 @@ class WebApiMixin:
             dim_used_c = {"global_daily": day_cost, "global_monthly": month_cost}
             dim_label = {"global_daily": "每日全局", "global_monthly": "每月全局"}
 
+            # 将各维度 cost 限额换算到主货币（budgets_cost_currency 可能设了独立货币）
+            from .config import get_budgets_cost_currency
+            from .exchange_rates import convert as _conv_alert, get_main_currency, get_rates
+
+            _alert_bcc = get_budgets_cost_currency(cfg)
+            _alert_main = get_main_currency(cfg)
+            _alert_rates = get_rates(cfg)
+
             exceeded_dims: list[str] = []
             near_dims: list[str] = []
             for d in _DIM_ORDER:
                 lt = float(limits.get(d, 0) or 0)
-                lc = float(limits_cost.get(d, 0) or 0)
+                lc_raw = float(limits_cost.get(d, 0) or 0)
+                d_cur = str(_alert_bcc.get(d, "") or "") or _alert_main
+                lc = (
+                    round(_conv_alert(lc_raw, d_cur, _alert_main, _alert_rates), 6)
+                    if lc_raw > 0 and d_cur != _alert_main
+                    else lc_raw
+                )
                 for metric, limit, used in (
                     ("token", lt, dim_used_t.get(d, 0)),
                     ("cost", lc, dim_used_c.get(d, 0)),
@@ -440,11 +493,16 @@ class WebApiMixin:
             refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
             cur_start, cur_end, prev_start, prev_end = compare_windows(window, now, tz, refresh)
             pricing = self.get_pricing()
+            from .config import get_currency_symbol, get_rates
+
+            main_cur = get_currency_symbol(getattr(self, "cfg", None))
+            rates = get_rates(getattr(self, "cfg", None))
+            from .cost import compute_cost_grouped_in_main
 
             async def _stats(start: datetime, end: datetime) -> dict[str, Any]:
                 usage = await self.query_usage(start=start, end=end)
                 rows = await self.query_usage_grouped(by="provider_model", start=start, end=end)
-                cost = compute_cost_grouped(rows, pricing)
+                cost = compute_cost_grouped_in_main(rows, pricing, main_cur, rates)
                 return {
                     "cost": cost,
                     "count": int(usage.get("count", 0) or 0),
@@ -542,7 +600,11 @@ class WebApiMixin:
                 order_dir=order_dir,
             )
             pricing = self.get_pricing()
-            return self._ok([self._supplement_to_dict(r, pricing) for r in rows])
+            from .config import get_currency_symbol, get_rates
+
+            main_cur = get_currency_symbol(getattr(self, "cfg", None))
+            rates = get_rates(getattr(self, "cfg", None))
+            return self._ok([self._supplement_to_dict(r, pricing, main_cur, rates) for r in rows])
         except Exception as e:
             return self._err(str(e))
 
@@ -564,6 +626,11 @@ class WebApiMixin:
             provider = self._param("provider") or None
             model = self._param("model") or None
             pricing = self.get_pricing()
+            from .config import get_currency_symbol, get_rates
+
+            main_cur = get_currency_symbol(getattr(self, "cfg", None))
+            rates = get_rates(getattr(self, "cfg", None))
+            from .cost import compute_row_cost_in_main
 
             # model / provider 维度：用 (provider_id, provider_model) 底层行精确算成本
             # （按 provider_id 匹配用户定价），再二次聚合到请求维度。umo 维度底层无
@@ -631,7 +698,7 @@ class WebApiMixin:
                     g["token_input_other"] += tio
                     g["token_input_cached"] += tic
                     g["token_output"] += tio_out
-                    g["cost"] += compute_row_cost(r, pricing)
+                    g["cost"] += compute_row_cost_in_main(r, pricing, main_cur, rates)
 
             total_tokens = sum(int(g["tokens"]) for g in groups.values())
             out: list[dict[str, Any]] = []
@@ -709,28 +776,47 @@ class WebApiMixin:
             mod_used = total_tokens(top_model[0]) if top_model else 0
             mod_key = str((top_model[0] or {}).get("provider_model", "")) if top_model else ""
 
+            # 主货币 + 汇率（成本维度统一换算到主货币口径）
+            from .exchange_rates import get_main_currency, get_rates
+
+            main_cur = get_main_currency(cfg)
+            rates = get_rates(cfg)
+
             if has_cost:
-                from .budget import _groups_cost
-                from .cost import compute_row_cost
+                from .cost import compute_cost_grouped_in_main, compute_row_cost_in_main
 
                 pricing = self.get_pricing()
-                day_cost = _groups_cost(
-                    await self.query_usage_grouped(by="provider_model", start=d_start), pricing
+                day_cost = compute_cost_grouped_in_main(
+                    await self.query_usage_grouped(by="provider_model", start=d_start),
+                    pricing,
+                    main_cur,
+                    rates,
                 )
-                month_cost = _groups_cost(
-                    await self.query_usage_grouped(by="provider_model", start=m_start), pricing
+                month_cost = compute_cost_grouped_in_main(
+                    await self.query_usage_grouped(by="provider_model", start=m_start),
+                    pricing,
+                    main_cur,
+                    rates,
                 )
                 ses_cost = (
-                    _groups_cost(
+                    compute_cost_grouped_in_main(
                         await self.query_usage_grouped(
                             by="provider_model", umo=ses_key, start=d_start
                         ),
                         pricing,
+                        main_cur,
+                        rates,
                     )
                     if ses_key
                     else 0.0
                 )
-                mod_cost = round(compute_row_cost(top_model[0], pricing), 6) if top_model else 0.0
+                mod_cost = (
+                    round(
+                        compute_row_cost_in_main(top_model[0], pricing, main_cur, rates), 6
+                    )
+                    if top_model
+                    else 0.0
+                )
             else:
                 day_cost = month_cost = ses_cost = mod_cost = 0.0
 
@@ -763,6 +849,10 @@ class WebApiMixin:
             # ===== 局部阈值：聚合每条规则的实时 used =====
             overrides_raw = get_budget_overrides(cfg)
             pricing = self.get_pricing() if has_cost or overrides_raw else {}
+            if has_cost or overrides_raw:
+                from .cost import compute_cost_grouped_in_main
+                from .exchange_rates import convert as _conv
+
             overrides_out: list[dict[str, Any]] = []
             for idx, ov in enumerate(overrides_raw):
                 used_t_v = 0.0
@@ -776,11 +866,13 @@ class WebApiMixin:
                                 total_tokens(await self.query_usage(umo=tv, start=d_start))
                             )
                         if ov.get("cost_limit", 0) > 0:
-                            used_c_v = _groups_cost(
+                            used_c_v = compute_cost_grouped_in_main(
                                 await self.query_usage_grouped(
                                     by="provider_model", umo=tv, start=d_start
                                 ),
                                 pricing,
+                                main_cur,
+                                rates,
                             )
                     elif tt == "provider":
                         if ov.get("token_limit", 0) > 0:
@@ -788,17 +880,21 @@ class WebApiMixin:
                                 total_tokens(await self.query_usage(provider=tv, start=d_start))
                             )
                         if ov.get("cost_limit", 0) > 0:
-                            used_c_v = _groups_cost(
+                            used_c_v = compute_cost_grouped_in_main(
                                 await self.query_usage_grouped(
                                     by="provider_model", provider=tv, start=d_start
                                 ),
                                 pricing,
+                                main_cur,
+                                rates,
                             )
                     elif tt == "user":
                         if ov.get("token_limit", 0) > 0 and hasattr(self, "query_user_token_total"):
                             used_t_v = float(await self.query_user_token_total(tv, d_start))
                         if ov.get("cost_limit", 0) > 0 and hasattr(self, "query_user_cost_total"):
-                            used_c_v = float(await self.query_user_cost_total(tv, d_start, pricing))
+                            # query_user_cost_total 返回 USD 口径，换算到主货币
+                            _uc = float(await self.query_user_cost_total(tv, d_start, pricing))
+                            used_c_v = round(_conv(_uc, "USD", main_cur, rates), 6)
                 except Exception:
                     # 单条 override 聚合失败不影响其它条
                     pass
@@ -819,6 +915,7 @@ class WebApiMixin:
                         "target_value": tv,
                         "token_limit": int(ov.get("token_limit") or 0),
                         "cost_limit": float(ov.get("cost_limit") or 0.0),
+                        "cost_currency": str(ov.get("cost_currency") or ""),
                         "on_exceeded": str(ov.get("on_exceeded") or "stop"),
                         "stop_message": str(ov.get("stop_message") or ""),
                         "fallback_provider_ids": list(ov.get("fallback_provider_ids") or []),
@@ -832,10 +929,18 @@ class WebApiMixin:
 
             fallback_providers = get_fallback_providers(cfg)
 
+            # 各维度 cost 限额的独立货币（budgets_cost_currency）
+            from .config import get_budgets_cost_currency, get_currency_symbol
+            from .exchange_rates import get_rate_updated_at
+
             return self._ok(
                 {
                     "limits": limits,
                     "limits_cost": limits_cost,
+                    "limits_cost_currency": get_budgets_cost_currency(cfg),
+                    "currency_symbol": get_currency_symbol(cfg),
+                    "exchange_rates": rates,
+                    "exchange_rates_updated_at": get_rate_updated_at(cfg),
                     "dimensions": {
                         "global_daily": _dim_entry("global_daily", day_total, day_cost),
                         "global_monthly": _dim_entry("global_monthly", month_total, month_cost),
@@ -1186,12 +1291,19 @@ class WebApiMixin:
                     p["matched_default"] = md
                 except Exception:
                     p["matched_default"] = None
+            from .config import get_currency_symbol
+            from .exchange_rates import get_rates, get_rate_updated_at
+
+            _pcfg = getattr(self, "cfg", None)
             return self._ok(
                 {
                     "provider_models": provider_models,
                     "user_pricing": pricing.get("user", {}),
                     "defaults": DEFAULT_PRICING,
                     "unpriced": unpriced,
+                    "currency_symbol": get_currency_symbol(_pcfg),
+                    "exchange_rates": get_rates(_pcfg),
+                    "exchange_rates_updated_at": get_rate_updated_at(_pcfg),
                 }
             )
         except Exception as e:
@@ -1283,6 +1395,30 @@ class WebApiMixin:
                     if n is not None:
                         normalized_p[pid_s] = n
                 out[k] = normalized_p
+            elif k == "exchange_rates":
+                # 接受任意 {货币代码: 汇率} dict，逐值转 float（可能含 API 同步的
+                # 160+ 货币，不能用非空默认 dict 的 coerce 逻辑裁剪）
+                if not isinstance(v, dict):
+                    return None, "exchange_rates 必须是对象"
+                rates_out: dict[str, float] = {}
+                for rk, rv in v.items():
+                    try:
+                        rates_out[str(rk).strip().upper()] = float(rv)
+                    except (TypeError, ValueError):
+                        continue
+                if rates_out:
+                    rates_out["USD"] = 1.0  # 基准
+                out[k] = rates_out
+            elif k == "budgets_cost_currency":
+                # {维度: 货币代码}，逐值转 str
+                if not isinstance(v, dict):
+                    return None, "budgets_cost_currency 必须是对象"
+                bcc_out: dict[str, str] = {}
+                for bk, bv in v.items():
+                    bs = str(bv or "").strip().upper()
+                    if bs:
+                        bcc_out[str(bk)] = bs
+                out[k] = bcc_out
             elif k in CONFIG_DEFAULTS:
                 out[k] = coerce_to_default_type(v, CONFIG_DEFAULTS[k])
             # else: 未知 key 忽略
@@ -1331,5 +1467,44 @@ class WebApiMixin:
                 except Exception as e:
                     logger.warning("[cost_control] CronJob 重注册失败: %s", e)
             return self._ok({"saved": changed, "config": self.cfg})
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_action_sync_rates(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /actions/sync_rates``：从免费 API 同步最新汇率并持久化到 config。
+
+        调用 :func:`exchange_rates.sync_rates`（``open.er-api.com``），成功则把
+        汇率表 + 同步时间写入 ``self.cfg`` 的 ``exchange_rates`` /
+        ``exchange_rates_updated_at``，并持久化到插件 config.json；失败返回错误。
+        """
+        try:
+            from astrbot import logger
+
+            from .exchange_rates import sync_rates
+
+            rates, updated_at, err = await sync_rates()
+            if err:
+                return self._err(f"汇率同步失败：{err}")
+            # 写入 self.cfg 并持久化
+            cfg = getattr(self, "cfg", None)
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg = dict(cfg)
+            cfg["exchange_rates"] = rates
+            cfg["exchange_rates_updated_at"] = updated_at
+            self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            # 持久化到 config.json
+            data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
+            try:
+                save_plugin_config(data_dir, self.cfg)
+            except Exception as e:
+                logger.warning("[cost_control] 汇率持久化失败（热生效）: %s", e)
+            return self._ok(
+                {
+                    "exchange_rates": rates,
+                    "exchange_rates_updated_at": updated_at,
+                    "count": len(rates),
+                }
+            )
         except Exception as e:
             return self._err(str(e))

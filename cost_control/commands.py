@@ -23,6 +23,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from .budget import _DIM_ORDER, day_window_start, resolve_tz
 from .config import get_config, get_pricing
 from .cost import compute_row_cost
+from .exchange_rates import currency_to_symbol, get_main_currency
 
 
 class CommandsMixin:
@@ -65,10 +66,11 @@ class CommandsMixin:
             usage = await self.query_usage(umo=umo, start=d_start)
             rows = await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start)
             pricing = get_pricing(getattr(self, "cfg", None))
+            sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
             cost = round(sum(compute_row_cost(r, pricing) for r in rows), 6)
             lines = [
                 "💰 今日用量（本会话）",
-                f"调用 {usage.get('count', 0)} 次，成本 ≈ ${cost:.4f}",
+                f"调用 {usage.get('count', 0)} 次，成本 ≈ {sym}{cost:.4f}",
                 f"输入(非缓存) {usage.get('token_input_other', 0)} / "
                 f"缓存命中 {usage.get('token_input_cached', 0)} / "
                 f"输出 {usage.get('token_output', 0)}",
@@ -76,7 +78,7 @@ class CommandsMixin:
             for r in rows[:5]:
                 c = round(compute_row_cost(r, pricing), 6)
                 name = r.get("provider_model") or r.get("key") or "?"
-                lines.append(f"  · {name}：{r.get('count', 0)}次 / ${c:.4f}")
+                lines.append(f"  · {name}：{r.get('count', 0)}次 / {sym}{c:.4f}")
             yield event.plain_result("\n".join(lines))
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
@@ -86,6 +88,7 @@ class CommandsMixin:
         """``/budget``：查询预算配置与当前超限状态。"""
         try:
             umo = self._umo(event)
+            sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
             budgets = self.get_budgets()
             budgets_cost = self.get_budgets_cost()
             overrides = self.get_budget_overrides(getattr(self, "cfg", None))
@@ -100,7 +103,7 @@ class CommandsMixin:
                     if t > 0:
                         parts.append(f"token {t}")
                     if c > 0:
-                        parts.append(f"花费 ${c:.2f}")
+                        parts.append(f"花费 {sym}{c:.2f}")
                     lines.append(f"  {dim}: " + " / ".join(parts))
                     any_cfg = True
             if not any_cfg:
@@ -112,7 +115,7 @@ class CommandsMixin:
                     if ov.get("token_limit", 0) > 0:
                         parts.append(f"token {ov['token_limit']}")
                     if ov.get("cost_limit", 0) > 0:
-                        parts.append(f"花费 ${ov['cost_limit']:.2f}")
+                        parts.append(f"花费 {sym}{ov['cost_limit']:.2f}")
                     lines.append(
                         f"  · {ov.get('target_type')}:{ov.get('target_value')} "
                         f"({'/'.join(parts) or '不限'}) "
@@ -123,8 +126,8 @@ class CommandsMixin:
                 used = result.get("used")
                 limit = result.get("limit")
                 if result.get("metric") == "cost":
-                    used_s = f"${float(used or 0):.4f}"
-                    limit_s = f"${float(limit or 0):.2f}"
+                    used_s = f"{sym}{float(used or 0):.4f}"
+                    limit_s = f"{sym}{float(limit or 0):.2f}"
                     lines.append(f"⚠️ 已超出花费预算（{dim}）：{used_s} / {limit_s}")
                 else:
                     lines.append(f"⚠️ 已超限（{dim}）：用 {used} / 限 {limit} token")
@@ -217,11 +220,12 @@ class CommandsMixin:
         try:
             arg = str(getattr(event, "message_str", "") or "").strip().lower()
             window = arg if arg in ("daily", "weekly", "monthly") else "daily"
+            sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
             report = await self.build_report(window=window)
             usage = report.get("usage", {}) or {}
             lines = [
                 f"📊 成本报表（{window}）",
-                f"调用 {usage.get('count', 0)} 次，成本 ≈ ${report.get('cost', 0):.4f}",
+                f"调用 {usage.get('count', 0)} 次，成本 ≈ {sym}{report.get('cost', 0):.4f}",
                 f"输入(非缓存) {usage.get('token_input_other', 0)} / "
                 f"缓存命中 {usage.get('token_input_cached', 0)} / "
                 f"输出 {usage.get('token_output', 0)}",
@@ -236,7 +240,7 @@ class CommandsMixin:
                 for m in by_model[:5]:
                     lines.append(
                         f"  · {m.get('model') or '?'}：{m.get('count', 0)}次 / "
-                        f"${m.get('cost', 0):.4f}"
+                        f"{sym}{m.get('cost', 0):.4f}"
                     )
             top = report.get("top_sessions", []) or []
             if top:

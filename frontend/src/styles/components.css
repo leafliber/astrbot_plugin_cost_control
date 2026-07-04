@@ -1204,6 +1204,33 @@ tr:hover td {
   width: 100%;
 }
 
+/* 汇率展示网格 */
+.rate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 6px 12px;
+}
+
+.rate-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-elevated, #f5f5f5);
+  font-size: 12px;
+}
+
+.rate-item .rate-code {
+  font-weight: 600;
+  color: var(--text-primary, #333);
+}
+
+.rate-item .rate-value {
+  color: var(--text-secondary, #666);
+  font-variant-numeric: tabular-nums;
+}
+
 /* toggle 开关：checkbox 隐藏 + 伪元素滑块 */
 .switch {
   position: relative;

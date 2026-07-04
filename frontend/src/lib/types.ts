@@ -93,6 +93,8 @@ export interface RecordRow {
   cache_read?: number;
   injection_total?: number | null;
   cost?: number;
+  cost_original?: number;
+  currency_symbol?: string;
   created_at?: string;
 }
 
@@ -163,6 +165,7 @@ export interface BudgetOverride {
   target_value: string;
   token_limit: number;
   cost_limit: number;
+  cost_currency?: string;
   on_exceeded: OnExceeded;
   stop_message?: string;
   fallback_provider_ids: string[];
@@ -182,6 +185,10 @@ export interface FallbackProvider {
 export interface BudgetResponse {
   limits?: Record<string, number>;
   limits_cost?: Record<string, number>;
+  limits_cost_currency?: Record<string, string>;
+  currency_symbol?: string;
+  exchange_rates?: Record<string, number>;
+  exchange_rates_updated_at?: string;
   dimensions?: Record<string, BudgetDimension>;
   overrides?: BudgetOverrideRow[];
   fallback_providers?: FallbackProvider[];
@@ -260,14 +267,17 @@ export interface PerTokenEntry {
   input_cached: number;
   output: number;
   cache_creation?: number | null;
+  currency?: string;
 }
 export interface PerTurnEntry {
   mode: "per_turn";
   price: number;
+  currency?: string;
 }
 export interface PerRequestEntry {
   mode: "per_request";
   price: number;
+  currency?: string;
 }
 export type UserPricingEntry = PerTokenEntry | PerTurnEntry | PerRequestEntry;
 
@@ -298,4 +308,7 @@ export interface PricingResponse {
   user_pricing?: Record<string, UserPricingEntry>; // key=provider_id
   defaults?: Record<string, PriceEntry>; // key=模型名，per_token
   unpriced?: PricingUnpriced[];
+  currency_symbol?: string;
+  exchange_rates?: Record<string, number>;
+  exchange_rates_updated_at?: string;
 }

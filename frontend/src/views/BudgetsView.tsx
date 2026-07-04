@@ -46,6 +46,7 @@ export function BudgetsView() {
 
   const [tokens, setTokens] = useState<Record<string, number>>({});
   const [cost, setCost] = useState<Record<string, number>>({});
+  const [costCurrency, setCostCurrency] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<BudgetOverrideRow[]>([]);
   const [fallbacks, setFallbacks] = useState<FallbackProvider[]>([]);
   const [defaultOn, setDefaultOn] = useState<OnExceeded>("stop");
@@ -55,6 +56,7 @@ export function BudgetsView() {
     if (!data) return;
     setTokens({ ...(data.limits || {}) });
     setCost({ ...(data.limits_cost || {}) });
+    setCostCurrency({ ...(data.limits_cost_currency || {}) });
     setOverrides((data.overrides || []).map((o) => ({ ...o })));
     setFallbacks((data.fallback_providers || []).map((f) => ({ ...f })));
     setDefaultOn(data.global_default_on_exceeded || "stop");
@@ -76,6 +78,8 @@ export function BudgetsView() {
     setTokens((prev) => ({ ...prev, [key]: Math.max(0, parseInt(raw, 10) || 0) }));
   const updateLimitCost = (key: string, raw: string) =>
     setCost((prev) => ({ ...prev, [key]: Math.max(0, +raw || 0) }));
+  const updateCostCurrency = (key: string, raw: string) =>
+    setCostCurrency((prev) => ({ ...prev, [key]: raw }));
 
   const updateOverride = (i: number, patch: Partial<BudgetOverrideRow>) =>
     setOverrides((prev) => prev.map((o, idx) => (idx === i ? { ...o, ...patch } : o)));
@@ -109,13 +113,14 @@ export function BudgetsView() {
     () => ({
       budgets: tokens,
       budgets_cost: cost,
+      budgets_cost_currency: costCurrency,
       budget_overrides: overrides
         .filter((o) => o.target_value && o.target_value.trim())
         .map(({ current: _c, id: _id, ...rest }) => rest),
       fallback_providers: fallbacks.filter((f) => f.id && f.id.trim()),
       default_on_exceeded: defaultOn,
     }),
-    [tokens, cost, overrides, fallbacks, defaultOn],
+    [tokens, cost, costCurrency, overrides, fallbacks, defaultOn],
   );
 
   const { status, error } = useAutoSave(
@@ -142,9 +147,11 @@ export function BudgetsView() {
         <GlobalDefaultsPanel
           limits={tokens}
           limitsCost={cost}
+          budgetsCostCurrency={costCurrency}
           dimensions={dimensions}
           onChangeLimit={updateLimit}
           onChangeLimitCost={updateLimitCost}
+          onChangeCostCurrency={updateCostCurrency}
         />
       </Panel>
 
