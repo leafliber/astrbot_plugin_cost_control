@@ -3,7 +3,6 @@
 > LLM 便宜好用,直到某一天账单失控 —— 有人在某个群里狂刷、缓存莫名失效导致每一轮都全量计费、昂贵模型被随手调用、system prompt 冗长又每轮重算。
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.24.2-blue)](https://github.com/AstrBotDevs/AstrBot)
-[![Status](https://img.shields.io/badge/version-0.1.0-green)](./CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)](https://www.python.org/)
 
 ---
