@@ -4,6 +4,51 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-07-05
+
+第二个稳定版本。本版本围绕 **多货币结算** 重构了成本计算链路，新增 **首页成本趋势图** 与多币种预算 / 定价 UI，确保最终结算与显示始终对齐到用户选定的主货币。
+
+### 新增
+
+#### 多货币支持（核心）
+
+- **主货币切换**：设置页新增「主货币」下拉，内置 USD / CNY / EUR / GBP / JPY / KRW / INR / HKD / SGD / TWD / RUB / BRL 共 12 种货币。所有费用（预算比较、告警文案、命令输出、UI 显示）统一换算到主货币口径。
+- **汇率同步**：从免费 API（`open.er-api.com`，无 key）一键拉取最新汇率并持久化到 `config.json`；默认静态汇率兜底（含 USD）。同步失败不阻断使用，回退到内置表。
+- **汇率展示**：设置页新增「汇率同步」面板，展示各币种相对 USD 的当前汇率与最近同步时间；后端返回的 `currency_symbol` / `exchange_rates` / `exchange_rates_updated_at` 字段同步进前端全局状态。
+- **预算独立货币**：5 维全局预算（global_daily / global_monthly / session_daily / session_monthly / user_daily）中每一维度的 cost 限额可独立选择货币（`budgets_cost_currency`），存于主货币口径前自动按汇率换算；未设置则跟随主货币。
+- **override 独立货币**：每条 override（umo / provider / user）可独立指定 cost 限额货币，比较前换算到主货币；UI 状态条同步显示该条规则的消费与限额。
+- **定价条目独立货币**：每个 Provider 的自定义定价条目支持指定货币（per_token / per_turn / per_request），保存到 `price.currency` 字段。
+- **记录原始金额固化**：`CostSupplement` 表新增 `cost_amount` + `currency_symbol` 列，记录保存时的原始金额与货币符号；明细行展示按记录原始货币，聚合展示按主货币。新字段 `cost_original` 由后端返给前端。
+- **统一金额存储模型**：内置定价统一以 USD 为基准，跨币种运算一律经过汇率换算，不依赖货币符号切换。
+
+#### 首页可视化
+
+- 新增「成本趋势（近 N 天）」面积图，与「用量趋势」并排显示：Y 轴标签使用当前主货币符号，Tooltip 显示 4 位小数精确成本。后端 `api_timeline` 增加 `cost_series` 字段（按 (bucket, model) 粒度核算后聚合到桶）。
+
+#### 后端 API
+
+- `POST /actions/sync_rates`：手动触发汇率同步，立即返回最新汇率表与同步时间。
+- 所有成本相关响应（`/overview`、`/budgets`、`/records`、`/records/aggregate`、`/compare`、`/timeline`、`/pricing`、`/alerts`、`/config`）统一主货币口径，响应增加 `currency_symbol` 字段。
+
+### 变更
+
+- **存储列增加 + 幂等迁移**：`cost_supplements` 表新增 `cost_amount` 和 `currency_symbol` 两列；启动时自动 `ALTER TABLE ADD COLUMN`（旧库无脑覆盖，安全；多次启动无副作用）。
+- **历史数据回填**：启动时一次性为 `cost_amount IS NULL` 的存量记录补算（按当前 USD 口径定价 + 汇率换算），失败行保持 NULL，由展示层回退重算。
+- **`fmtCost` 接口扩展**：前端 `fmtCost(n, symbolOrCode?)` 支持传入货币代码或符号字面量；缺省回退到全局主货币。
+- **预算比较全路径换算**：全局 cost 限额、override 限额、`query_user_cost_total` 用户成本，全部先按 `budgets_cost_currency` / `cost_currency` / 主货币 → 主货币换算再比较。
+
+### 修复
+
+- 修正 override cost 限额比较 bug：旧实现以原始货币金额直接与（已换算的）used 比较；现统一在主货币口径下比较。
+- 修正 `get_main_currency` 历史 `$` 值兼容：自动归一化为 `USD`。
+- 移除首页硬编码 `USD · xxx` 文案。
+
+### 兼容性
+
+- 配置文件通过 `deep_merge(CONFIG_DEFAULTS, ...)` 向后兼容：旧库仅 `enabled` / `refresh_time` 等字段也能正常加载；新增 `currency_symbol` / `exchange_rates` / `budgets_cost_currency` 自动按默认值生效。
+- 数据库迁移幂等：已存在列不会被重复添加；`extend_existing` 保证热重载安全。
+- 公共 API 字段类型不变（仅为 cost 类型响应增加可选 `currency_symbol` 字段，不影响原有调用方）。
+
 ## [0.1.0] - 2026-06-23
 
 首个完整版本。覆盖从数据采集、预算拦截、高级分析到可视化的完整链路。
@@ -72,3 +117,4 @@
 - 开发工具链:`uv` + `ruff` + `pytest` + `mypy`。
 
 [0.1.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.1.0
+[0.2.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.2.0
