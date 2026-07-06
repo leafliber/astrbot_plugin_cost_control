@@ -25,15 +25,19 @@ export function CacheView({
   const tOther = r?.total_input_other || 0;
   const tOut = r?.total_output || 0;
   const totalTokens = tCached + tOther + tOut;
-  // 优化潜力:缓存命中单价约为非缓存的 1/10。以「提升命中率后输入成本可降低的
-  // 比例」(0.9×非缓存 / (0.1×缓存命中 + 非缓存))映射到 高 / 中 / 低 三档。
+  // 优化潜力:基于平均缓存命中率直接分档。命中率越高，输入成本越低（缓存命中单价
+  // 约为非缓存的 1/10）；≥80% 已无明显优化空间，归为「优秀」。
   const inputTotal = tCached + tOther;
   const otherRatio = inputTotal > 0 ? Math.round((tOther / inputTotal) * 100) : 0;
-  const costDenom = 0.1 * tCached + tOther;
-  const potentialPct = costDenom > 0 ? Math.round(((0.9 * tOther) / costDenom) * 100) : 0;
-  const levelKey: "high" | "mid" | "low" =
-    potentialPct >= 60 ? "high" : potentialPct >= 30 ? "mid" : "low";
-  const levelText = levelKey === "high" ? "高" : levelKey === "mid" ? "中" : "低";
+  const hitRate = Number(r?.cache_hit_rate || 0);
+  const levelKey: "high" | "mid" | "low" | "great" =
+    hitRate >= 80 ? "great" : hitRate >= 60 ? "low" : hitRate >= 40 ? "mid" : "high";
+  const levelText =
+    levelKey === "great" ? "优秀" : levelKey === "high" ? "高" : levelKey === "mid" ? "中" : "低";
+  const levelCaption =
+    levelKey === "great"
+      ? "无需优化，缓存表现优秀"
+      : "提升命中率可降低的输入成本";
   const segs = [
     { label: "缓存命中", value: tCached, color: "var(--ok)" },
     { label: "缓存未命中", value: tOther, color: "var(--warn)" },
@@ -60,7 +64,14 @@ export function CacheView({
       <Panel>
         <h2>Token 占比</h2>
         {totalTokens > 0 ? (
-          <StackedBar segments={segs} />
+          <>
+            <StackedBar segments={segs} />
+            {r?.cache_note && (
+              <div className="muted small" style={{ marginTop: 8 }}>
+                {r.cache_note}
+              </div>
+            )}
+          </>
         ) : (
           <Empty text="暂无 token 数据" />
         )}
@@ -70,13 +81,15 @@ export function CacheView({
         <h2>优化潜力</h2>
         <div className="potential-figure">
           <span className={`potential-pct potential-pct-${levelKey}`}>{levelText}</span>
-          <span className="potential-caption">提升命中率可降低的输入成本</span>
+          <span className="potential-caption">{levelCaption}</span>
         </div>
-        <div className="alert-body">
-          缓存命中单价仅为非缓存的 <strong>1/10</strong>。当前非缓存输入{" "}
-          <strong>{fmtNum(tOther)}</strong> token，占输入总量{" "}
-          <strong>{otherRatio}%</strong>。重点排查：system prompt 稳定性、上下文是否被重置、工具定义是否频繁变化。
-        </div>
+        {levelKey !== "great" && (
+          <div className="alert-body">
+            缓存命中单价仅为非缓存的 <strong>1/10</strong>。当前非缓存输入{" "}
+            <strong>{fmtNum(tOther)}</strong> token，占输入总量{" "}
+            <strong>{otherRatio}%</strong>。重点排查：system prompt 稳定性、上下文是否被重置、工具定义是否频繁变化。
+          </div>
+        )}
       </Panel>
 
       <Panel>

@@ -496,6 +496,11 @@ tr:hover td {
   color: var(--text-dim);
 }
 
+.potential-pct-great {
+  color: var(--ok);
+  font-weight: 700;
+}
+
 .potential-pct-high {
   color: var(--bad);
 }
@@ -505,7 +510,7 @@ tr:hover td {
 }
 
 .potential-pct-low {
-  color: var(--ok);
+  color: var(--accent);
 }
 
 /* ===== 归因堆叠条 ===== */
@@ -1321,7 +1326,7 @@ tr:hover td {
 
 .diff-row {
   display: grid;
-  grid-template-columns: 84px auto 14px auto;
+  grid-template-columns: 84px minmax(0, 1fr) 14px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
 }
@@ -1334,6 +1339,8 @@ tr:hover td {
 .diff-before,
 .diff-after {
   font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .diff-arrow {
@@ -1379,7 +1386,8 @@ tr:hover td {
 
 .diff-line {
   display: flex;
-  white-space: pre;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .diff-line .dl-sign {
@@ -1391,6 +1399,7 @@ tr:hover td {
 
 .diff-line .dl-text {
   flex: 1;
+  min-width: 0;
   padding-right: 10px;
 }
 

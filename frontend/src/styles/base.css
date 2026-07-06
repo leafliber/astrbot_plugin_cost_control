@@ -16,6 +16,12 @@ body {
   line-height: 1.5;
 }
 
+/* 为滚动条槽预留空间，避免切换 tab 时因内容高度变化导致滚动条
+   出现/消失而引起页面横向晃动。 */
+html {
+  scrollbar-gutter: stable;
+}
+
 #root {
   max-width: 1100px;
   margin: 0 auto;

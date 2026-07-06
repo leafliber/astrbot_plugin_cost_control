@@ -233,6 +233,7 @@ export interface CacheResponse {
   total_input_cached?: number;
   total_output?: number;
   events?: CacheEvent[];
+  cache_note?: string;
 }
 
 // ===== attribution =====

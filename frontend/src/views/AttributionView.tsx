@@ -55,6 +55,11 @@ export function AttributionView({
                 ，是可优化的主要部分——精简历史可显著降低每轮输入 token。
               </div>
             )}
+            {r?.estimation_note && (
+              <div className="muted small" style={{ marginTop: 8 }}>
+                {r.estimation_note}
+              </div>
+            )}
           </>
         ) : (
           <Empty text="暂无组件数据" />
@@ -101,12 +106,6 @@ export function AttributionView({
           </table>
         )}
       </Panel>
-
-      {r?.estimation_note && (
-        <div className="muted small" style={{ marginTop: 8 }}>
-          {r.estimation_note}
-        </div>
-      )}
     </div>
   );
 }
