@@ -39,9 +39,9 @@ function emptyOverride(targetType: OverrideTarget = "umo"): BudgetOverrideRow {
   };
 }
 
-export function BudgetsView() {
-  const budgetsRes = useApi(() => api.getBudgets(), []);
-  const provsRes = useApi(() => api.getProviders(), []);
+export function BudgetsView({ refreshNonce }: { refreshNonce: number }) {
+  const budgetsRes = useApi(() => api.getBudgets(), [refreshNonce]);
+  const provsRes = useApi(() => api.getProviders(), [refreshNonce]);
   const data = budgetsRes.data;
 
   const [tokens, setTokens] = useState<Record<string, number>>({});

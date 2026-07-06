@@ -1,8 +1,12 @@
 """归因分析 Mixin。
 
 在 ``on_llm_request`` 的 head / tail 两个钩子里快照上下文，估算 system / tools /
-history / user 各组件的 token 占比，以及 head→tail 期间所有插件累计注入的
+history / user / extra 各组件的 token 占比，以及 head→tail 期间所有插件累计注入的
 token 总量（「注入归因」）。
+
+``user`` 维度仅含当前轮 ``prompt`` 文本 + ``image_urls`` / ``audio_urls`` 媒体块；
+``extra`` 维度单独估算 ``extra_user_content_parts``（插件注入的额外内容块，含文本
+与图片 / 音频等非文本块），二者不再合并。
 
 源码约束（已核对 ``astrbot/core/``）：
 - ``ProviderRequest.system_prompt`` 是纯 str；``contexts`` 是 OpenAI messages
@@ -31,6 +35,17 @@ from astrbot.api.provider import ProviderRequest
 
 from .config import get_config
 
+# 非文本块的固定 token 估值（与 ``_content_tokens`` 中多模态块的估值保持一致）。
+IMAGE_TOKEN_EST = 85
+AUDIO_TOKEN_EST = 200
+
+# 估算说明：展示端（命令 / Web API / 前端）统一引用，确保算法口径一致。
+ESTIMATION_NOTE = (
+    "估算说明（非精确计费）：CJK 字符 ≈ 0.6 token/字、ASCII ≈ 0.25 token/字"
+    "（≈4 字符/token）；图片 ≈ 85 token、音频 ≈ 200 token。"
+    "基于已记录的归因样本数据估算，仅供组件占比参考。"
+)
+
 
 def _str_tokens(s: str) -> int:
     """混合启发式估算字符串 token 数（纯函数）。
@@ -53,6 +68,7 @@ def _content_tokens(content: Any) -> int:
 
     ``content`` 可为 str 或多模态 ``list[dict]``（每项含 ``type``）：
     - ``text``：按文本估算
+    - ``think``：按思考文本估算
     - ``image_url`` / ``audio_url``：给固定估值（图像 ~85，音频 ~200）
     其它类型按其 repr 文本粗估。
     """
@@ -69,12 +85,39 @@ def _content_tokens(content: Any) -> int:
             ptype = part.get("type")
             if ptype == "text":
                 total += _str_tokens(str(part.get("text", "")))
+            elif ptype == "think":
+                total += _str_tokens(str(part.get("think", "")))
             elif ptype in ("image_url", "input_audio", "audio_url"):
-                total += 85 if ptype == "image_url" else 200
+                total += IMAGE_TOKEN_EST if ptype == "image_url" else AUDIO_TOKEN_EST
             else:
                 total += _str_tokens(str(part))
         return total
     return _str_tokens(str(content))
+
+
+def _content_part_tokens(part: Any) -> int:
+    """估算一个 ``ContentPart`` 对象的 token（纯函数，duck-typing）。
+
+    覆盖所有块类型，包括非文本块：
+    - ``text``：按 ``.text`` 文本估算
+    - ``think``：按 ``.think`` 文本估算
+    - ``image_url``：固定估值 ``IMAGE_TOKEN_EST``
+    - ``audio_url``：固定估值 ``AUDIO_TOKEN_EST``
+    - dict：回退到 ``_content_tokens``（已处理多模态 dict）
+    - 其它：按 repr 文本粗估（截断 2000 字符防膨胀）
+    """
+    if isinstance(part, dict):
+        return _content_tokens([part])
+    ptype = getattr(part, "type", None)
+    if ptype == "text":
+        return _str_tokens(getattr(part, "text", "") or "")
+    if ptype == "think":
+        return _str_tokens(getattr(part, "think", "") or "")
+    if ptype == "image_url":
+        return IMAGE_TOKEN_EST
+    if ptype == "audio_url":
+        return AUDIO_TOKEN_EST
+    return _str_tokens(str(part)[:2000])
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
@@ -165,29 +208,45 @@ class AttributorMixin:
 
         Returns:
             ``{"system": int, "tools": int, "history": int, "user": int,
-            "total": int}``。``total = system + tools + history``（即发给 LLM
-            的实际上下文规模）；``user`` 单独记录当前轮 prompt+extra 规模
-            （可能与 history 末尾重叠，仅作参考）。任何异常降级为全零。
+            "extra": int, "total": int}``。
+
+            - ``user``：当前轮 ``prompt`` 文本 + ``image_urls`` / ``audio_urls``
+              媒体块（用户原始发言，不含插件注入）。
+            - ``extra``：``extra_user_content_parts`` 全部块（文本 / 图片 / 音频
+              等，插件注入的额外内容），与 ``user`` 分开统计。
+            - ``total``：五维之和，即发给 LLM 的完整请求估算规模。
+            任何异常降级为全零。
         """
         try:
             system = _str_tokens(getattr(req, "system_prompt", "") or "")
             tools = _tool_tokens(getattr(req, "func_tool", None))
             contexts = list(getattr(req, "contexts", None) or [])
             history = estimate_tokens(contexts)
+            # user = prompt 文本 + 媒体块（图片 / 音频），均为用户原始发言
             user = _str_tokens(getattr(req, "prompt", "") or "")
-            extra = getattr(req, "extra_user_content_parts", None) or []
-            for p in extra:
-                text = getattr(p, "text", None) if not isinstance(p, str) else p
-                user += _str_tokens(text or "")
+            user += len(getattr(req, "image_urls", None) or []) * IMAGE_TOKEN_EST
+            user += len(getattr(req, "audio_urls", None) or []) * AUDIO_TOKEN_EST
+            # extra = 插件注入的额外内容块（所有类型，含非文本）
+            extra = 0
+            for p in getattr(req, "extra_user_content_parts", None) or []:
+                extra += _content_part_tokens(p)
             return {
                 "system": system,
                 "tools": tools,
                 "history": history,
                 "user": user,
-                "total": system + tools + history,
+                "extra": extra,
+                "total": system + tools + history + user + extra,
             }
         except Exception:
-            return {"system": 0, "tools": 0, "history": 0, "user": 0, "total": 0}
+            return {
+                "system": 0,
+                "tools": 0,
+                "history": 0,
+                "user": 0,
+                "extra": 0,
+                "total": 0,
+            }
 
     def record_initial_context(self, req: ProviderRequest) -> None:
         """head 钩子调用：采样后存入初始快照（key=id(req)）。
@@ -213,7 +272,9 @@ class AttributorMixin:
         Returns:
             ``{"initial": {...}, "final": {...}, "injected": {component: delta},
             "injected_total": int}``；无初始快照（head 未采）则返回 None。
-        结果同时写入 ``_attr_last[umo]``。
+            ``injected`` 跟踪 ``system`` / ``tools`` / ``history`` / ``extra``
+            四维的 head→tail 增量（``user`` 为用户原始发言，不参与注入差）。
+            结果同时写入 ``_attr_last[umo]``。
         """
         self.__init_attribution__()
         try:
@@ -223,7 +284,7 @@ class AttributorMixin:
             final = self.snapshot_context(req)
             injected = {
                 k: max(0, int(final.get(k, 0)) - int(initial.get(k, 0)))
-                for k in ("system", "tools", "history")
+                for k in ("system", "tools", "history", "extra")
             }
             injected_total = sum(injected.values())
             result: dict[str, Any] = {

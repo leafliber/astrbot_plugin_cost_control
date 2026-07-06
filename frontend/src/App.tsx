@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useBridge } from "./hooks/useBridge";
 import { useTheme } from "./hooks/useTheme";
 import { useChartColors } from "./hooks/useChartColors";
@@ -36,7 +36,8 @@ export function App() {
   const [win, setWin] = useState<Window>("weekly");
   const [refreshNonce, setRefreshNonce] = useState(0);
 
-  // 挂载后拉取 config，注入主货币代码到 format 模块（全局 fmtCost 用）
+  // 挂载后拉取 config，注入主货币代码到 format 模块（全局 fmtCost 用）。
+  // 依赖 refreshNonce：每次刷新（含主货币切换）都重新拉取，确保货币代码同步。
   useEffect(() => {
     if (!ready) return;
     api
@@ -46,9 +47,22 @@ export function App() {
         if (typeof cur === "string" && cur) setCurrencyCode(cur);
       })
       .catch(() => {});
-  }, [ready]);
+  }, [ready, refreshNonce]);
 
   const refresh = () => setRefreshNonce((n) => n + 1);
+
+  // 主货币切换回调：先重新拉取 config 更新货币代码，再刷新所有页面数据，
+  // 确保其他页面重新渲染时 fmtCost 已使用新的货币符号。
+  const handleCurrencyChanged = useCallback(async () => {
+    try {
+      const cfg = await api.getConfig();
+      const cur = (cfg as Record<string, unknown>)?.currency_symbol;
+      if (typeof cur === "string" && cur) setCurrencyCode(cur);
+    } catch {
+      /* 忽略，下方 refresh 仍会通过 effect 重试 */
+    }
+    setRefreshNonce((n) => n + 1);
+  }, []);
   const bridgeInfo = ctx
     ? `${ctx.displayName || "插件"} · ${ctx.locale || ""}`
     : "";
@@ -105,17 +119,17 @@ export function App() {
             onNavigate={(t) => setTab(t)}
           />
         ) : tab === "records" ? (
-          <RecordsView />
+          <RecordsView refreshNonce={refreshNonce} />
         ) : tab === "budgets" ? (
-          <BudgetsView />
+          <BudgetsView refreshNonce={refreshNonce} />
         ) : tab === "cache" ? (
           <CacheView window={win} refreshNonce={refreshNonce} />
         ) : tab === "attribution" ? (
           <AttributionView window={win} refreshNonce={refreshNonce} />
         ) : tab === "pricing" ? (
-          <PricingView />
+          <PricingView refreshNonce={refreshNonce} />
         ) : tab === "settings" ? (
-          <SettingsView />
+          <SettingsView onCurrencyChanged={handleCurrencyChanged} />
         ) : (
           <div className="empty">「{TABS.find((t) => t.key === tab)?.label}」开发中…</div>
         )}

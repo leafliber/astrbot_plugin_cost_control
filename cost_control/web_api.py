@@ -37,6 +37,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from .attributor import ESTIMATION_NOTE
 from .budget import resolve_tz
 from .config import (
     CONFIG_DEFAULTS,
@@ -1222,6 +1223,7 @@ class WebApiMixin:
                 "tools": [],
                 "history": [],
                 "user": [],
+                "extra": [],
             }
             for s in sups:
                 attr = getattr(s, "attribution", None)
@@ -1240,7 +1242,9 @@ class WebApiMixin:
                         if isinstance(v, int):
                             comps[k].append(v)
             avg = {k: round(sum(v) / len(v)) if v else 0 for k, v in comps.items()}
-            return self._ok({"recent": items, "avg_components": avg})
+            return self._ok(
+                {"recent": items, "avg_components": avg, "estimation_note": ESTIMATION_NOTE}
+            )
         except Exception as e:
             return self._err(str(e))
 

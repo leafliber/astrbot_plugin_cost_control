@@ -21,11 +21,12 @@
 
 ## 📦 安装
 
-两种安装方式（推荐方式1）：
+三种安装方式（推荐方式1）：
 
-1. 在Astrbot管理面板，插件-Astrbot插件-右下角+号-从链接安装，复制本页面的链接到对话框安装：
+1. **【推荐】通过插件市场安装**：在 AstrBot WebUI「插件管理」→「插件市场」中搜索「成本控制」，点击安装即可。
+2. 在Astrbot管理面板，插件-Astrbot插件-右下角+号-从链接安装，复制本页面的链接到对话框安装：
     https://github.com/leafliber/astrbot_plugin_cost_control
-2. 把本插件目录直接放入 AstrBot 的 `data/plugins/`
+3. 把本插件目录直接放入 AstrBot 的 `data/plugins/`
 
 重启 AstrBot,或通过 WebUI「插件管理」重载本插件。**无第三方依赖**,复用 AstrBot 自带环境。
 

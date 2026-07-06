@@ -216,7 +216,11 @@ function valOf(cfg: Record<string, unknown>, sec: string, k: string): unknown {
   return v === undefined || v === null ? "" : v;
 }
 
-export function SettingsView() {
+export function SettingsView({
+  onCurrencyChanged,
+}: {
+  onCurrencyChanged?: () => void;
+}) {
   const res = useApi(() => api.getConfig(), []);
   const [edit, setEdit] = useState<Record<string, unknown>>({});
   const [ready, setReady] = useState(false);
@@ -234,7 +238,13 @@ export function SettingsView() {
   const { status, error } = useAutoSave(
     edit,
     async (p) => {
-      void (await api.postSaveConfig(p));
+      await api.postSaveConfig(p);
+      // 主货币变更：通知父组件刷新全局货币代码与其它页面数据
+      const oldCur = (res.data as Record<string, unknown> | null)?.currency_symbol;
+      const newCur = p.currency_symbol;
+      if (newCur !== oldCur && onCurrencyChanged) {
+        onCurrencyChanged();
+      }
     },
     { enabled: ready },
   );

@@ -43,7 +43,7 @@ function rangeParams(filter: RecordsFilter): { start: string; end: string } {
   return { start: filter.start || "", end: filter.end || "" };
 }
 
-export function RecordsView() {
+export function RecordsView({ refreshNonce }: { refreshNonce: number }) {
   const [filter, setFilter] = useState<RecordsFilter>(DEFAULT_FILTER);
   const [aggMode, setAggMode] = useState<"model" | "umo">("model");
   const [page, setPage] = useState(1);
@@ -54,7 +54,7 @@ export function RecordsView() {
   );
 
   // 模型下拉选项：从 overview 的 cost_by_model 取（一次性，不随筛选变）
-  const modelsReq = useApi(() => api.getOverview("daily"), []);
+  const modelsReq = useApi(() => api.getOverview("daily"), [refreshNonce]);
   const models = (modelsReq.data?.cost_by_model || []).map((m) => m.model);
 
   const aggRes = useApi(
@@ -74,6 +74,7 @@ export function RecordsView() {
       filter.model,
       range.start,
       range.end,
+      refreshNonce,
     ],
   );
 
@@ -97,6 +98,7 @@ export function RecordsView() {
       range.end,
       filter.order_by,
       filter.order_dir,
+      refreshNonce,
     ],
   );
 

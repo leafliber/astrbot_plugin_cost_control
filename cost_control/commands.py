@@ -20,6 +20,7 @@ from typing import Any
 
 from astrbot.api.event import AstrMessageEvent, filter
 
+from .attributor import ESTIMATION_NOTE
 from .budget import _DIM_ORDER, day_window_start, resolve_tz
 from .config import get_config, get_pricing
 from .cost import compute_row_cost
@@ -265,12 +266,16 @@ class CommandsMixin:
             lines = [
                 "🔎 最近一次请求的上下文归因（token 估算）",
                 f"system {final.get('system', 0)} / tools {final.get('tools', 0)} / "
-                f"history {final.get('history', 0)} / user {final.get('user', 0)}",
+                f"history {final.get('history', 0)} / user {final.get('user', 0)} / "
+                f"extra {final.get('extra', 0)}",
                 f"  → 总计 {final.get('total', 0)}",
                 f"本轮插件累计注入 {inj.get('injected_total', 0)}"
                 f"（system +{injected.get('system', 0)} / "
                 f"tools +{injected.get('tools', 0)} / "
-                f"history +{injected.get('history', 0)}）",
+                f"history +{injected.get('history', 0)} / "
+                f"extra +{injected.get('extra', 0)}）",
+                "",
+                ESTIMATION_NOTE,
             ]
             yield event.plain_result("\n".join(lines))
         except Exception as e:

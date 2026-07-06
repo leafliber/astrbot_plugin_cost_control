@@ -241,6 +241,7 @@ export interface AttributionComponents {
   tools?: number;
   history?: number;
   user?: number;
+  extra?: number;
 }
 
 export interface AttributionItem {
@@ -253,6 +254,7 @@ export interface AttributionItem {
 export interface AttributionResponse {
   recent?: AttributionItem[];
   avg_components?: AttributionComponents;
+  estimation_note?: string;
 }
 
 // ===== pricing =====

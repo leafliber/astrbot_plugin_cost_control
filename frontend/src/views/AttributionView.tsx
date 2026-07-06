@@ -25,6 +25,7 @@ export function AttributionView({
     { label: "tools", value: avg.tools || 0, color: "#8ab4ff" },
     { label: "history", value: avg.history || 0, color: "var(--warn)" },
     { label: "user", value: avg.user || 0, color: "var(--ok)" },
+    { label: "extra", value: avg.extra || 0, color: "#c084fc" },
   ];
   const totalAttr = segments.reduce((s, c) => s + c.value, 0);
   const histPct =
@@ -39,6 +40,7 @@ export function AttributionView({
           { label: "tools 平均", value: fmtNum(avg.tools) },
           { label: "history 平均", value: fmtNum(avg.history) },
           { label: "user 平均", value: fmtNum(avg.user) },
+          { label: "extra 平均", value: fmtNum(avg.extra) },
         ]}
       />
 
@@ -74,6 +76,7 @@ export function AttributionView({
                 <th>tools</th>
                 <th>history</th>
                 <th>user</th>
+                <th>extra</th>
               </tr>
             </thead>
             <tbody>
@@ -90,6 +93,7 @@ export function AttributionView({
                     <td>{fmtNum(a.tools)}</td>
                     <td>{fmtNum(a.history)}</td>
                     <td>{fmtNum(a.user)}</td>
+                    <td>{fmtNum(a.extra)}</td>
                   </tr>
                 );
               })}
@@ -97,6 +101,12 @@ export function AttributionView({
           </table>
         )}
       </Panel>
+
+      {r?.estimation_note && (
+        <div className="muted small" style={{ marginTop: 8 }}>
+          {r.estimation_note}
+        </div>
+      )}
     </div>
   );
 }

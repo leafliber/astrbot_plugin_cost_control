@@ -16,8 +16,8 @@ import {
   isDraftEmpty,
 } from "../components/ProviderPricingCard";
 
-export function PricingView() {
-  const res = useApi(() => api.getPricing(), []);
+export function PricingView({ refreshNonce }: { refreshNonce: number }) {
+  const res = useApi(() => api.getPricing(), [refreshNonce]);
   const data = res.data;
   const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
   const [resetResult, setResetResult] = useState("");
