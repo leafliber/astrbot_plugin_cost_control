@@ -32,7 +32,7 @@ const SECTIONS: SettingSection[] = [
   {
     key: "_master",
     title: "总开关与全局",
-    desc: "插件的启停、用量「日」窗口的起算时刻，以及生效平台。",
+    desc: "插件的启停、用量「日」窗口的起算时刻，以及主货币等。",
     fields: [
       {
         k: "enabled",
@@ -46,12 +46,6 @@ const SECTIONS: SettingSection[] = [
         type: "str",
         width: 100,
         help: "本地时区 HH:MM。预算计数与用量报表都按此划分「一天」。例如 09:00 表示 09:00 至次日 09:00 算作一天。",
-      },
-      {
-        k: "platforms",
-        label: "生效平台",
-        type: "csv",
-        help: "限定插件只处理这些平台的请求（如 aiocqhttp、telegram_official、lark）；留空 = 对所有平台生效。",
       },
       {
         k: "currency_symbol",
@@ -206,6 +200,19 @@ const SECTIONS: SettingSection[] = [
       },
     ],
   },
+  {
+    key: "advanced",
+    title: "高级",
+    desc: "非默认场景下的可选配置，普通用户无需调整。",
+    fields: [
+      {
+        k: "platforms",
+        label: "生效平台",
+        type: "csv",
+        help: "限定插件只处理这些平台的请求（如 aiocqhttp、telegram_official、lark）；留空 = 对所有平台生效。",
+      },
+    ],
+  },
 ];
 
 function valOf(cfg: Record<string, unknown>, sec: string, k: string): unknown {
@@ -227,6 +234,7 @@ export function SettingsView({
   const [actionResult, setActionResult] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
+  const [ratesOpen, setRatesOpen] = useState(false);
 
   useEffect(() => {
     if (res.data) {
@@ -325,8 +333,11 @@ export function SettingsView({
       </div>
 
       {SECTIONS.map((sec) => (
-        <Panel key={sec.key}>
-          <h2>{sec.title}</h2>
+        <Panel key={sec.key} className={sec.key === "advanced" ? "panel-advanced" : undefined}>
+          <h2>
+            {sec.title}
+            {sec.key === "advanced" && <span className="badge-advanced">高级</span>}
+          </h2>
           {sec.desc && <p className="section-desc">{sec.desc}</p>}
           <div className="set-fields">
             {sec.fields.map((f) => {
@@ -440,13 +451,26 @@ export function SettingsView({
           </div>
         )}
         {sortedRates.length > 0 && (
-          <div className="rate-grid" style={{ marginTop: 12 }}>
-            {sortedRates.map(([code, rate]) => (
-              <div key={code} className="rate-item">
-                <span className="rate-code">{code}</span>
-                <span className="rate-value">{rate.toFixed(4)}</span>
+          <div className="rate-disclosure">
+            <button
+              type="button"
+              className="rate-toggle"
+              onClick={() => setRatesOpen((o) => !o)}
+              aria-expanded={ratesOpen}
+            >
+              <span className="rate-toggle-caret">{ratesOpen ? "▾" : "▸"}</span>
+              查看 {sortedRates.length} 个汇率
+            </button>
+            {ratesOpen && (
+              <div className="rate-grid" style={{ marginTop: 10 }}>
+                {sortedRates.map(([code, rate]) => (
+                  <div key={code} className="rate-item">
+                    <span className="rate-code">{code}</span>
+                    <span className="rate-value">{rate.toFixed(4)}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         )}
       </Panel>

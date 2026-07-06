@@ -1163,6 +1163,23 @@ tr:hover td {
   margin: 2px 0 10px;
 }
 
+.panel-advanced h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge-advanced {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  line-height: 1.5;
+}
+
 .set-fields {
   display: flex;
   flex-direction: column;
@@ -1210,6 +1227,37 @@ tr:hover td {
 }
 
 /* 汇率展示网格 */
+.rate-disclosure {
+  margin-top: 10px;
+}
+
+.rate-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.rate-toggle:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.rate-toggle-caret {
+  font-size: 10px;
+  width: 10px;
+  display: inline-block;
+  text-align: center;
+  line-height: 1;
+}
+
 .rate-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));

@@ -55,10 +55,8 @@ PLUGIN_NAME = "astrbot_plugin_cost_control"
 
 # 缓存诊断说明：展示端统一引用，确保口径一致。
 CACHE_NOTE = (
-    "计算说明：缓存命中率 = cache_read / (cache_read + 非缓存输入 + cache_creation) × 100，"
-    "取窗口内各请求的算术平均；token 三类（缓存命中 / 缓存未命中 / 输出）来自 ProviderStat 原生记录。"
-    "优化潜力按平均命中率分档：≥80% 优秀（无需优化）/ 60–80% 低 / 40–60% 中 / <40% 高。"
-    "基于已记录的样本数据统计，仅供趋势参考。"
+    "命中率 = cache_read / (cache_read + 非缓存输入 + cache_creation)；优化潜力按平均命中率分档："
+    "≥80% 优秀 / 60–80% 低 / 40–60% 中 / <40% 高。"
 )
 
 
