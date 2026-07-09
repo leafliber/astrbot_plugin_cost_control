@@ -4,6 +4,40 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-07-09
+
+增量迭代版本。聚焦 **上下文归因维度细化**、**缓存诊断体验优化** 与 **前端交互打磨**。
+
+### 新增
+
+#### 上下文归因
+
+- **`extra` 维度拆分**：将 `extra_user_content_parts`（插件注入的额外内容块）从 `user` 维度中拆出，单独作为 `extra` 维度统计。`user` 现仅含当前轮 `prompt` 文本 + 图片/音频等媒体块，`extra` 独立估算所有注入块（含文本与图片/音频等非文本块），二者不再合并。
+- **非文本块估算覆盖**：新增 `_content_part_tokens()`，覆盖 `text` / `think` / `image_url`（≈85 token）/ `audio_url`（≈200 token）全部块类型；`total` 改为五维之和（system + tools + history + user + extra）。
+- **注入差追踪 `extra`**：`pop_injection` 的 `injected` 从 3 维扩展到 4 维，插件注入到 `extra_user_content_parts` 的内容也被捕获。
+- **组件占比悬浮提示**：鼠标悬停在图例项上显示各维度（system / tools / history / user / extra）的简介与可能来源说明。
+- **计算说明**：上下文归因与缓存诊断各自新增估算说明（标注算法口径并声明基于样本数据估算），展示在占比图表正下方。
+
+#### 缓存诊断
+
+- **优化潜力「优秀」档**：新增命中率 ≥80% 的「优秀」等级（绿色加粗），优秀时不显示排查建议。
+
+#### 设置页
+
+- **汇率折叠栏**：汇率展示改为默认收起的下拉栏，点击「查看 N 个汇率」展开。
+- **「高级」面板**：「生效平台」从「总开关与全局」移至独立的「高级」面板，标题旁带「高级」徽标。
+
+### 变更
+
+- **优化潜力分档口径**：从基于 `potentialPct`（成本降低比例）改为基于平均缓存命中率直接判定：≥80% 优秀 / 60–80% 低 / 40–60% 中 / <40% 高。
+- **主货币切换全局刷新**：切换主货币后自动重新拉取 config 更新货币代码，并刷新所有页面数据，确保费用显示同步更新（此前其他页面不会更新）。
+- **README 安装方式**：新增「通过插件市场安装」并标记为推荐，置于三种安装方式之首。
+
+### 修复
+
+- **切换 tab 页面晃动**：不同页面内容高度差异导致垂直滚动条出现/消失，引起横向布局偏移。通过 `scrollbar-gutter: stable` 为滚动条槽预留固定空间解决。
+- **缓存破坏事件变更内容溢出**：变更摘要行 grid 列从 `auto` 改为 `minmax(0,1fr)` 并加 `overflow-wrap: anywhere`；diff 详情文本 `white-space` 从 `pre` 改为 `pre-wrap`，长内容自动换行不再超出对话框。
+
 ## [0.2.0] - 2026-07-05
 
 第二个稳定版本。本版本围绕 **多货币结算** 重构了成本计算链路，新增 **首页成本趋势图** 与多币种预算 / 定价 UI，确保最终结算与显示始终对齐到用户选定的主货币。
@@ -118,3 +152,4 @@
 
 [0.1.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.1.0
 [0.2.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.2.0
+[0.2.1]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.2.1

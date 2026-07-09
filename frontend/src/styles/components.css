@@ -547,6 +547,42 @@ tr:hover td {
   gap: 5px;
 }
 
+/* 带 tooltip 的 legend 项 */
+.legend-item-tip {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dashed var(--border);
+}
+
+.legend-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s, visibility 0.15s;
+  pointer-events: none;
+  z-index: 50;
+  white-space: normal;
+  text-align: left;
+}
+
+.legend-item-tip:hover .legend-tip {
+  opacity: 1;
+  visibility: visible;
+}
+
 .legend-dot {
   display: inline-block;
   width: 9px;

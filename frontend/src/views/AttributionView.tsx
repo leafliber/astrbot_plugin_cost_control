@@ -21,11 +21,36 @@ export function AttributionView({
   const r = res.data;
   const avg = r?.avg_components || {};
   const segments = [
-    { label: "system", value: avg.system || 0, color: "var(--accent)" },
-    { label: "tools", value: avg.tools || 0, color: "#8ab4ff" },
-    { label: "history", value: avg.history || 0, color: "var(--warn)" },
-    { label: "user", value: avg.user || 0, color: "var(--ok)" },
-    { label: "extra", value: avg.extra || 0, color: "#c084fc" },
+    {
+      label: "system",
+      value: avg.system || 0,
+      color: "var(--accent)",
+      tooltip: "系统提示词，定义 LLM 的角色与行为规则。来源：AstrBot 全局配置、插件注入的系统指令。",
+    },
+    {
+      label: "tools",
+      value: avg.tools || 0,
+      color: "#8ab4ff",
+      tooltip: "工具/函数定义（function calling），声明 LLM 可调用的工具。来源：已注册的函数工具、插件提供的工具。",
+    },
+    {
+      label: "history",
+      value: avg.history || 0,
+      color: "var(--warn)",
+      tooltip: "对话历史，即之前的多轮消息上下文。来源：会话记录中的历史消息，随轮次累积增长。",
+    },
+    {
+      label: "user",
+      value: avg.user || 0,
+      color: "var(--ok)",
+      tooltip: "当前轮用户输入，包括文本与图片/音频等媒体。来源：用户的原始发言。",
+    },
+    {
+      label: "extra",
+      value: avg.extra || 0,
+      color: "#c084fc",
+      tooltip: "插件注入的额外用户内容块。来源：其他插件通过 extra_user_content_parts 追加的指令、提醒、上下文等。",
+    },
   ];
   const totalAttr = segments.reduce((s, c) => s + c.value, 0);
   const histPct =
