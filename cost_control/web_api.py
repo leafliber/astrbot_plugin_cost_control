@@ -80,6 +80,10 @@ class WebApiMixin:
     query_usage_timeseries: Any
     query_cache_events: Any
     cleanup_old_supplements: Any
+    # AiDiagMixin 提供。
+    run_ai_diag: Any
+    _get_default_provider_id: Any
+    _get_provider_display_name: Any
     get_pricing: Any
     get_data_dir: Any
     register_cron: Any
@@ -131,6 +135,18 @@ class WebApiMixin:
                     self.api_action_sync_rates,
                     ["POST"],
                     "同步最新汇率",
+                ),
+                (
+                    f"{prefix}/ai_provider",
+                    self.api_ai_provider,
+                    ["GET"],
+                    "查询默认 AI Provider",
+                ),
+                (
+                    f"{prefix}/ai_diag",
+                    self.api_ai_diag,
+                    ["POST"],
+                    "AI 智能成本诊断",
                 ),
             ]
             for route, handler, methods, desc in routes:
@@ -273,6 +289,33 @@ class WebApiMixin:
             return self._ok(report)
         except Exception as e:
             return self._err(str(e))
+
+    async def api_ai_provider(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /ai_provider``：查询当前默认 AI Provider（用于按钮区域展示）。"""
+        try:
+            provider_id = self._get_default_provider_id()
+            provider_name = self._get_provider_display_name(provider_id)
+            return self._ok(
+                {
+                    "provider_id": provider_id,
+                    "provider_name": provider_name,
+                    "available": provider_id is not None,
+                }
+            )
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_ai_diag(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /ai_diag``：执行 AI 智能成本诊断。
+
+        收集5个维度数据（成本/缓存/归因/预算/定价），调用默认 LLM Provider
+        综合分析，返回结构化 JSON 结论（评分/风险/建议）。
+        """
+        try:
+            result = await self.run_ai_diag()
+            return self._ok(result)
+        except Exception as e:
+            return self._err(f"{type(e).__name__}: {e}")
 
     async def api_alerts(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /alerts``：总览页顶部告警列表（黄色提醒，引导用户处理）。

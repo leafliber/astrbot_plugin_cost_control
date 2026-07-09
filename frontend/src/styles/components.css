@@ -1594,3 +1594,204 @@ tr:hover td {
     transform: translateX(-50%) translateY(0);
   }
 }
+
+/* ===== AI 成本诊断 ===== */
+.aidiag-panel {
+  margin-bottom: 16px;
+}
+
+.aidiag-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aidiag-provider {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* idle 状态 */
+.aidiag-idle {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.aidiag-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.aidiag-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* loading 状态 */
+.aidiag-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.aidiag-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: aidiag-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes aidiag-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* error 状态 */
+.aidiag-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.aidiag-error-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bad);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.aidiag-retry {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+/* result 状态 */
+.aidiag-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aidiag-score-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.aidiag-score {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  min-width: 44px;
+  text-align: center;
+}
+
+.aidiag-score-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.aidiag-score-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.aidiag-overall {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 紧凑风险表格 */
+.aidiag-table {
+  font-size: 12.5px;
+}
+
+.aidiag-table th,
+.aidiag-table td {
+  padding: 5px 8px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.aidiag-table .aidiag-advice {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* 亮点（无风险时展示） */
+.aidiag-highlights {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.aidiag-highlight {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.aidiag-highlight-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+
+.aidiag-summary {
+  font-size: 12.5px;
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  line-height: 1.5;
+}
+
+.aidiag-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.aidiag-provider-small {
+  font-size: 11px;
+  color: var(--text-dim);
+}

@@ -321,3 +321,35 @@ export interface PricingResponse {
   exchange_rates?: Record<string, number>;
   exchange_rates_updated_at?: string;
 }
+
+// ===== AI 诊断 =====
+export interface AiProviderInfo {
+  provider_id: string | null;
+  provider_name: string | null;
+  available: boolean;
+  error?: string;
+}
+
+export interface AiDiagRisk {
+  module: string;
+  level: "high" | "medium" | "low" | "info";
+  issue: string;
+  advice: string;
+}
+
+export interface AiDiagConclusion {
+  overall?: string;
+  overall_score?: number;
+  highlights?: string[];
+  risks?: AiDiagRisk[];
+  summary?: string;
+}
+
+export interface AiDiagResult {
+  timestamp?: number;
+  provider_id?: string | null;
+  provider_name?: string | null;
+  conclusion?: AiDiagConclusion | null;
+  raw_text?: string | null;
+  error?: string | null;
+}

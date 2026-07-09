@@ -17,6 +17,7 @@ import { DeltaBadge } from "../components/DeltaBadge";
 import { Panel } from "../components/Panel";
 import { Loading, ErrorBox, Empty } from "../components/Feedback";
 import { AlertsBar } from "../components/AlertsBar";
+import { AiDiag } from "../components/AiDiag";
 import { LineTrend } from "../components/charts/LineTrend";
 import { CostTrend } from "../components/charts/CostTrend";
 import { ModelCostBar } from "../components/charts/ModelCostBar";
@@ -116,6 +117,7 @@ export function OverviewView({
         <AlertsBar alerts={alertItems} onNavigate={onNavigate} />
       )}
       <StatCardGrid items={cards} />
+      <AiDiag />
       <div className="grid-2">
         <Panel title={`用量趋势（近 ${days} 天）`}>
           {series.length ? (

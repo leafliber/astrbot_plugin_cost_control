@@ -21,6 +21,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 
+from .cost_control.ai_diag import AiDiagMixin
 from .cost_control.analytics import AnalyticsMixin
 from .cost_control.attributor import AttributorMixin
 from .cost_control.budget import BudgetMixin
@@ -47,6 +48,7 @@ class Main(
     CacheDiagMixin,
     PromptOptimizerMixin,
     AnalyticsMixin,
+    AiDiagMixin,
     ScheduleMixin,
     WebApiMixin,
     CommandsMixin,

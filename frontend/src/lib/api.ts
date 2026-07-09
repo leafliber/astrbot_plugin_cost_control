@@ -4,6 +4,8 @@
 import { getBridge } from "./bridge";
 import type {
   AlertItem,
+  AiDiagResult,
+  AiProviderInfo,
   AttributionResponse,
   Bucket,
   BudgetResponse,
@@ -87,4 +89,8 @@ export const api = {
       exchange_rates_updated_at: string;
       count: number;
     }>("actions/sync_rates"),
+
+  // AI 诊断
+  getAiProvider: () => get<AiProviderInfo>("ai_provider"),
+  postAiDiag: () => post<AiDiagResult>("ai_diag"),
 };
