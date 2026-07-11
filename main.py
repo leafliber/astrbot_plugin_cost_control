@@ -29,7 +29,6 @@ from .cost_control.cache_diag import CacheDiagMixin
 from .cost_control.commands import CommandsMixin
 from .cost_control.cost import CostMixin
 from .cost_control.notifier import NotifierMixin
-from .cost_control.prompt_optimizer import PromptOptimizerMixin
 from .cost_control.schedule import ScheduleMixin
 from .cost_control.store import StoreMixin
 from .cost_control.supplement import SupplementMixin
@@ -46,7 +45,6 @@ class Main(
     BudgetMixin,
     NotifierMixin,
     CacheDiagMixin,
-    PromptOptimizerMixin,
     AnalyticsMixin,
     AiDiagMixin,
     ScheduleMixin,

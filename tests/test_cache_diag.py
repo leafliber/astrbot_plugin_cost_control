@@ -1,6 +1,6 @@
 """``CacheDiagMixin`` 纯函数单测：命中率与四类破坏诊断。"""
 
-from cost_control.cache_diag import _line_diff, diagnose_changes, hit_rate
+from cost_control.cache_diag import _format_tools, _line_diff, diagnose_changes, hit_rate
 
 
 def test_hit_rate_normal():
@@ -57,6 +57,122 @@ def test_line_diff_truncation():
     assert d is not None
     assert len(d) == 11  # 10 行 + 1 截断提示
     assert "已截断" in d[-1]["text"]
+
+
+def test_line_diff_long_line_truncation():
+    # 单行超过 max_line_len → 截断并追加 …
+    long_text = "x" * 300
+    d = _line_diff("short", long_text, max_line_len=50)
+    assert d is not None
+    plus = [dl for dl in d if dl["op"] == "+"]
+    assert len(plus) == 1
+    assert plus[0]["text"].endswith("…")
+    assert len(plus[0]["text"]) == 51  # 50 + …
+
+
+# ===== _format_tools =====
+
+
+class _MockTool:
+    """模拟 AstrBot 工具对象（FuncTool 等）。"""
+
+    def __init__(self, name, description, parameters):
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+
+
+def test_format_tools_basic():
+    tools = [
+        _MockTool(
+            "search",
+            "搜索内容",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "关键词"},
+                    "limit": {"type": "number", "description": "数量"},
+                },
+                "required": ["query"],
+            },
+        ),
+    ]
+    text = _format_tools(tools)
+    lines = text.split("\n")
+    assert lines[0] == "[search] 搜索内容"
+    assert "  query*(string): 关键词" in lines
+    assert "  limit(number): 数量" in lines
+
+
+def test_format_tools_empty():
+    assert _format_tools(None) == ""
+    assert _format_tools([]) == ""
+
+
+def test_format_tools_dict_input():
+    tools = [
+        {
+            "name": "t1",
+            "description": "desc1",
+            "parameters": {
+                "type": "object",
+                "properties": {"p": {"type": "string", "description": "pd"}},
+            },
+        }
+    ]
+    text = _format_tools(tools)
+    assert "[t1] desc1" in text
+    assert "p(string): pd" in text
+
+
+def test_format_tools_long_line_truncated():
+    long_desc = "x" * 300
+    tools = [_MockTool("t", long_desc, {})]
+    text = _format_tools(tools)
+    line = text.split("\n")[0]
+    assert line.endswith("…")
+    assert len(line) == 201  # 200 chars + …
+
+
+def test_format_tools_precise_diff():
+    """两个版本的工具列表，仅一个参数描述变化，diff 应精确到该行。"""
+    old_tools = [
+        _MockTool(
+            "get_setu",
+            "获取图片",
+            {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "description": "标签关键词"},
+                    "num": {"type": "number", "description": "获取数量"},
+                },
+            },
+        ),
+    ]
+    new_tools = [
+        _MockTool(
+            "get_setu",
+            "获取图片",
+            {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string", "description": "标签关键词。可选。"},
+                    "num": {"type": "number", "description": "获取数量"},
+                },
+            },
+        ),
+    ]
+    old_text = _format_tools(old_tools)
+    new_text = _format_tools(new_tools)
+    d = _line_diff(old_text, new_text)
+    assert d is not None
+    # diff 应包含 tag 的旧行(-)和新行(+)，但不包含 num 的行（未变）
+    removed = [dl for dl in d if dl["op"] == "-"]
+    added = [dl for dl in d if dl["op"] == "+"]
+    assert len(removed) == 1
+    assert len(added) == 1
+    assert "标签关键词" in removed[0]["text"]
+    assert "可选" in added[0]["text"]
 
 
 def test_diagnose_system_change_with_diff():

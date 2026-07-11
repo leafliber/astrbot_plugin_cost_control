@@ -403,6 +403,59 @@ class StoreMixin:
         except Exception:
             return 0
 
+    async def purge_module(self, module: str) -> int:
+        """清空指定模块的全部数据（不可恢复），返回删除条数。
+
+        Args:
+            module: 模块标识，支持：
+
+                - ``supplements`` — 补充采集记录（CostSupplement 表）
+                - ``cache_events`` — 缓存破坏事件（CacheEvent 表）
+                - ``usage_stats`` — 原生用量记录（ProviderStat 表）
+                - ``ai_diag`` — AI 诊断缓存文件
+
+        未知模块返回 0。
+        """
+        try:
+            if module == "supplements":
+                maker = await self._ensure_session_maker()
+                async with maker() as session:
+                    r = await session.execute(
+                        delete(CostSupplement)  # type: ignore[arg-type]
+                    )
+                    await session.commit()
+                    return int(r.rowcount or 0)
+            elif module == "cache_events":
+                maker = await self._ensure_session_maker()
+                async with maker() as session:
+                    r = await session.execute(
+                        delete(CacheEvent)  # type: ignore[arg-type]
+                    )
+                    await session.commit()
+                    return int(r.rowcount or 0)
+            elif module == "usage_stats":
+                # 清空 AstrBot 原生 ProviderStat 表
+                from astrbot.core.db.po import ProviderStat
+                from sqlalchemy import delete as sa_delete
+
+                session_maker = self.context.session_maker  # type: ignore[attr-defined]
+                async with session_maker() as session:
+                    r = await session.execute(sa_delete(ProviderStat))
+                    await session.commit()
+                    return int(r.rowcount or 0)
+            elif module == "ai_diag":
+                import os
+
+                # _diag_cache_path 由 AiDiagMixin 提供（MRO 组合后可用）
+                path = getattr(self, "_diag_cache_path", lambda: None)()
+                if path and os.path.exists(path):
+                    os.remove(path)
+                    return 1
+                return 0
+        except Exception:
+            return 0
+        return 0
+
     async def backfill_cost_amounts(self, pricing: dict[str, Any]) -> int:
         """一次性回填 ``cost_amount IS NULL`` 的存量记录（幂等）。
 

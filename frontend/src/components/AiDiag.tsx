@@ -26,13 +26,23 @@ function scoreLabel(score: number): string {
   return "需修复";
 }
 
+function formatAge(seconds: number): string {
+  if (seconds < 60) return "刚刚";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  return `${Math.floor(seconds / 3600)} 小时前`;
+}
+
 export function AiDiag() {
   const [state, setState] = useState<DiagState>("idle");
   const [result, setResult] = useState<AiDiagResult | null>(null);
   const [providerName, setProviderName] = useState<string>("");
   const [providerAvailable, setProviderAvailable] = useState(true);
+  // stale cached result (age > 2h): show "view last result" button
+  const [staleResult, setStaleResult] = useState<AiDiagResult | null>(null);
+  const [staleAge, setStaleAge] = useState<string>("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // On mount: fetch provider info + last cached diagnosis
   useEffect(() => {
     api
       .getAiProvider()
@@ -43,6 +53,30 @@ export function AiDiag() {
       .catch(() => {
         setProviderAvailable(false);
       });
+
+    api
+      .getAiDiagLast()
+      .then((cached) => {
+        if (cached.result?.conclusion) {
+          if (cached.stale) {
+            // > 2h: stay idle, but offer "view last result"
+            setStaleResult(cached.result);
+            setStaleAge(
+              cached.age_seconds != null
+                ? formatAge(cached.age_seconds)
+                : "",
+            );
+          } else {
+            // < 2h: show result directly
+            setResult(cached.result);
+            setState("done");
+          }
+        }
+      })
+      .catch(() => {
+        // no cached result — stay idle
+      });
+
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
@@ -51,6 +85,7 @@ export function AiDiag() {
   const runDiag = useCallback(async () => {
     setState("loading");
     setResult(null);
+    setStaleResult(null);
     try {
       const res = await api.postAiDiag();
       if (res.error) {
@@ -68,10 +103,18 @@ export function AiDiag() {
     }
   }, []);
 
+  const showStaleResult = useCallback(() => {
+    if (staleResult) {
+      setResult(staleResult);
+      setState("done");
+    }
+  }, [staleResult]);
+
   const conclusion = result?.conclusion;
   const risks = conclusion?.risks || [];
   const highlights = conclusion?.highlights || [];
   const score = conclusion?.overall_score;
+  const isStaleView = staleResult && result === staleResult;
 
   return (
     <Panel
@@ -103,6 +146,15 @@ export function AiDiag() {
           >
             {providerAvailable ? "一键 AI 诊断" : "未配置 LLM Provider"}
           </button>
+          {staleResult && (
+            <button
+              className="btn aidiag-btn-last"
+              onClick={showStaleResult}
+              title={`上次诊断于 ${staleAge}`}
+            >
+              查看上次结果（{staleAge}）
+            </button>
+          )}
         </div>
       )}
 
@@ -125,6 +177,11 @@ export function AiDiag() {
 
       {state === "done" && conclusion && (
         <div className="aidiag-result">
+          {isStaleView && (
+            <div className="aidiag-stale-banner">
+              以下为 {staleAge} 的诊断结果，数据可能已过时
+            </div>
+          )}
           <div className="aidiag-score-row">
             <div
               className="aidiag-score"

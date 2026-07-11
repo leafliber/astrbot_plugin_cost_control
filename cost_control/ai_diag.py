@@ -33,6 +33,75 @@ class AiDiagMixin:
     query_cache_events: Any
     query_usage: Any
     query_usage_grouped: Any
+    get_data_dir: Any
+
+    # ===== 缓存读写 =====
+
+    _DIAG_CACHE_FILE = "ai_diag_cache.json"
+    _DIAG_CACHE_TTL = 2 * 3600  # 2小时（秒）
+
+    def _diag_cache_path(self) -> str:
+        """返回诊断缓存文件路径。"""
+        import os
+
+        data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
+        return os.path.join(data_dir, self._DIAG_CACHE_FILE)
+
+    def _save_diag_cache(self, result: dict[str, Any]) -> None:
+        """将诊断结果保存到缓存文件（原子写）。"""
+        try:
+            import os
+
+            path = self._diag_cache_path()
+            data_dir = os.path.dirname(path)
+            os.makedirs(data_dir, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, default=str)
+            os.replace(tmp, path)
+        except Exception:
+            pass  # 缓存写入失败不影响主流程
+
+    def _load_diag_cache(self) -> dict[str, Any] | None:
+        """读取上次诊断缓存。不存在或损坏返回 None。"""
+        try:
+            import os
+
+            path = self._diag_cache_path()
+            if not os.path.exists(path):
+                return None
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def get_cached_diag(self) -> dict[str, Any]:
+        """返回上次诊断缓存 + 时效信息。
+
+        返回结构::
+
+            {
+                "result": {...},       # 上次诊断结果（含 conclusion）
+                "timestamp": 1234567890,
+                "age_seconds": 7200,
+                "stale": False,         # 是否超过2小时
+            }
+
+        无缓存时返回 ``{"result": None}``。
+        """
+        cached = self._load_diag_cache()
+        if not cached:
+            return {"result": None}
+        ts = int(cached.get("timestamp", 0) or 0)
+        now = int(time.time())
+        age = max(0, now - ts)
+        return {
+            "result": cached,
+            "timestamp": ts,
+            "age_seconds": age,
+            "stale": age > self._DIAG_CACHE_TTL,
+        }
 
     # ===== Provider 获取 =====
 
@@ -454,6 +523,8 @@ class AiDiagMixin:
                     "[cost_control] AI诊断完成：总分 %s",
                     conclusion.get("overall_score", "?"),
                 )
+                # 5. 成功则缓存到文件
+                self._save_diag_cache(result)
             else:
                 logger.warning("[cost_control] AI诊断：LLM 返回内容无法解析为 JSON")
         except Exception as e:

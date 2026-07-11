@@ -134,33 +134,6 @@ const SECTIONS: SettingSection[] = [
     ],
   },
   {
-    key: "prompt_optimizer",
-    title: "提示词优化",
-    desc: "/optimize 命令：分析并改写 system prompt，帮助降低 token 占用。",
-    fields: [
-      {
-        k: "enabled",
-        label: "启用 /optimize 命令",
-        type: "bool",
-        help: "关闭后 /optimize 命令不可用。",
-      },
-      {
-        k: "provider_id",
-        label: "改写 Provider ID",
-        type: "str",
-        width: 180,
-        help: "执行改写所用的 LLM Provider；留空 = 使用当前会话的 Provider。",
-      },
-      {
-        k: "max_static_analysis_length",
-        label: "静态分析最大长度（字符）",
-        type: "int",
-        width: 120,
-        help: "静态分析阶段读取 system prompt 的最大字符数。",
-      },
-    ],
-  },
-  {
     key: "attribution",
     title: "上下文归因",
     desc: "拆分每次请求的 token 来源占比（系统提示词 / 工具 / 历史对话 / 用户输入），看清上下文膨胀的构成。",
@@ -235,6 +208,32 @@ export function SettingsView({
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
   const [ratesOpen, setRatesOpen] = useState(false);
+  const [purgeModules, setPurgeModules] = useState<Set<string>>(new Set());
+  const [purging, setPurging] = useState(false);
+  const [purgeMsg, setPurgeMsg] = useState("");
+
+  const PURGE_OPTIONS = [
+    {
+      key: "supplements",
+      label: "补充采集记录",
+      desc: "每请求的 cache 细分、归因注入量、cost_amount 等",
+    },
+    {
+      key: "cache_events",
+      label: "缓存破坏事件",
+      desc: "缓存诊断检测到的 system prompt / tools 变更等事件",
+    },
+    {
+      key: "usage_stats",
+      label: "原生用量记录",
+      desc: "AstrBot 内置 ProviderStat 表（全量 token 用量记录）",
+    },
+    {
+      key: "ai_diag",
+      label: "AI 诊断缓存",
+      desc: "上次 AI 诊断的结论缓存文件",
+    },
+  ];
 
   useEffect(() => {
     if (res.data) {
@@ -325,6 +324,43 @@ export function SettingsView({
   const sortedRates = Object.entries(exchangeRates)
     .filter(([k]) => k !== "USD")
     .sort((a, b) => a[0].localeCompare(b[0]));
+
+  const togglePurgeModule = (key: string) => {
+    setPurgeModules((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const doPurge = async () => {
+    if (purgeModules.size === 0) return;
+    const labels = PURGE_OPTIONS.filter((o) => purgeModules.has(o.key)).map(
+      (o) => o.label,
+    );
+    if (
+      !confirm(
+        `确定要清空以下 ${purgeModules.size} 个模块的全部数据？此操作不可恢复！\n\n${labels.join("\n")}`,
+      )
+    )
+      return;
+    setPurging(true);
+    setPurgeMsg("正在清空…");
+    try {
+      const r = await api.postPurge(Array.from(purgeModules));
+      const parts = Object.entries(r.results).map(
+        ([k, n]) =>
+          `${PURGE_OPTIONS.find((o) => o.key === k)?.label || k}: ${n} 条`,
+      );
+      setPurgeMsg(`✅ 已清空 — ${parts.join("，")}`);
+      setPurgeModules(new Set());
+    } catch (e) {
+      setPurgeMsg(`❌ 清空失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setPurging(false);
+    }
+  };
 
   return (
     <div className="settings-view">
@@ -428,6 +464,42 @@ export function SettingsView({
         <div className="muted" style={{ marginTop: 8 }}>
           {actionResult}
         </div>
+      </Panel>
+
+      <Panel className="panel-danger">
+        <h2>数据清空</h2>
+        <p className="section-desc">
+          按模块清空全部数据（不可恢复）。勾选需要清空的模块后点击下方按钮。
+        </p>
+        <div className="purge-list">
+          {PURGE_OPTIONS.map((opt) => (
+            <label key={opt.key} className="purge-item">
+              <input
+                type="checkbox"
+                checked={purgeModules.has(opt.key)}
+                onChange={() => togglePurgeModule(opt.key)}
+              />
+              <div className="purge-item-text">
+                <div className="purge-item-label">{opt.label}</div>
+                <div className="purge-item-desc">{opt.desc}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+        <div className="row" style={{ marginTop: 10 }}>
+          <Button
+            onClick={doPurge}
+            disabled={purgeModules.size === 0 || purging}
+            variant="danger"
+          >
+            {purging ? "清空中…" : `清空选中模块（${purgeModules.size}）`}
+          </Button>
+        </div>
+        {purgeMsg && (
+          <div className="muted" style={{ marginTop: 8 }}>
+            {purgeMsg}
+          </div>
+        )}
       </Panel>
 
       <Panel>

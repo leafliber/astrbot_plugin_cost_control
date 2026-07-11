@@ -353,3 +353,10 @@ export interface AiDiagResult {
   raw_text?: string | null;
   error?: string | null;
 }
+
+export interface AiDiagCached {
+  result?: AiDiagResult | null;
+  timestamp?: number;
+  age_seconds?: number;
+  stale?: boolean;
+}

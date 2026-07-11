@@ -41,6 +41,54 @@ def _hash_text(s: Any) -> str:
         return ""
 
 
+def _format_tools(func_tool: Any) -> str:
+    """将工具列表格式化为可读的多行文本，供行级 diff 精确定位变更（纯函数）。
+
+    输出格式::
+
+        [tool_name] description
+          param_name*(type): param_description
+          ...
+
+    每个工具占一行、每个参数占一行，这样 ``_line_diff`` 就能精确到
+    "哪个工具的哪个参数的描述变了"，而不是整段工具列表一起增删。
+
+    参数名后的 ``*`` 标记表示 required。单行超过 200 字符截断。
+    """
+    if not func_tool:
+        return ""
+    lines: list[str] = []
+    try:
+        for tool in func_tool:
+            name = getattr(tool, "name", None)
+            desc = getattr(tool, "description", None)
+            params = getattr(tool, "parameters", None)
+            if name is None and isinstance(tool, dict):
+                name = tool.get("name", "")
+                desc = tool.get("description", "")
+                params = tool.get("parameters", {})
+            name = str(name or "")
+            desc = str(desc or "")
+            params = params if isinstance(params, dict) else {}
+            lines.append(f"[{name}] {desc}")
+            props = params.get("properties", {}) if isinstance(params, dict) else {}
+            required = set(
+                params.get("required", []) if isinstance(params, dict) else []
+            )
+            for pname, pinfo in props.items():
+                if isinstance(pinfo, dict):
+                    ptype = pinfo.get("type", "")
+                    pdesc = pinfo.get("description", "")
+                    req = "*" if pname in required else ""
+                    lines.append(f"  {pname}{req}({ptype}): {pdesc}")
+    except Exception:
+        return str(func_tool)
+    # 截断超长行
+    return "\n".join(
+        line[:200] + "…" if len(line) > 200 else line for line in lines
+    )
+
+
 def _summarize(sig: dict[str, Any]) -> dict[str, Any]:
     """把上下文签名裁剪为紧凑、可对比的结构（纯函数）。
 
@@ -60,12 +108,14 @@ def _line_diff(
     old: Any,
     new: Any,
     max_lines: int = 150,
+    max_line_len: int = 200,
 ) -> list[dict[str, str]] | None:
     """对两段文本做行级 diff，返回 git 风格行列表（纯函数）。
 
     返回 ``[{"op": "+" | "-" | " ", "text": line}, ...]``：``+`` 新增、``-``
     删除、``" "`` 上下文。任一输入为空、无增删行或出错时返回 ``None``（前端据此
     不渲染 diff 块）。超过 ``max_lines`` 截断并追加一条提示行，避免落库 payload 失控。
+    单行超过 ``max_line_len`` 截断并追加 ``…``，防止超长行撑破 UI。
     """
     try:
         o = str(old or "")
@@ -79,6 +129,8 @@ def _line_diff(
                 continue
             op = raw[0]
             text = raw[2:] if len(raw) >= 2 else ""
+            if len(text) > max_line_len:
+                text = text[:max_line_len] + "…"
             if op == "+":
                 out.append({"op": "+", "text": text})
             elif op == "-":
@@ -250,7 +302,8 @@ class CacheDiagMixin:
 
         除 hash 外，额外保留 ``system_text`` / ``tools_text`` 原始文本——这两者只进
         内存 ``_last_ctx[umo]``（供下一轮 :func:`_line_diff` 计算内容 diff），**不**经
-        :func:`_summarize` 落库，避免 DB 行膨胀。
+        :func:`_summarize` 落库，避免 DB 行膨胀。``tools_text`` 经 :func:`_format_tools`
+        格式化为每个工具/参数各占一行的可读文本，使 diff 能精确到参数级变更。
         """
         try:
             system = getattr(req, "system_prompt", "") or ""
@@ -261,11 +314,11 @@ class CacheDiagMixin:
             ]
             return {
                 "system_hash": _hash_text(system) if system else "",
-                "tools_hash": _hash_text(str(func_tool)) if func_tool is not None else "",
+                "tools_hash": _hash_text(_format_tools(func_tool)) if func_tool is not None else "",
                 "contexts_hashes": contexts_hashes,
                 "history_len": len(contexts),
                 "system_text": system,
-                "tools_text": str(func_tool) if func_tool is not None else "",
+                "tools_text": _format_tools(func_tool) if func_tool is not None else "",
             }
         except Exception:
             return {

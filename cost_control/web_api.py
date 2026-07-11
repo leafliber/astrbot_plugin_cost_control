@@ -80,8 +80,10 @@ class WebApiMixin:
     query_usage_timeseries: Any
     query_cache_events: Any
     cleanup_old_supplements: Any
+    purge_module: Any
     # AiDiagMixin 提供。
     run_ai_diag: Any
+    get_cached_diag: Any
     _get_default_provider_id: Any
     _get_provider_display_name: Any
     get_pricing: Any
@@ -123,6 +125,7 @@ class WebApiMixin:
                 (f"{prefix}/pricing", self.api_pricing, ["GET"], "模型单价表"),
                 (f"{prefix}/config", self.api_config, ["GET"], "当前插件配置"),
                 (f"{prefix}/actions/cleanup", self.api_action_cleanup, ["POST"], "手动清理"),
+                (f"{prefix}/actions/purge", self.api_action_purge, ["POST"], "按模块清空数据"),
                 (f"{prefix}/actions/report", self.api_action_report, ["POST"], "手动推送日报"),
                 (
                     f"{prefix}/actions/save_config",
@@ -147,6 +150,12 @@ class WebApiMixin:
                     self.api_ai_diag,
                     ["POST"],
                     "AI 智能成本诊断",
+                ),
+                (
+                    f"{prefix}/ai_diag_last",
+                    self.api_ai_diag_last,
+                    ["GET"],
+                    "上次 AI 诊断缓存结果",
                 ),
             ]
             for route, handler, methods, desc in routes:
@@ -309,13 +318,23 @@ class WebApiMixin:
         """``POST /ai_diag``：执行 AI 智能成本诊断。
 
         收集5个维度数据（成本/缓存/归因/预算/定价），调用默认 LLM Provider
-        综合分析，返回结构化 JSON 结论（评分/风险/建议）。
+        综合分析，返回结构化 JSON 结论（评分/风险/建议）。成功后自动缓存。
         """
         try:
             result = await self.run_ai_diag()
             return self._ok(result)
         except Exception as e:
             return self._err(f"{type(e).__name__}: {e}")
+
+    async def api_ai_diag_last(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /ai_diag_last``：返回上次诊断缓存结果 + 时效信息。
+
+        前端据此决定是否直接展示旧结果（<2h）或回到一键诊断（>2h）。
+        """
+        try:
+            return self._ok(self.get_cached_diag())
+        except Exception as e:
+            return self._err(str(e))
 
     async def api_alerts(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /alerts``：总览页顶部告警列表（黄色提醒，引导用户处理）。
@@ -1428,6 +1447,36 @@ class WebApiMixin:
         try:
             await self.daily_report()
             return self._ok({"message": "日报已触发"})
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_action_purge(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /actions/purge``：按模块清空数据（不可恢复）。
+
+        请求体::
+
+            {"modules": ["supplements", "cache_events", "usage_stats", "ai_diag"]}
+
+        逐模块执行 ``purge_module``，返回每个模块的删除条数。
+        """
+        try:
+            from quart import request
+
+            body = await request.json
+        except Exception:
+            body = None
+        if not isinstance(body, dict):
+            return self._err("请求体必须是 JSON 对象")
+        modules = body.get("modules", [])
+        if not isinstance(modules, list):
+            return self._err("modules 必须是数组")
+        valid = {"supplements", "cache_events", "usage_stats", "ai_diag"}
+        results: dict[str, int] = {}
+        try:
+            for m in modules:
+                if m in valid:
+                    results[m] = await self.purge_module(m)
+            return self._ok({"results": results})
         except Exception as e:
             return self._err(str(e))
 

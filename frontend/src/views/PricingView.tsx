@@ -3,7 +3,12 @@ import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
-import type { MatchedDefault, PriceEntry, ProviderModelInfo, UserPricingEntry } from "../lib/types";
+import type {
+  MatchedDefault,
+  PriceEntry,
+  ProviderModelInfo,
+  UserPricingEntry,
+} from "../lib/types";
 import { Panel } from "../components/Panel";
 import { Button } from "../components/Button";
 import { SaveToast } from "../components/SaveToast";
@@ -22,6 +27,9 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
   const [resetResult, setResetResult] = useState("");
   const [ready, setReady] = useState(false);
+  // 跳转信号：点击未定价告警行时递增，传给对应 provider 卡片触发脉冲动画
+  const [highlightTarget, setHighlightTarget] = useState<string | null>(null);
+  const [highlightSignal, setHighlightSignal] = useState(0);
 
   useEffect(() => {
     if (!data) return;
@@ -38,15 +46,39 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const defaults: Record<string, PriceEntry> = data?.defaults || {};
   const unpriced = data?.unpriced || [];
 
-  // 显示集合：当前 provider 列表 + 手动设过价但不在列表的「孤儿」provider
-  const orphanIds = Object.keys(drafts).filter(
-    (pid) => !providerModels.some((p) => p.id === pid),
+  // 当前配置中的 provider ID 集合
+  const configIds = useMemo(
+    () => new Set(providerModels.map((p) => p.id)),
+    [providerModels],
   );
+
+  // 已设过定价但不在当前配置中的「孤儿」provider
+  const orphanIds = Object.keys(drafts).filter(
+    (pid) => !configIds.has(pid),
+  );
+
+  // 从 unpriced 中提取不在当前配置中、也未在 drafts 中的「历史」provider
+  // 这些 provider 曾有用量但已被删除配置，用户仍可为其补设定价
+  const historicalIds = useMemo(() => {
+    const seen = new Set([...configIds, ...orphanIds]);
+    const ids: string[] = [];
+    for (const u of unpriced) {
+      const pid = u.provider_id || "";
+      if (pid && !seen.has(pid)) {
+        seen.add(pid);
+        ids.push(pid);
+      }
+    }
+    return ids;
+  }, [unpriced, configIds, orphanIds]);
+
+  // 显示集合：当前 provider + 孤儿 provider + 历史 provider
   const displayList: {
     id: string;
     type?: string;
     candidates: string[];
     matchedDefault: MatchedDefault | null;
+    isHistorical?: boolean;
   }[] = [
     ...providerModels.map((p) => ({
       id: p.id,
@@ -54,12 +86,37 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       candidates: p.candidates,
       matchedDefault: p.matched_default ?? null,
     })),
-    ...orphanIds.map((id) => ({ id, type: undefined, candidates: [], matchedDefault: null })),
+    ...orphanIds.map((id) => ({
+      id,
+      type: undefined,
+      candidates: [],
+      matchedDefault: null,
+    })),
+    ...historicalIds.map((id) => ({
+      id,
+      type: undefined,
+      candidates: [],
+      matchedDefault: null,
+      isHistorical: true,
+    })),
   ];
+
+  // 未定价告警按 provider_id 分组，用于可点击跳转
+  const unpricedByProvider = useMemo(() => {
+    const map = new Map<string, { models: typeof unpriced; totalTokens: number }>();
+    for (const u of unpriced) {
+      const pid = u.provider_id || "(未知)";
+      const group = map.get(pid) || { models: [], totalTokens: 0 };
+      group.models.push(u);
+      group.totalTokens += u.tokens || 0;
+      map.set(pid, group);
+    }
+    return Array.from(map.entries()).sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+  }, [unpriced]);
 
   const updateDraft = (pid: string, patch: Partial<DraftEntry>) =>
     setDrafts((prev) => {
-      const cur = prev[pid] ?? entryToDraft();
+      const cur = prev[pid] ?? entryToDraft(undefined);
       return { ...prev, [pid]: { ...cur, ...patch } };
     });
   const clearDraft = (pid: string) =>
@@ -68,7 +125,6 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       delete next[pid];
       return next;
     });
-  // 为未在 drafts 中的 provider 补一个空 draft（首次编辑时创建）
   const ensureDraft = (pid: string): DraftEntry =>
     drafts[pid] ?? entryToDraft(undefined);
 
@@ -82,15 +138,16 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     return out;
   };
 
-  // 自动保存 payload。draftToEntry 对非法数值会抛错——包裹后把错误塞进 payload，
-  // onSave 见到即抛出，由 useAutoSave 转成错误浮层提示用户修正。
-  const payload = useMemo<{ pricing: Record<string, UserPricingEntry> | null; error?: string }>(() => {
+  const payload = useMemo<{
+    pricing: Record<string, UserPricingEntry> | null;
+    error?: string;
+  }>(() => {
     try {
       return { pricing: collect() };
     } catch (e) {
       return { pricing: null, error: e instanceof Error ? e.message : String(e) };
     }
-    // eslint-disable-next-line react-hooks/exhausting-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafts]);
 
   const { status, error } = useAutoSave(
@@ -102,7 +159,6 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     { enabled: ready },
   );
 
-  // early return 必须在所有 hook（useApi/useMemo/useAutoSave）之后，否则 hook 顺序错乱。
   if (res.loading && !data) return <Loading />;
   if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
@@ -118,45 +174,68 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     }
   };
 
+  // 点击未定价告警行 → 跳转到对应 provider 卡片
+  const jumpToProvider = (pid: string) => {
+    setHighlightTarget(pid);
+    setHighlightSignal((s) => s + 1);
+  };
+
   const defaultKeys = Object.keys(defaults).sort();
+
+  // 统计概要数字
+  const totalProviders = displayList.length;
+  const unmatchedCount = displayList.filter((p) => !p.matchedDefault).length;
 
   return (
     <div>
       {unpriced.length > 0 && (
         <Panel className="alert-panel">
-          <h2>未定价告警</h2>
+          <h2>未定价告警（{unpricedByProvider.length} 个 Provider）</h2>
           <div className="alert-body">
-            以下 provider+模型有用量但解析不到定价，其成本被计为 <strong>$0</strong>
-            ，会导致成本统计偏低。请为对应 provider 设置定价，或确认模型名能匹配内置默认。
+            以下 Provider 有用量但无定价匹配，成本被计为 <strong>$0</strong>。
+            点击行可快速跳转到对应 Provider 定价卡片。
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Provider</th>
-                <th>模型</th>
-                <th>用量 token</th>
-                <th>调用</th>
-              </tr>
-            </thead>
-            <tbody>
-              {unpriced.map((u, i) => (
-                <tr key={`${u.provider_id || ""}-${u.model}-${i}`}>
-                  <td className="mono">{u.provider_id || "-"}</td>
-                  <td className="mono">{u.model}</td>
-                  <td>{fmtNum(u.tokens)}</td>
-                  <td>{fmtNum(u.count)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="unpriced-groups">
+            {unpricedByProvider.map(([pid, group]) => {
+              const isHistorical = !configIds.has(pid) && !drafts[pid];
+              return (
+                <div
+                  key={pid}
+                  className={`unpriced-group-row ${isHistorical ? "is-historical" : ""}`}
+                  onClick={() => jumpToProvider(pid)}
+                  title={isHistorical ? "该 Provider 已不在当前配置中，点击仍可设置定价" : "点击跳转到定价卡片"}
+                >
+                  <span className="mono unpriced-pid">{pid || "(未知)"}</span>
+                  {isHistorical && <span className="unpriced-historical-tag">历史</span>}
+                  <span className="unpriced-models">
+                    {group.models.length} 个模型
+                  </span>
+                  <span className="unpriced-tokens">
+                    {fmtNum(group.totalTokens)} token
+                  </span>
+                  <span className="unpriced-jump-hint">点击跳转 ▸</span>
+                </div>
+              );
+            })}
+          </div>
         </Panel>
       )}
 
       <Panel>
-        <h2>Provider 定价</h2>
+        <div className="pricing-header">
+          <h2>Provider 定价</h2>
+          <div className="pricing-header-stats">
+            <span className="muted small">{totalProviders} 个 Provider</span>
+            {unmatchedCount > 0 && (
+              <span className="pricing-unmatched-count">
+                {unmatchedCount} 个无内置匹配
+              </span>
+            )}
+          </div>
+        </div>
         <div className="muted small" style={{ marginBottom: 8 }}>
-          按 <strong>provider_id</strong> 设置定价：命中则按其计费模式生效；未设置时按模型名
-          匹配下方内置默认（per_token）。修改后自动保存、即时热生效。
+          按 <strong>provider_id</strong> 设置定价。未设置时按模型名匹配内置默认。
+          修改后自动保存、即时热生效。无内置匹配的 Provider 以黄色底色标记。
         </div>
         {displayList.length === 0 && (
           <div className="muted small" style={{ margin: "8px 0" }}>
@@ -173,6 +252,10 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
               draft={ensureDraft(p.id)}
               matchedDefault={p.matchedDefault}
               hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
+              isHistorical={p.isHistorical}
+              highlightSignal={
+                highlightTarget === p.id ? highlightSignal : undefined
+              }
               onChange={(patch) => updateDraft(p.id, patch)}
               onClear={() => clearDraft(p.id)}
             />

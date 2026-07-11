@@ -47,8 +47,6 @@ class CommandsMixin:
     last_system_prompt: Any
     check_hit_rate: Any
     recent_events: Any
-    analyze_prompt: Any
-    rewrite_prompt: Any
     build_report: Any
 
     def _umo(self, event: AstrMessageEvent) -> str:
@@ -135,42 +133,6 @@ class CommandsMixin:
                 lines.append(f"   处理动作：{result.get('on_exceeded', 'stop')}")
             else:
                 lines.append("✅ 当前未超限")
-            yield event.plain_result("\n".join(lines))
-        except Exception as e:
-            yield event.plain_result(f"查询失败：{e}")
-
-    @filter.command("optimize")
-    async def cmd_optimize(self, event: AstrMessageEvent):
-        """``/optimize``：静态分析 system prompt；带 ``rewrite`` 参数触发 LLM 改写。
-
-        无参数时分析最近一次请求的 system prompt；``/optimize rewrite`` 则额外
-        经配置的 provider 改写并返回精简版。
-        """
-        try:
-            umo = self._umo(event)
-            arg = str(getattr(event, "message_str", "") or "").strip()
-            do_rewrite = arg.lower().startswith("rewrite")
-            sp = self.last_system_prompt(umo)
-            if not sp:
-                yield event.plain_result("暂无 system prompt（请先发起一次对话，且归因功能开启）。")
-                return
-            report = self.analyze_prompt(sp)
-            lines = [
-                "✏️ system prompt 静态分析",
-                f"长度 {report.get('length', 0)} 字符 / ≈ {report.get('tokens_est', 0)} token",
-                f"冗余 {report.get('redundancy_score', 0)}% / 可缓存性 "
-                f"{report.get('cacheability_score', 0)}/100",
-                "建议：",
-            ]
-            for s in report.get("suggestions", []):
-                lines.append(f"  · {s}")
-            if do_rewrite:
-                try:
-                    rewritten = await self.rewrite_prompt(sp, umo)
-                    lines.append("\n--- 改写后（前 500 字）---")
-                    lines.append(rewritten[:500])
-                except Exception as e:
-                    lines.append(f"\n改写失败：{e}")
             yield event.plain_result("\n".join(lines))
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")

@@ -4,6 +4,7 @@
 import { getBridge } from "./bridge";
 import type {
   AlertItem,
+  AiDiagCached,
   AiDiagResult,
   AiProviderInfo,
   AttributionResponse,
@@ -77,6 +78,10 @@ export const api = {
 
   // actions
   postCleanup: () => post<{ deleted: number; message?: string }>("actions/cleanup"),
+  postPurge: (modules: string[]) =>
+    post<{ results: Record<string, number> }>("actions/purge", {
+      modules,
+    }),
   postReport: () => post<{ message: string }>("actions/report"),
   postSaveConfig: (body: unknown) =>
     post<{ saved: string[]; config: Record<string, unknown> }>(
@@ -92,5 +97,6 @@ export const api = {
 
   // AI 诊断
   getAiProvider: () => get<AiProviderInfo>("ai_provider"),
+  getAiDiagLast: () => get<AiDiagCached>("ai_diag_last"),
   postAiDiag: () => post<AiDiagResult>("ai_diag"),
 };

@@ -88,11 +88,6 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "daily_report_time": "09:00",
         "daily_report_to": [],
     },
-    "prompt_optimizer": {
-        "enabled": True,
-        "provider_id": "",
-        "max_static_analysis_length": 8000,
-    },
     "attribution": {
         "enabled": True,
         "sample_rate": 100,

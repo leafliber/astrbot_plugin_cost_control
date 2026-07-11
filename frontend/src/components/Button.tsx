@@ -9,11 +9,16 @@ export function Button({
 }: {
   children: ReactNode;
   onClick?: () => void;
-  variant?: "default" | "primary";
+  variant?: "default" | "primary" | "danger";
   disabled?: boolean;
   title?: string;
 }) {
-  const cls = variant === "primary" ? "btn primary" : "btn";
+  const cls =
+    variant === "primary"
+      ? "btn primary"
+      : variant === "danger"
+        ? "btn btn-danger"
+        : "btn";
   return (
     <button className={cls} onClick={onClick} disabled={disabled} title={title}>
       {children}
