@@ -455,51 +455,58 @@ export function SettingsView({
       ))}
 
       <Panel>
-        <h2>手动操作</h2>
-        <p className="section-desc">立即执行一次清理或推送，无需等待定时任务。</p>
-        <div className="row">
-          <Button onClick={cleanup}>清理过期数据</Button>
-          <Button onClick={report}>推送日报</Button>
-        </div>
-        <div className="muted" style={{ marginTop: 8 }}>
-          {actionResult}
-        </div>
-      </Panel>
-
-      <Panel className="panel-danger">
-        <h2>数据清空</h2>
+        <h2>数据管理</h2>
         <p className="section-desc">
-          按模块清空全部数据（不可恢复）。勾选需要清空的模块后点击下方按钮。
+          手动执行清理、推送，或按模块清空全部数据。
         </p>
-        <div className="purge-list">
-          {PURGE_OPTIONS.map((opt) => (
-            <label key={opt.key} className="purge-item">
-              <input
-                type="checkbox"
-                checked={purgeModules.has(opt.key)}
-                onChange={() => togglePurgeModule(opt.key)}
-              />
-              <div className="purge-item-text">
-                <div className="purge-item-label">{opt.label}</div>
-                <div className="purge-item-desc">{opt.desc}</div>
-              </div>
-            </label>
-          ))}
-        </div>
-        <div className="row" style={{ marginTop: 10 }}>
-          <Button
-            onClick={doPurge}
-            disabled={purgeModules.size === 0 || purging}
-            variant="danger"
-          >
-            {purging ? "清空中…" : `清空选中模块（${purgeModules.size}）`}
-          </Button>
-        </div>
-        {purgeMsg && (
-          <div className="muted" style={{ marginTop: 8 }}>
-            {purgeMsg}
+
+        <div className="data-mgmt-section">
+          <div className="data-mgmt-label">快速操作</div>
+          <div className="row">
+            <Button onClick={cleanup}>清理过期数据</Button>
+            <Button onClick={report}>推送日报</Button>
           </div>
-        )}
+          {actionResult && (
+            <div className="muted" style={{ marginTop: 6 }}>
+              {actionResult}
+            </div>
+          )}
+        </div>
+
+        <div className="data-mgmt-divider" />
+
+        <div className="data-mgmt-section">
+          <div className="data-mgmt-label">按模块清空（不可恢复）</div>
+          <div className="purge-list">
+            {PURGE_OPTIONS.map((opt) => (
+              <label key={opt.key} className="purge-item">
+                <input
+                  type="checkbox"
+                  checked={purgeModules.has(opt.key)}
+                  onChange={() => togglePurgeModule(opt.key)}
+                />
+                <div className="purge-item-text">
+                  <div className="purge-item-label">{opt.label}</div>
+                  <div className="purge-item-desc">{opt.desc}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <Button
+              onClick={doPurge}
+              disabled={purgeModules.size === 0 || purging}
+              variant="danger"
+            >
+              {purging ? "清空中…" : `清空选中模块（${purgeModules.size}）`}
+            </Button>
+          </div>
+          {purgeMsg && (
+            <div className="muted" style={{ marginTop: 6 }}>
+              {purgeMsg}
+            </div>
+          )}
+        </div>
       </Panel>
 
       <Panel>

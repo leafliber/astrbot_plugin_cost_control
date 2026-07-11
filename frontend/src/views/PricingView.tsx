@@ -58,7 +58,6 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   );
 
   // 从 unpriced 中提取不在当前配置中、也未在 drafts 中的「历史」provider
-  // 这些 provider 曾有用量但已被删除配置，用户仍可为其补设定价
   const historicalIds = useMemo(() => {
     const seen = new Set([...configIds, ...orphanIds]);
     const ids: string[] = [];
@@ -72,9 +71,16 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     return ids;
   }, [unpriced, configIds, orphanIds]);
 
-  // 显示集合：当前 provider + 孤儿 provider + 历史 provider
-  const displayList: {
+  // 短名：取最后一个 / 后面的部分（如 newapi/image-ocr → image-ocr）
+  const shortName = (id: string) => {
+    const i = id.lastIndexOf("/");
+    return i >= 0 ? id.slice(i + 1) : id;
+  };
+
+  // 原始显示列表（去重前）
+  const rawList: {
     id: string;
+    displayId: string;
     type?: string;
     candidates: string[];
     matchedDefault: MatchedDefault | null;
@@ -82,18 +88,21 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   }[] = [
     ...providerModels.map((p) => ({
       id: p.id,
+      displayId: p.id,
       type: p.type,
       candidates: p.candidates,
       matchedDefault: p.matched_default ?? null,
     })),
     ...orphanIds.map((id) => ({
       id,
+      displayId: id,
       type: undefined,
       candidates: [],
       matchedDefault: null,
     })),
     ...historicalIds.map((id) => ({
       id,
+      displayId: id,
       type: undefined,
       candidates: [],
       matchedDefault: null,
@@ -101,9 +110,38 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     })),
   ];
 
-  // 未定价告警按 provider_id 分组，用于可点击跳转
+  // 去重：按短名分组，如果多个 ID 共享同一短名（如 newapi/image-ocr 和 image-ocr），
+  // 保留最长 ID（更具体），displayId 用短名，删除较短的重复项
+  const displayList = useMemo(() => {
+    const byShort = new Map<string, typeof rawList>();
+    for (const item of rawList) {
+      const sn = shortName(item.displayId);
+      const existing = byShort.get(sn);
+      if (!existing) {
+        byShort.set(sn, [item]);
+      } else {
+        existing.push(item);
+      }
+    }
+    const result: typeof rawList = [];
+    for (const [, group] of byShort) {
+      if (group.length === 1) {
+        result.push(group[0]);
+      } else {
+        // 保留最长 ID，displayId 用短名
+        group.sort((a, b) => b.id.length - a.id.length);
+        const kept = { ...group[0], displayId: shortName(group[0].displayId) };
+        result.push(kept);
+      }
+    }
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerModels, orphanIds, historicalIds]);
+
+  // 未定价告警按 provider_id 分组（去重后），用于可点击跳转
   const unpricedByProvider = useMemo(() => {
-    const map = new Map<string, { models: typeof unpriced; totalTokens: number }>();
+    type UGroup = { models: typeof unpriced; totalTokens: number };
+    const map = new Map<string, UGroup>();
     for (const u of unpriced) {
       const pid = u.provider_id || "(未知)";
       const group = map.get(pid) || { models: [], totalTokens: 0 };
@@ -111,7 +149,22 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       group.totalTokens += u.tokens || 0;
       map.set(pid, group);
     }
-    return Array.from(map.entries()).sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+    // 按短名合并：newapi/image-ocr 和 image-ocr 合并为一行
+    const byShort = new Map<string, UGroup & { fullId: string }>();
+    for (const [pid, group] of map) {
+      const sn = shortName(pid);
+      const existing = byShort.get(sn);
+      if (!existing) {
+        byShort.set(sn, { ...group, fullId: pid });
+      } else {
+        existing.models.push(...group.models);
+        existing.totalTokens += group.totalTokens;
+        if (pid.length > existing.fullId.length) existing.fullId = pid;
+      }
+    }
+    return Array.from(byShort.entries())
+      .map(([, g]) => [g.fullId, g] as [string, UGroup])
+      .sort((a, b) => b[1].totalTokens - a[1].totalTokens);
   }, [unpriced]);
 
   const updateDraft = (pid: string, patch: Partial<DraftEntry>) =>
@@ -205,7 +258,7 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
                   onClick={() => jumpToProvider(pid)}
                   title={isHistorical ? "该 Provider 已不在当前配置中，点击仍可设置定价" : "点击跳转到定价卡片"}
                 >
-                  <span className="mono unpriced-pid">{pid || "(未知)"}</span>
+                  <span className="mono unpriced-pid">{shortName(pid) || "(未知)"}</span>
                   {isHistorical && <span className="unpriced-historical-tag">历史</span>}
                   <span className="unpriced-models">
                     {group.models.length} 个模型
@@ -247,6 +300,7 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
             <ProviderPricingCard
               key={p.id}
               providerId={p.id}
+              displayId={p.displayId}
               type={p.type}
               candidates={p.candidates}
               draft={ensureDraft(p.id)}

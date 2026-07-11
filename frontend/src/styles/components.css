@@ -923,6 +923,7 @@ tr:hover td {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-bottom: 8px;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -938,10 +939,11 @@ tr:hover td {
   border-color: color-mix(in srgb, var(--warn) 50%, var(--border));
 }
 
-/* 折叠态 */
+/* 折叠态：与展开卡片保持一致的外间距 */
 .pricing-card.is-collapsed {
-  padding: 6px 12px;
+  padding: 8px 12px;
   gap: 0;
+  margin-bottom: 8px;
 }
 
 .pricing-card.is-collapsed:hover {
@@ -1404,6 +1406,27 @@ tr:hover td {
 /* ===== 数据清空 ===== */
 .panel-danger {
   border-color: color-mix(in srgb, var(--bad) 30%, var(--border));
+}
+
+/* 数据管理：合并面板内的分区布局 */
+.data-mgmt-section {
+  margin-top: 8px;
+}
+
+.data-mgmt-section:first-of-type {
+  margin-top: 0;
+}
+
+.data-mgmt-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.data-mgmt-divider {
+  border-top: 1px solid var(--border);
+  margin: 12px 0 0;
 }
 
 .purge-list {

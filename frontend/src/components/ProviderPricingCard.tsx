@@ -152,6 +152,7 @@ function collapsedSummary(
 
 export function ProviderPricingCard({
   providerId,
+  displayId,
   type,
   candidates,
   draft,
@@ -163,6 +164,7 @@ export function ProviderPricingCard({
   onClear,
 }: {
   providerId: string;
+  displayId?: string;
   type?: string;
   candidates: string[];
   draft: DraftEntry;
@@ -231,7 +233,7 @@ export function ProviderPricingCard({
         style={!expanded ? { cursor: "pointer" } : undefined}
       >
         <div className="pricing-id-wrap">
-          <span className="mono pricing-id">{providerId}</span>
+          <span className="mono pricing-id">{displayId || providerId}</span>
           {isHistorical && (
             <span className="pricing-tag-historical" title="该 Provider 已不在当前配置中，但仍有用量记录">
               历史
