@@ -211,6 +211,7 @@ export interface CacheEventState {
   history_len?: number;
   system_hash?: string;
   tools_hash?: string;
+  tools_text?: string;
   first_diverge_at?: number;
   system_diff?: DiffLine[];
   tools_diff?: DiffLine[];
@@ -327,6 +328,7 @@ export interface AiProviderInfo {
   provider_id: string | null;
   provider_name: string | null;
   available: boolean;
+  providers?: { id: string; name: string }[];
   error?: string;
 }
 

@@ -216,7 +216,9 @@ def test_diagnose_tools_change_with_diff():
         "contexts_hashes": ["a"],
     }
     ev = next(e for e in diagnose_changes(cur, last, {}) if e["type"] == "tools_change")
-    assert "tools_diff" in ev["after"]
+    # 工具定义变更现在带 before/after tools_text（结构化对比），不再用 git 风格 diff
+    assert ev["after"]["tools_text"] == "toolA\ntoolB"
+    assert ev["before"]["tools_text"] == "toolA"
 
 
 def _sig(history_len, system_hash="a", tools_hash="x", hashes=None):

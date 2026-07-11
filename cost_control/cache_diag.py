@@ -229,16 +229,18 @@ def diagnose_changes(
         if current.get("tools_hash") != last.get("tools_hash"):
             # 仅当至少一轮有 tools 才报（避免空对空误报）
             if current.get("tools_hash") or last.get("tools_hash"):
+                # 工具定义变更：直接带 before/after tools_text（_format_tools 产出），
+                # 前端做结构化 before→after 对比展示，不再用 git 风格 +/- diff。
+                ev_before = dict(before)
+                ev_before["tools_text"] = last.get("tools_text", "")
                 ev_after = dict(after)
-                td = _line_diff(last.get("tools_text"), current.get("tools_text"))
-                if td is not None:
-                    ev_after["tools_diff"] = td
+                ev_after["tools_text"] = current.get("tools_text", "")
                 events.append(
                     {
                         "type": "tools_change",
                         "severity": "medium",
                         "detail": "工具定义变化，破坏缓存键",
-                        "before": before,
+                        "before": ev_before,
                         "after": ev_after,
                     }
                 )

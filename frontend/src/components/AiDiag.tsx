@@ -41,6 +41,17 @@ export function AiDiag() {
   const [staleResult, setStaleResult] = useState<AiDiagResult | null>(null);
   const [staleAge, setStaleAge] = useState<string>("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const phaseTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // loading 阶段性提示词
+  const PHASES = [
+    "正在收集成本数据…",
+    "正在分析缓存与归因…",
+    "正在调用 LLM 努力计算…",
+    "LLM 正在非常努力地计算…",
+    "仍在拼尽全力分析中，请稍候…",
+  ];
+  const [phaseIdx, setPhaseIdx] = useState(0);
 
   // On mount: fetch provider info + last cached diagnosis
   useEffect(() => {
@@ -79,6 +90,7 @@ export function AiDiag() {
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
+      if (phaseTimerRef.current) clearInterval(phaseTimerRef.current);
     };
   }, []);
 
@@ -86,8 +98,15 @@ export function AiDiag() {
     setState("loading");
     setResult(null);
     setStaleResult(null);
+    setPhaseIdx(0);
+    // 每 8 秒切换到下一阶段提示词
+    if (phaseTimerRef.current) clearInterval(phaseTimerRef.current);
+    phaseTimerRef.current = setInterval(() => {
+      setPhaseIdx((i) => Math.min(i + 1, PHASES.length - 1));
+    }, 8000);
     try {
       const res = await api.postAiDiag();
+      if (phaseTimerRef.current) clearInterval(phaseTimerRef.current);
       if (res.error) {
         setState("error");
         setResult(res);
@@ -96,12 +115,13 @@ export function AiDiag() {
         setResult(res);
       }
     } catch (e) {
+      if (phaseTimerRef.current) clearInterval(phaseTimerRef.current);
       setState("error");
       setResult({
         error: e instanceof ApiError ? e.message : String(e),
       });
     }
-  }, []);
+  }, [PHASES.length]);
 
   const showStaleResult = useCallback(() => {
     if (staleResult) {
@@ -161,7 +181,12 @@ export function AiDiag() {
       {state === "loading" && (
         <div className="aidiag-loading">
           <div className="aidiag-spinner" />
-          <span>正在收集数据并调用 LLM 分析…</span>
+          <div className="aidiag-loading-text">
+            <div className="aidiag-loading-phase">{PHASES[phaseIdx]}</div>
+            <div className="aidiag-loading-hint">
+              刷新页面或关闭不会影响诊断结果，完成后可在此查看
+            </div>
+          </div>
         </div>
       )}
 
@@ -204,7 +229,7 @@ export function AiDiag() {
             <table className="aidiag-table">
               <thead>
                 <tr>
-                  <th style={{ width: "48px" }}>等级</th>
+                  <th>等级</th>
                   <th>问题</th>
                   <th>建议</th>
                 </tr>

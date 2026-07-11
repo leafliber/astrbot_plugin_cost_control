@@ -43,6 +43,10 @@ export function OverviewView({
   ]);
   const compare = useApi(() => api.getCompare(win), [win, refreshNonce]);
   const alerts = useApi(() => api.getAlerts(win), [win, refreshNonce]);
+  // Token 构成固定展示 1天/7天/30天，不随顶部粒度切换变化
+  const ov1d = useApi(() => api.getOverview("daily"), [refreshNonce]);
+  const ov7d = useApi(() => api.getOverview("weekly"), [refreshNonce]);
+  const ov30d = useApi(() => api.getOverview("monthly"), [refreshNonce]);
 
   // 仅总览轮询：30s 刷新四路数据；组件卸载自动停。
   usePolling(
@@ -96,10 +100,30 @@ export function OverviewView({
   const byModel = (r?.cost_by_model || [])
     .slice(0, 8)
     .map((m) => ({ model: shortModelName(m.model), cost: m.cost }));
-  const tOther = u.token_input_other || 0;
-  const tCached = u.token_input_cached || 0;
-  const tOut = u.token_output || 0;
-  const hasTokens = tOther + tCached + tOut > 0;
+  // Token 构成：固定三组
+  const tokenStackData = [
+    {
+      label: "1天",
+      other: (ov1d.data?.usage?.token_input_other || 0),
+      cached: (ov1d.data?.usage?.token_input_cached || 0),
+      output: (ov1d.data?.usage?.token_output || 0),
+    },
+    {
+      label: "7天",
+      other: (ov7d.data?.usage?.token_input_other || 0),
+      cached: (ov7d.data?.usage?.token_input_cached || 0),
+      output: (ov7d.data?.usage?.token_output || 0),
+    },
+    {
+      label: "30天",
+      other: (ov30d.data?.usage?.token_input_other || 0),
+      cached: (ov30d.data?.usage?.token_input_cached || 0),
+      output: (ov30d.data?.usage?.token_output || 0),
+    },
+  ];
+  const hasTokens = tokenStackData.some(
+    (d) => d.other + d.cached + d.output > 0,
+  );
   const top = (r?.top_sessions || [])
     .slice(0, 8)
     .reverse()
@@ -172,7 +196,7 @@ export function OverviewView({
           {hasTokens ? (
             <div className="chart-box">
               <TokenStack
-                data={[{ label: wl, other: tOther, cached: tCached, output: tOut }]}
+                data={tokenStackData}
                 colors={colors}
               />
             </div>

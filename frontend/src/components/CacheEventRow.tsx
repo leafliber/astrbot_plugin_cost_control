@@ -63,6 +63,23 @@ export function CacheEventRow({ ev }: { ev: CacheEvent }) {
                 </div>
               )}
             </div>
+            {detail.toolsCompare && (
+              <div className="tools-compare">
+                <div className="tools-compare-col">
+                  <div className="tools-compare-label">变更前</div>
+                  <pre className="tools-compare-body">
+                    {detail.toolsCompare.before || "（无）"}
+                  </pre>
+                </div>
+                <div className="tools-compare-arrow">→</div>
+                <div className="tools-compare-col">
+                  <div className="tools-compare-label">变更后</div>
+                  <pre className="tools-compare-body">
+                    {detail.toolsCompare.after || "（无）"}
+                  </pre>
+                </div>
+              </div>
+            )}
             {detail.diff && view.length > 0 && (
               <div className="gitdiff">
                 <div className="gitdiff-label">{detail.diff.label}</div>

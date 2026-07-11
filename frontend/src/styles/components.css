@@ -449,12 +449,20 @@ tr:hover td {
 }
 
 .alert-panel {
-  border-color: rgba(224, 49, 49, 0.35);
-  background: rgba(224, 49, 49, 0.04);
+  border-color: color-mix(in srgb, var(--bad) 30%, var(--border));
+  background: color-mix(in srgb, var(--bad) 6%, var(--panel));
 }
 
 .alert-panel h2 {
   color: var(--bad);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-panel h2::before {
+  content: "⚠";
+  font-size: 16px;
 }
 
 .alert-body {
@@ -927,12 +935,6 @@ tr:hover td {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-/* 无内置匹配 → 黄色底色 */
-.pricing-card.is-unmatched {
-  background: color-mix(in srgb, var(--warn) 8%, var(--panel-2));
-  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
-}
-
 /* 历史 provider（已从配置中删除但有用量记录） */
 .pricing-card.is-historical {
   border-style: dashed;
@@ -1003,6 +1005,7 @@ tr:hover td {
 
 .pricing-match.is-missing {
   color: var(--bad);
+  font-weight: 500;
 }
 
 /* 历史 provider 标签 */
@@ -1718,6 +1721,51 @@ tr:hover td {
   margin-bottom: 4px;
 }
 
+/* 工具定义变更：before→after 结构化对比（不走 gitdiff） */
+.tools-compare {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tools-compare-col {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.tools-compare-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 3px 8px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.tools-compare-arrow {
+  display: flex;
+  align-items: center;
+  color: var(--text-dim);
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.tools-compare-body {
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 8px;
+  margin: 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
 .gitdiff {
   margin: 6px 0 10px;
   border: 1px solid var(--border);
@@ -1937,11 +1985,28 @@ tr:hover td {
 /* loading 状态 */
 .aidiag-loading {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 8px 0;
   color: var(--text-dim);
   font-size: 13px;
+}
+
+.aidiag-loading-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.aidiag-loading-phase {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.aidiag-loading-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.7;
 }
 
 .aidiag-spinner {
@@ -2036,6 +2101,7 @@ tr:hover td {
 /* 紧凑风险表格 */
 .aidiag-table {
   font-size: 12.5px;
+  table-layout: auto;
 }
 
 .aidiag-table th,
@@ -2043,6 +2109,18 @@ tr:hover td {
   padding: 5px 8px;
   white-space: normal;
   word-break: break-word;
+}
+
+/* 等级列：tag 不换行，避免"高危"竖排 */
+.aidiag-table th:first-child,
+.aidiag-table td:first-child {
+  white-space: nowrap;
+  width: 52px;
+  text-align: center;
+}
+
+.aidiag-table .tag {
+  white-space: nowrap;
 }
 
 .aidiag-table .aidiag-advice {

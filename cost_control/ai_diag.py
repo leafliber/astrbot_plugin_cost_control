@@ -485,8 +485,12 @@ class AiDiagMixin:
             "error": None,
         }
 
-        # 1. 获取 Provider
-        provider_id = self._get_default_provider_id()
+        # 1. 获取 Provider（优先配置，回退默认）
+        from .config import get_config
+
+        cfg = getattr(self, "cfg", None) or {}
+        configured_id = get_config(cfg, "ai_diag_provider_id", "") or ""
+        provider_id = configured_id or self._get_default_provider_id()
         result["provider_id"] = provider_id
         result["provider_name"] = self._get_provider_display_name(provider_id)
         if not provider_id:

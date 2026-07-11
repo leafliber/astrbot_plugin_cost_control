@@ -6,6 +6,7 @@ import { fmtNum } from "../lib/format";
 import type {
   MatchedDefault,
   PriceEntry,
+  PricingUnpriced,
   ProviderModelInfo,
   UserPricingEntry,
 } from "../lib/types";
@@ -30,6 +31,10 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   // 跳转信号：点击未定价告警行时递增，传给对应 provider 卡片触发脉冲动画
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null);
   const [highlightSignal, setHighlightSignal] = useState(0);
+  // 局部未定价告警覆盖：保存后单独刷新，避免整页 refetch 导致闪烁
+  const [unpricedOverride, setUnpricedOverride] = useState<
+    PricingUnpriced[] | null
+  >(null);
 
   useEffect(() => {
     if (!data) return;
@@ -40,11 +45,12 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     }
     setDrafts(next);
     setReady(true);
+    setUnpricedOverride(null); // 新数据到达时清除覆盖
   }, [data]);
 
   const providerModels: ProviderModelInfo[] = data?.provider_models || [];
   const defaults: Record<string, PriceEntry> = data?.defaults || {};
-  const unpriced = data?.unpriced || [];
+  const unpriced = unpricedOverride ?? data?.unpriced ?? [];
 
   // 当前配置中的 provider ID 集合
   const configIds = useMemo(
@@ -207,7 +213,14 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     payload,
     async (p) => {
       if (p.error) throw new Error(p.error);
-      void (await api.postSaveConfig({ pricing: p.pricing }));
+      await api.postSaveConfig({ pricing: p.pricing });
+      // 局部刷新未定价告警，避免整页 refetch 导致闪烁
+      try {
+        const fresh = await api.getPricing();
+        setUnpricedOverride(fresh.unpriced ?? []);
+      } catch {
+        // 刷新失败不影响保存成功
+      }
     },
     { enabled: ready },
   );
@@ -288,7 +301,7 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
         </div>
         <div className="muted small" style={{ marginBottom: 8 }}>
           按 <strong>provider_id</strong> 设置定价。未设置时按模型名匹配内置默认。
-          修改后自动保存、即时热生效。无内置匹配的 Provider 以黄色底色标记。
+          修改后自动保存、即时热生效，告警同步更新。
         </div>
         {displayList.length === 0 && (
           <div className="muted small" style={{ margin: "8px 0" }}>

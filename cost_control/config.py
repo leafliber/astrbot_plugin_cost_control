@@ -73,6 +73,8 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # "stop" / "fallback" / "warn"。
     "default_on_exceeded": "stop",
     "refresh_time": "00:00",
+    # AI 诊断使用的 Provider ID（空 = 使用 AstrBot 默认 chat provider）。
+    "ai_diag_provider_id": "",
     "match_unique_session": False,
     "cache_diag": {
         "detect_context_reset": True,

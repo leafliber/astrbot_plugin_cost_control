@@ -78,6 +78,7 @@ export interface CacheDetail {
   tip: string;
   detail: string;
   diff?: DiffPayload;
+  toolsCompare?: { before: string; after: string };
 }
 
 // 将连续的 context 行合并为一个段，便于折叠
@@ -154,15 +155,28 @@ export function cacheDetailRows(ev: CacheEvent): CacheDetail {
     ev.type === "order_drift" && a.first_diverge_at != null
       ? a.first_diverge_at
       : undefined;
-  // 内容级 diff（后端 _line_diff 产出，仅 system/tools 变更事件有）
+  // 工具定义变更：使用 before/after tools_text 做结构化对比（不再走 gitdiff）
+  if (ev.type === "tools_change") {
+    const beforeText = b.tools_text || "";
+    const afterText = a.tools_text || "";
+    if (beforeText || afterText) {
+      return {
+        rows,
+        firstDiv,
+        tip: cacheEvtMeta(ev.type).tip,
+        detail: ev.detail || "",
+        toolsCompare: { before: beforeText, after: afterText },
+      };
+    }
+  }
+
+  // system prompt 变更：仍使用 git 风格 diff
   const sysLines = (a.system_diff || []).filter((l) => l && l.op);
-  const toolLines = (a.tools_diff || []).filter((l) => l && l.op);
-  const rawLines = sysLines.length > 0 ? sysLines : toolLines.length > 0 ? toolLines : [];
-  if (rawLines.length === 0) {
+  if (sysLines.length === 0) {
     return { rows, firstDiv, tip: cacheEvtMeta(ev.type).tip, detail: ev.detail || "" };
   }
-  const label = sysLines.length > 0 ? "system prompt 变更" : "工具定义变更";
-  const segments = collapseContext(rawLines, CONTEXT_COLLAPSE_THRESHOLD);
+  const label = "system prompt 变更";
+  const segments = collapseContext(sysLines, CONTEXT_COLLAPSE_THRESHOLD);
   return {
     rows,
     firstDiv,

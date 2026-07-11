@@ -123,31 +123,31 @@ function modeHint(mode: PricingMode, code: string, symbol: string): string {
   return `${unit} / 次。每次用户请求固定费用（一次请求含多步调用只计一次）。`;
 }
 
-// 折叠态摘要：一行展示当前定价状态
+// 折叠态摘要：只显示定价信息，不显示匹配模型名
 function collapsedSummary(
   draft: DraftEntry,
   matchedDefault: MatchedDefault | null,
   hasOverride: boolean,
 ): string {
-  if (!hasOverride) {
-    if (matchedDefault) {
-      const e = matchedDefault.entry;
+  if (hasOverride) {
+    if (draft.mode === "per_token") {
       const parts: string[] = [];
-      if (e.input != null) parts.push(`输入 ${e.input}`);
-      if (e.output != null) parts.push(`输出 ${e.output}`);
-      return `默认匹配 ${matchedDefault.model}（${parts.join(" / ")}）`;
+      if (draft.input.trim()) parts.push(`输入 ${draft.input}`);
+      if (draft.output.trim()) parts.push(`输出 ${draft.output}`);
+      return parts.join(" / ") || "空";
     }
-    return "无定价（需手动设置）";
+    return `${draft.price} ${draft.currency || "USD"} / ${
+      draft.mode === "per_turn" ? "轮" : "次"
+    }`;
   }
-  if (draft.mode === "per_token") {
+  if (matchedDefault) {
+    const e = matchedDefault.entry;
     const parts: string[] = [];
-    if (draft.input.trim()) parts.push(`输入 ${draft.input}`);
-    if (draft.output.trim()) parts.push(`输出 ${draft.output}`);
-    return `自定义 ${parts.join(" / ") || "空"}`;
+    if (e.input != null) parts.push(`输入 ${e.input}`);
+    if (e.output != null) parts.push(`输出 ${e.output}`);
+    return parts.join(" / ") || "默认";
   }
-  return `自定义 ${draft.price} ${draft.currency || "USD"} / ${
-    draft.mode === "per_turn" ? "轮" : "次"
-  }`;
+  return "未定价";
 }
 
 export function ProviderPricingCard({
@@ -192,7 +192,6 @@ export function ProviderPricingCard({
     }
   }, [highlightSignal]);
 
-  const noMatch = !matchedDefault;
   const curCode = draft.currency || "USD";
   const curSym = currencyToSymbol(curCode);
 
@@ -218,7 +217,6 @@ export function ProviderPricingCard({
 
   const cardClass = [
     "pricing-card",
-    noMatch ? "is-unmatched" : "",
     isHistorical ? "is-historical" : "",
     !expanded ? "is-collapsed" : "",
   ]
@@ -241,14 +239,15 @@ export function ProviderPricingCard({
           )}
           {type && <span className="muted small">{type}</span>}
           {matchedDefault ? (
-            <span
-              className={`pricing-match ${hasUserOverride ? "is-overridden" : ""}`}
-            >
-              默认 <span className="mono">{matchedDefault.model}</span>
-              {hasUserOverride && <span className="pm-ov">已覆盖</span>}
-            </span>
+            hasUserOverride ? (
+              <span className="pricing-match is-overridden">
+                <span className="pm-ov">自定义</span>
+              </span>
+            ) : (
+              <span className="pricing-match">内置匹配</span>
+            )
           ) : (
-            <span className="pricing-match is-missing">无内置匹配</span>
+            <span className="pricing-match is-missing">未定价</span>
           )}
         </div>
         <div

@@ -300,15 +300,39 @@ class WebApiMixin:
             return self._err(str(e))
 
     async def api_ai_provider(self, **kwargs: Any) -> dict[str, Any]:
-        """``GET /ai_provider``：查询当前默认 AI Provider（用于按钮区域展示）。"""
+        """``GET /ai_provider``：查询当前 AI 诊断 Provider 及可用列表。
+
+        返回 ``provider_id`` / ``provider_name`` / ``available``，以及
+        ``providers``（所有可用的 chat_completion provider 供前端下拉选择）。
+        """
         try:
-            provider_id = self._get_default_provider_id()
+            from .config import get_config
+
+            cfg = getattr(self, "cfg", None) or {}
+            configured_id = get_config(cfg, "ai_diag_provider_id", "") or ""
+            provider_id = configured_id or self._get_default_provider_id()
             provider_name = self._get_provider_display_name(provider_id)
+
+            # 收集所有可用的 chat_completion provider 供前端选择
+            providers: list[dict[str, str]] = []
+            try:
+                for p in self.context.provider_manager.provider_insts:
+                    meta = p.meta()
+                    if meta.type == "chat_completion":
+                        mid = getattr(meta, "id", "") or ""
+                        model = getattr(meta, "model_name", None) or mid
+                        providers.append(
+                            {"id": mid, "name": f"{model} ({mid})"}
+                        )
+            except Exception:
+                pass
+
             return self._ok(
                 {
                     "provider_id": provider_id,
                     "provider_name": provider_name,
                     "available": provider_id is not None,
+                    "providers": providers,
                 }
             )
         except Exception as e:

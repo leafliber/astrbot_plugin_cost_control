@@ -8,7 +8,7 @@ import { Button } from "../components/Button";
 import { SaveToast } from "../components/SaveToast";
 import { Loading, ErrorBox } from "../components/Feedback";
 
-type FieldType = "bool" | "str" | "int" | "csv" | "select";
+type FieldType = "bool" | "str" | "int" | "csv" | "select" | "dynamic-select";
 
 interface SettingField {
   k: string;
@@ -53,6 +53,12 @@ const SECTIONS: SettingSection[] = [
         type: "select",
         options: CURRENCY_OPTIONS,
         help: "所有费用最终换算并以此货币结算和显示。内置定价以 USD 计价，切换后自动按汇率交叉换算。",
+      },
+      {
+        k: "ai_diag_provider_id",
+        label: "AI 诊断 Provider",
+        type: "dynamic-select",
+        help: "首页「AI 成本诊断」使用的 LLM Provider。留空 = 使用 AstrBot 默认 Provider。",
       },
     ],
   },
@@ -211,6 +217,15 @@ export function SettingsView({
   const [purgeModules, setPurgeModules] = useState<Set<string>>(new Set());
   const [purging, setPurging] = useState(false);
   const [purgeMsg, setPurgeMsg] = useState("");
+  const [aiProviders, setAiProviders] = useState<
+    { id: string; name: string }[]
+  >([]);
+
+  useEffect(() => {
+    api.getAiProvider().then((info) => {
+      if (info.providers) setAiProviders(info.providers);
+    });
+  }, []);
 
   const PURGE_OPTIONS = [
     {
@@ -428,6 +443,31 @@ export function SettingsView({
                       {(f.options || []).map((opt) => (
                         <option key={opt} value={opt}>
                           {opt} ({currencyToSymbol(opt)})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              }
+              if (f.type === "dynamic-select") {
+                return (
+                  <div className="set-field" key={f.k}>
+                    <div className="set-field-text">
+                      <div className="set-field-label">{f.label}</div>
+                      {f.help && <div className="set-field-help">{f.help}</div>}
+                    </div>
+                    <select
+                      className="budget-input set-field-control"
+                      value={String(v || "")}
+                      onChange={(e) =>
+                        setField(sec.key, f.k, "dynamic-select", e.target.value)
+                      }
+                      style={{ width: f.width ?? 220 }}
+                    >
+                      <option value="">默认 Provider（AstrBot）</option>
+                      {aiProviders.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
                         </option>
                       ))}
                     </select>
