@@ -153,6 +153,7 @@ export function AiDiag() {
           <p className="aidiag-desc">
             一键收集成本/缓存/归因/预算/定价5个维度数据，交由 LLM
             综合分析，输出成本健康评分与优化建议。
+            <span className="aidiag-disclaimer">* 诊断说明仅供参考</span>
           </p>
           <button
             className="btn primary aidiag-btn"
@@ -269,6 +270,7 @@ export function AiDiag() {
             <span className="aidiag-provider-small">
               {result?.provider_name || ""}
             </span>
+            <span className="aidiag-disclaimer">仅供参考</span>
             <button className="btn aidiag-retry" onClick={runDiag}>
               重新诊断
             </button>

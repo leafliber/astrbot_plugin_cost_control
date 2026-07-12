@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
@@ -27,6 +27,9 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const data = res.data;
   const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
   const [resetResult, setResetResult] = useState("");
+  // 两段式确认：首次点击武装，4 秒内再次点击执行
+  const [resetArmed, setResetArmed] = useState(false);
+  const resetArmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [ready, setReady] = useState(false);
   // 跳转信号：点击未定价告警行时递增，传给对应 provider 卡片触发脉冲动画
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null);
@@ -245,7 +248,19 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
   const reset = async () => {
-    if (!confirm("确定清空所有自定义定价、恢复内置默认匹配？")) return;
+    // 两段式确认：首次点击武装，4 秒内再次点击执行（替代 confirm，兼容嵌入式 webview）
+    if (!resetArmed) {
+      setResetArmed(true);
+      setResetResult("⚠ 再次点击以确认重置");
+      if (resetArmTimer.current) clearTimeout(resetArmTimer.current);
+      resetArmTimer.current = setTimeout(() => {
+        setResetArmed(false);
+        setResetResult("");
+      }, 4000);
+      return;
+    }
+    if (resetArmTimer.current) clearTimeout(resetArmTimer.current);
+    setResetArmed(false);
     setResetResult("重置中…");
     try {
       await api.postSaveConfig({ pricing: {} });
@@ -346,8 +361,12 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
           ))}
         </div>
         <div className="row" style={{ marginTop: 8, gap: 10, alignItems: "center" }}>
-          <Button onClick={reset} title="清空自定义定价，恢复内置默认匹配">
-            重置全部
+          <Button
+            onClick={reset}
+            title="清空自定义定价，恢复内置默认匹配"
+            variant={resetArmed ? "danger" : "default"}
+          >
+            {resetArmed ? "⚠ 确认重置" : "重置全部"}
           </Button>
           <span className="muted">{resetResult}</span>
         </div>

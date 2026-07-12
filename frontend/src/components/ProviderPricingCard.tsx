@@ -180,9 +180,8 @@ export function ProviderPricingCard({
   onClear: () => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState<boolean>(
-    hasUserOverride || !matchedDefault || false,
-  );
+  // 自定义定价也默认折叠；仅未定价（无内置匹配）时默认展开以提示用户
+  const [expanded, setExpanded] = useState<boolean>(!matchedDefault);
 
   // 外部跳转信号 → 滚动到视图 + 触发脉冲动画
   useEffect(() => {
@@ -247,13 +246,11 @@ export function ProviderPricingCard({
           )}
           {type && <span className="muted small">{type}</span>}
           {hasUserOverride ? (
-            <span className="pricing-match is-overridden">
-              <span className="pm-ov">自定义</span>
-            </span>
+            <span className="pricing-badge pricing-badge--blue">自定义</span>
           ) : matchedDefault ? (
-            <span className="pricing-match">内置匹配</span>
+            <span className="pricing-badge pricing-badge--gray">内置匹配</span>
           ) : (
-            <span className="pricing-match is-missing">未定价</span>
+            <span className="pricing-badge pricing-badge--red">未定价</span>
           )}
         </div>
         <div

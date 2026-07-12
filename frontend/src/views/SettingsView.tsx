@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
@@ -217,6 +217,9 @@ export function SettingsView({
   const [purgeModules, setPurgeModules] = useState<Set<string>>(new Set());
   const [purging, setPurging] = useState(false);
   const [purgeMsg, setPurgeMsg] = useState("");
+  // 两段式确认：首次点击武装，4 秒内再次点击执行
+  const [purgeArmed, setPurgeArmed] = useState(false);
+  const purgeArmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [aiProviders, setAiProviders] = useState<
     { id: string; name: string }[]
   >([]);
@@ -351,15 +354,19 @@ export function SettingsView({
 
   const doPurge = async () => {
     if (purgeModules.size === 0) return;
-    const labels = PURGE_OPTIONS.filter((o) => purgeModules.has(o.key)).map(
-      (o) => o.label,
-    );
-    if (
-      !confirm(
-        `确定要清空以下 ${purgeModules.size} 个模块的全部数据？此操作不可恢复！\n\n${labels.join("\n")}`,
-      )
-    )
+    // 两段式确认：首次点击武装，4 秒内再次点击执行（替代 confirm，兼容嵌入式 webview）
+    if (!purgeArmed) {
+      setPurgeArmed(true);
+      setPurgeMsg("⚠ 再次点击以确认清空，此操作不可恢复");
+      if (purgeArmTimer.current) clearTimeout(purgeArmTimer.current);
+      purgeArmTimer.current = setTimeout(() => {
+        setPurgeArmed(false);
+        setPurgeMsg("");
+      }, 4000);
       return;
+    }
+    if (purgeArmTimer.current) clearTimeout(purgeArmTimer.current);
+    setPurgeArmed(false);
     setPurging(true);
     setPurgeMsg("正在清空…");
     try {
@@ -538,7 +545,11 @@ export function SettingsView({
               disabled={purgeModules.size === 0 || purging}
               variant="danger"
             >
-              {purging ? "清空中…" : `清空选中模块（${purgeModules.size}）`}
+              {purging
+                ? "清空中…"
+                : purgeArmed
+                  ? "⚠ 确认清空"
+                  : `清空选中模块（${purgeModules.size}）`}
             </Button>
           </div>
           {purgeMsg && (
