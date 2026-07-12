@@ -159,6 +159,7 @@ export function ProviderPricingCard({
   matchedDefault,
   hasUserOverride,
   isHistorical,
+  hasUsage,
   highlightSignal,
   onChange,
   onClear,
@@ -171,6 +172,8 @@ export function ProviderPricingCard({
   matchedDefault?: MatchedDefault | null;
   hasUserOverride?: boolean;
   isHistorical?: boolean;
+  /** 该 provider 是否存在未定价用量（告警） */
+  hasUsage?: boolean;
   /** 外部跳转信号：每次点击未定价告警时递增，触发脉冲动画 */
   highlightSignal?: number;
   onChange: (patch: Partial<DraftEntry>) => void;
@@ -215,10 +218,15 @@ export function ProviderPricingCard({
     }
   };
 
+  // 未定价 = 无自定义定价且无内置匹配
+  const isUnpriced = !hasUserOverride && !matchedDefault;
+
   const cardClass = [
     "pricing-card",
     isHistorical ? "is-historical" : "",
     !expanded ? "is-collapsed" : "",
+    isUnpriced && hasUsage ? "is-unpriced-alert" : "",
+    isUnpriced && !hasUsage ? "is-unpriced-warn" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -238,14 +246,12 @@ export function ProviderPricingCard({
             </span>
           )}
           {type && <span className="muted small">{type}</span>}
-          {matchedDefault ? (
-            hasUserOverride ? (
-              <span className="pricing-match is-overridden">
-                <span className="pm-ov">自定义</span>
-              </span>
-            ) : (
-              <span className="pricing-match">内置匹配</span>
-            )
+          {hasUserOverride ? (
+            <span className="pricing-match is-overridden">
+              <span className="pm-ov">自定义</span>
+            </span>
+          ) : matchedDefault ? (
+            <span className="pricing-match">内置匹配</span>
           ) : (
             <span className="pricing-match is-missing">未定价</span>
           )}

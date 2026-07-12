@@ -173,6 +173,22 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       .sort((a, b) => b[1].totalTokens - a[1].totalTokens);
   }, [unpriced]);
 
+  // 存在未定价用量的 provider ID 及短名集合，用于卡片背景色判定
+  const unpricedIdSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const u of unpriced) {
+      const pid = u.provider_id || "";
+      if (pid) {
+        s.add(pid);
+        s.add(shortName(pid));
+      }
+    }
+    return s;
+  }, [unpriced]);
+
+  const hasUnpricedUsage = (pid: string) =>
+    unpricedIdSet.has(pid) || unpricedIdSet.has(shortName(pid));
+
   const updateDraft = (pid: string, patch: Partial<DraftEntry>) =>
     setDrafts((prev) => {
       const cur = prev[pid] ?? entryToDraft(undefined);
@@ -320,6 +336,7 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
               matchedDefault={p.matchedDefault}
               hasUserOverride={!isDraftEmpty(ensureDraft(p.id))}
               isHistorical={p.isHistorical}
+              hasUsage={hasUnpricedUsage(p.id)}
               highlightSignal={
                 highlightTarget === p.id ? highlightSignal : undefined
               }
