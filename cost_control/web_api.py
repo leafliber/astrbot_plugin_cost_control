@@ -313,17 +313,17 @@ class WebApiMixin:
             provider_id = configured_id or self._get_default_provider_id()
             provider_name = self._get_provider_display_name(provider_id)
 
-            # 收集所有可用的 chat_completion provider 供前端选择
+            # 收集所有可用的 provider 供前端选择（与 /providers 端点同源，
+            # 确保下拉列表与预算页一致）
             providers: list[dict[str, str]] = []
             try:
-                for p in self.context.provider_manager.provider_insts:
-                    meta = p.meta()
-                    if meta.type == "chat_completion":
-                        mid = getattr(meta, "id", "") or ""
-                        model = getattr(meta, "model_name", None) or mid
-                        providers.append(
-                            {"id": mid, "name": f"{model} ({mid})"}
-                        )
+                for entry in self._collect_provider_models():
+                    pid = str(entry.get("id") or "").strip()
+                    if not pid:
+                        continue
+                    model = str(entry.get("model") or "").strip()
+                    name = f"{model} ({pid})" if model else pid
+                    providers.append({"id": pid, "name": name})
             except Exception:
                 pass
 
