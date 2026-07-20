@@ -26,6 +26,25 @@ from .config import get_config, get_pricing
 from .cost import compute_row_cost
 from .exchange_rates import currency_to_symbol, get_main_currency
 
+# 插件主模块路径（``main.py``）。AstrBot 的 ``star_map`` 以 ``Main.__module__``
+# 为键，而 ``update_command_permission`` 等管理接口通过 ``handler.__module__``
+# 反查 ``star_map``。Mixin 模式下命令定义在子模块，``__module__`` 默认指向本子
+# 模块，导致：① 修改指令权限报 400「未找到指令所属插件」；② 命令不会被绑定到
+# 插件实例（``functools.partial(handler, star_cls)`` 仅对模块路径匹配的 handler
+# 生效），调用时也会失败。在 ``@filter.command`` 之前改写 ``__module__`` 即修复。
+_MAIN_MODULE = __package__.rsplit(".", 1)[0] + ".main"
+
+
+def _command(name: str, *args, **kwargs):
+    """``@filter.command`` 的包装：先把 handler 的 ``__module__`` 改写为插件
+    主模块，再委托给 ``@filter.command`` 注册。"""
+
+    def decorator(fn):
+        fn.__module__ = _MAIN_MODULE
+        return filter.command(name, *args, **kwargs)(fn)
+
+    return decorator
+
 
 class CommandsMixin:
     """注册 ``/cost`` ``/budget`` ``/optimize`` ``/cache`` ``/report``
@@ -56,7 +75,7 @@ class CommandsMixin:
         refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
         return day_window_start(refresh, datetime.now(UTC), resolve_tz(self.context))
 
-    @filter.command("cost")
+    @_command("cost")
     async def cmd_cost(self, event: AstrMessageEvent):
         """``/cost``：查询当前会话今日 token 用量与成本。"""
         try:
@@ -82,7 +101,7 @@ class CommandsMixin:
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
 
-    @filter.command("budget")
+    @_command("budget")
     async def cmd_budget(self, event: AstrMessageEvent):
         """``/budget``：查询预算配置与当前超限状态。"""
         try:
@@ -137,7 +156,7 @@ class CommandsMixin:
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
 
-    @filter.command("cache")
+    @_command("cache")
     async def cmd_cache(self, event: AstrMessageEvent):
         """``/cache``：查看本会话最近缓存命中率与破坏诊断事件。"""
         try:
@@ -174,7 +193,7 @@ class CommandsMixin:
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
 
-    @filter.command("report")
+    @_command("report")
     async def cmd_report(self, event: AstrMessageEvent):
         """``/report``：生成用量 / 成本 / 缓存 / 归因综合报表。
 
@@ -214,7 +233,7 @@ class CommandsMixin:
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
 
-    @filter.command("attribution")
+    @_command("attribution")
     async def cmd_attribution(self, event: AstrMessageEvent):
         """``/attribution``：查看最近一次请求的上下文注入归因。"""
         try:
