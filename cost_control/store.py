@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from astrbot import logger
 from astrbot.api.star import StarTools
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -136,7 +137,9 @@ class StoreMixin:
             f"sqlite+aiosqlite:///{db_path}",
             echo=False,
             future=True,
-            connect_args={"timeout": 30},
+            pool_size=5,
+            max_overflow=10,
+            connect_args={"timeout": 30, "check_same_thread": False},
         )
         self._session_maker = async_sessionmaker(
             self._engine,
@@ -146,6 +149,10 @@ class StoreMixin:
         # 仅创建本插件自有表，避免把 astrbot 全局 SQLModel.metadata 的其它表
         # 一并建进独立库。
         async with self._engine.begin() as conn:
+            # 启用 WAL 模式（并发读写性能提升，减少 database is locked）
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA busy_timeout=5000"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
             await conn.run_sync(
                 lambda sync_conn: SQLModel.metadata.create_all(
                     sync_conn,
@@ -194,9 +201,9 @@ class StoreMixin:
                     "ON cost_supplements (request_id)"
                 )
             )
-        except Exception:
+        except Exception as e:
             # 迁移失败不阻断；后续写入缺失字段会被 SQLAlchemy 兜底为 None
-            pass
+            logger.warning("[cost_control] 数据库迁移失败（不影响运行）: %s", e)
 
     async def _ensure_session_maker(self) -> Any:
         if self._session_maker is None:
@@ -282,7 +289,8 @@ class StoreMixin:
             async with maker() as session:
                 result = await session.execute(stmt)
                 return list(result.scalars().all())
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] query_supplements 失败: %s", e)
             return []
 
     async def query_user_token_total(
@@ -310,7 +318,8 @@ class StoreMixin:
                 if not row:
                     return 0
                 return int(row[0] or 0) + int(row[1] or 0) + int(row[2] or 0)
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] query_user_token_total 失败: %s", e)
             return 0
 
     async def query_user_cost_total(
@@ -381,7 +390,8 @@ class StoreMixin:
                 for pid, price in req_prices.items():
                     total += len(distinct.get(pid, set())) * price
             return round(total, 6)
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] query_user_cost_total 失败: %s", e)
             return 0.0
 
     async def cleanup_old_supplements(self, before: datetime) -> int:
@@ -400,7 +410,8 @@ class StoreMixin:
                 n += int(r2.rowcount or 0)
                 await session.commit()
                 return n
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] cleanup_old_supplements 失败: %s", e)
             return 0
 
     async def purge_module(self, module: str) -> int:
@@ -452,7 +463,8 @@ class StoreMixin:
                     os.remove(path)
                     return 1
                 return 0
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] purge_module(%s) 失败: %s", module, e)
             return 0
         return 0
 
@@ -504,7 +516,8 @@ class StoreMixin:
                         continue
                 await session.commit()
                 return n
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] backfill_cost_amounts 失败: %s", e)
             return 0
 
     async def save_cache_event(self, record: dict[str, Any]) -> None:
@@ -540,7 +553,8 @@ class StoreMixin:
             async with maker() as session:
                 result = await session.execute(stmt)
                 return list(result.scalars().all())
-        except Exception:
+        except Exception as e:
+            logger.warning("[cost_control] query_cache_events 失败: %s", e)
             return []
 
     # ===== Preference 封装（复用 AstrBot 主库，存告警冷却 / 计数等跨会话状态） =====

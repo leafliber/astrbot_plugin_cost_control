@@ -191,11 +191,14 @@ class WebApiMixin:
             return default
 
     @staticmethod
-    def _parse_iso(s: str | None) -> datetime | None:
+    def _parse_iso(s: str | None, *, is_end: bool = False) -> datetime | None:
         """把 ISO 字符串解析为 aware UTC datetime（失败返回 None）。
 
         接受 ``2026-06-15``（按 UTC 00:00）、``2026-06-15T01:02:03``、
         带偏移的 ISO。无时区信息者按 UTC 处理。
+
+        Args:
+            is_end: True 时纯日期输入顺延至次日 00:00（用于 end 区间右端包容当天）。
         """
         if not s:
             return None
@@ -203,16 +206,17 @@ class WebApiMixin:
             from datetime import UTC, timedelta
 
             raw = str(s).strip()
+            is_date_only = len(raw) == 10 and raw[4] == "-" and raw[7] == "-"
             # 纯日期补全为 00:00:00
-            if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+            if is_date_only:
                 raw = raw + "T00:00:00"
             dt = datetime.fromisoformat(raw)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
             else:
                 dt = dt.astimezone(UTC)
-            # end 区间包容到当天结束：纯日期输入顺延至次日 00:00
-            if len(str(s).strip()) == 10:
+            # 仅 end 参数：纯日期顺延至次日（包容当天全部时刻）
+            if is_end and is_date_only:
                 dt = dt + timedelta(days=1)
             return dt
         except Exception:
@@ -709,7 +713,7 @@ class WebApiMixin:
             provider = self._param("provider") or None
             model = self._param("model") or None
             start = self._parse_iso(self._param("start"))
-            end = self._parse_iso(self._param("end"))
+            end = self._parse_iso(self._param("end"), is_end=True)
             try:
                 limit = max(1, min(1000, int(self._param("limit", "100"))))
             except (TypeError, ValueError):
@@ -748,7 +752,7 @@ class WebApiMixin:
             if by not in ("model", "provider", "umo"):
                 by = "model"
             start = self._parse_iso(self._param("start"))
-            end = self._parse_iso(self._param("end"))
+            end = self._parse_iso(self._param("end"), is_end=True)
             umo = self._param("umo") or None
             provider = self._param("provider") or None
             model = self._param("model") or None
@@ -1474,15 +1478,25 @@ class WebApiMixin:
         except Exception as e:
             return self._err(str(e))
 
+    # purge 最小调用间隔（秒），防误触重复调用。
+    _purge_last_ts: float = 0.0
+
     async def api_action_purge(self, **kwargs: Any) -> dict[str, Any]:
         """``POST /actions/purge``：按模块清空数据（不可恢复）。
 
         请求体::
 
-            {"modules": ["supplements", "cache_events", "usage_stats", "ai_diag"]}
+            {"modules": ["supplements", "cache_events", "usage_stats", "ai_diag"],
+             "confirm": "PURGE"}
 
+        需传 ``confirm: "PURGE"`` 确认；两次调用最小间隔 10 秒。
         逐模块执行 ``purge_module``，返回每个模块的删除条数。
         """
+        import time
+
+        now_ts = time.time()
+        if now_ts - self._purge_last_ts < 10:
+            return self._err("操作过于频繁，请 10 秒后重试")
         try:
             from quart import request
 
@@ -1491,6 +1505,8 @@ class WebApiMixin:
             body = None
         if not isinstance(body, dict):
             return self._err("请求体必须是 JSON 对象")
+        if body.get("confirm") != "PURGE":
+            return self._err('请在请求体中传入 "confirm": "PURGE" 确认清空操作')
         modules = body.get("modules", [])
         if not isinstance(modules, list):
             return self._err("modules 必须是数组")
@@ -1500,6 +1516,7 @@ class WebApiMixin:
             for m in modules:
                 if m in valid:
                     results[m] = await self.purge_module(m)
+            self._purge_last_ts = now_ts
             return self._ok({"results": results})
         except Exception as e:
             return self._err(str(e))
@@ -1585,6 +1602,21 @@ class WebApiMixin:
             # else: 未知 key 忽略
         if not any(k in body for k in CONFIG_DEFAULTS):
             return None, "未提供可识别的配置项"
+        # 时间格式校验（refresh_time / daily_report_time 必须为 HH:MM）
+        import re
+
+        _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+        rt = str(out.get("refresh_time", "00:00"))
+        if not _TIME_RE.match(rt):
+            return None, f"refresh_time 格式无效（需 HH:MM 24小时制）：{rt}"
+        alerts_cfg = out.get("alerts")
+        if isinstance(alerts_cfg, dict):
+            drt = str(alerts_cfg.get("daily_report_time", "09:00"))
+            if not _TIME_RE.match(drt):
+                return None, f"daily_report_time 格式无效（需 HH:MM 24小时制）：{drt}"
+            cd = alerts_cfg.get("cooldown_seconds", 300)
+            if isinstance(cd, (int, float)) and cd > 86400:
+                return None, "cooldown_seconds 不能超过 86400（24小时）"
         return out, ""
 
     async def api_action_save_config(self, **kwargs: Any) -> dict[str, Any]:
