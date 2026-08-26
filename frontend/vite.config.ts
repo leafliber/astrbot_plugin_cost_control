@@ -16,13 +16,15 @@ function preserveBridgeSdk() {
         // 2) 把 app.js module script 移到 bridge 标签之后，保证 window.AstrBotPluginPage
         //    在 React bundle 执行前就绪（module script defer，文本顺序即执行顺序）。
         let out = html;
+        // 构建时间戳作为版本参数，浏览器每次构建后强制重新拉取（服务端 no-store 之外的保险）
+        const v = `v=${Date.now()}`;
         const appScriptMatch = out.match(/<script[^>]*src="\.\/app\.js"[^>]*><\/script>/);
         let appScript = "";
         if (appScriptMatch) {
-          appScript = appScriptMatch[0].replace('src="./app.js"', 'src="app.js"');
+          appScript = appScriptMatch[0].replace('src="./app.js"', `src="app.js?${v}"`);
           out = out.replace(appScriptMatch[0], "");
         }
-        out = out.replace(/href="\.\/style\.css"/g, 'href="style.css"');
+        out = out.replace(/href="\.\/style\.css"/g, `href="style.css?${v}"`);
         if (out.includes(BRIDGE)) {
           out = out.replace(
             `<script src="${BRIDGE}"></script>`,

@@ -6,8 +6,6 @@
 可测性设计：聚合逻辑抽成模块级纯函数 ``aggregate_rows``（不依赖 astrbot /
 sqlmodel，可单测）；DB 查询在 ``UsageQueryMixin`` 方法内延迟 import astrbot，
 使本模块顶层零第三方依赖，本地可直接 import 测试。
-
-阶段 1 实现。
 """
 
 from __future__ import annotations

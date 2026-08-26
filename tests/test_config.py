@@ -5,8 +5,11 @@ import os
 from cost_control.config import (
     coerce_to_default_type,
     deep_merge,
+    get_enabled_price_sources,
+    get_price_sources,
     get_pricing,
     load_plugin_config,
+    normalize_price_sources,
     save_plugin_config,
     switches_from_config,
 )
@@ -123,6 +126,34 @@ def test_plugin_config_overwrite(tmp_path):
     save_plugin_config(d, {"a": 1})
     save_plugin_config(d, {"a": 2, "b": 3})
     assert load_plugin_config(d) == {"a": 2, "b": 3}
+
+
+
+def test_price_sources_backfill_public_defaults_for_partial_config():
+    """动态 New API 源不能覆盖三种公共源的默认配置。"""
+    sources = get_price_sources({"price_sources": {"newapi:gateway": {"enabled": True}}})
+    assert set(sources) == {"modelsdev", "litellm", "openrouter", "newapi:gateway"}
+    assert get_enabled_price_sources({"price_sources": {"newapi:gateway": {"enabled": True}}}) == [
+        "modelsdev",
+        "litellm",
+        "openrouter",
+        "newapi:gateway",
+    ]
+
+
+def test_normalize_price_sources_rejects_unknown_source_ids():
+    normalized = normalize_price_sources(
+        {
+            "modelsdev": {"enabled": False},
+            "newapi:gateway": {"enabled": True, "provider_id": "gateway"},
+            "custom-url": {"enabled": True},
+            "newapi:": {"enabled": True},
+        }
+    )
+    assert normalized["modelsdev"]["enabled"] is False
+    assert normalized["newapi:gateway"]["provider_id"] == "gateway"
+    assert "custom-url" not in normalized
+    assert "newapi:" not in normalized
 
 
 def test_get_pricing_includes_normalized_cluster_multipliers():

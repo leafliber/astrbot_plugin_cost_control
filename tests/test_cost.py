@@ -269,3 +269,270 @@ def test_compute_cost_grouped_mixed():
     ]
     # 2.5 (per_token) + 10*0.01 (per_turn)
     assert abs(compute_cost_grouped(rows, pricing_struct(user)) - 2.6) < 1e-9
+
+
+# ===== 多源价格目录：五级优先级链 + 继承 + 新计费模式 =====
+
+
+def pricing_full(user=None, catalog=None, selections=None):
+    """带 catalog/selections 的完整 pricing 结构（测试辅助）。"""
+    p = pricing_struct(user)
+    p["catalog"] = catalog or {}
+    p["selections"] = selections or {}
+    return p
+
+
+def _per_token_partial(**kw):
+    """构造只显式配部分字段的用户 per_token 规则（含 configured 标志）。"""
+    cfg = {f: (f in kw) for f in ("input", "input_cached", "output", "cache_creation")}
+    rule = {"mode": "per_token", "configured": cfg}
+    for f in cfg:
+        rule[f] = kw.get(f)
+    return rule
+
+
+# ---- 五级优先级 ----
+
+
+def test_priority_model_scoped_manual_beats_selection():
+    user = {"prov|gpt-4o": {"mode": "per_turn", "price": 0.5}}
+    catalog = {"or:gpt-4o": {"mode": "per_token", "input": 1.0, "output": 2.0}}
+    selections = {"prov": {"gpt-4o": {"price_key": "or:gpt-4o"}}}
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full(user, catalog, selections))
+    assert rule["mode"] == "per_turn" and rule["price"] == 0.5
+
+
+def test_priority_selection_beats_legacy_manual():
+    user = {"prov": {"mode": "per_turn", "price": 0.5}}
+    catalog = {"or:gpt-4o": {"mode": "per_token", "input": 1.0, "output": 2.0}}
+    selections = {"prov": {"gpt-4o": {"price_key": "or:gpt-4o"}}}
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full(user, catalog, selections))
+    assert rule["mode"] == "per_token" and rule["input"] == 1.0
+
+
+def test_priority_legacy_manual_beats_default():
+    user = {"prov": {"mode": "per_turn", "price": 0.5}}
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full(user))
+    assert rule["mode"] == "per_turn"
+
+
+def test_priority_default_fallback():
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full())
+    assert rule["mode"] == "per_token" and rule["input"] == 2.5
+
+
+def test_selection_effective_without_user_pricing():
+    """无任何手工定价时，已确认的候选选择仍必须生效（回归：曾因嵌在 user 判断内失效）。"""
+    catalog = {"or:gpt-4o": {"mode": "per_token", "input": 1.0, "output": 2.0}}
+    selections = {
+        "prov": {
+            "gpt-4o": {
+                "price_key": "or:gpt-4o",
+                "confirmed": True,
+                "auto": False,
+                "score": 1,
+                "reason": "exact",
+            }
+        }
+    }
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full(None, catalog, selections))
+    assert rule is not None
+    assert rule["mode"] == "per_token" and rule["input"] == 1.0
+
+
+def test_model_scoped_key_not_fuzzy_matched():
+    # "prov|gpt-4o" 是模型级精确 key，不应被 provider 模糊匹配命中其它模型
+    user = {"prov|gpt-4o": {"mode": "per_turn", "price": 0.5}}
+    assert resolve_pricing("prov", "zzz-no-such-model", pricing_full(user)) is None
+
+
+def test_selection_missing_price_key_returns_none_then_default():
+    # selection 指向的 price_key 不在 catalog → 跳过候选，落到默认表
+    selections = {"prov": {"gpt-4o": {"price_key": "or:missing"}}}
+    rule = resolve_pricing("prov", "gpt-4o", pricing_full(selections=selections))
+    assert rule["mode"] == "per_token" and rule["input"] == 2.5
+
+
+# ---- per_token 部分字段继承（AC7）----
+
+
+def test_per_token_partial_inherits_from_default():
+    user = {"prov": _per_token_partial(input=9.9)}
+    usage = {"token_input_other": 1_000_000, "token_output": 1_000_000}
+    # input 1M*9.9 + output 1M*10.0(继承默认) = 19.9
+    cost = compute_cost_value(usage, "prov", "gpt-4o", pricing_full(user))
+    assert abs(cost - 19.9) < 1e-9
+
+
+def test_per_token_model_scoped_inherits_from_selection():
+    # 模型级手工价 input 生效，output 从候选继承 2.0（候选优先于默认）
+    user = {"prov|gpt-4o": _per_token_partial(input=9.9)}
+    catalog = {"or:gpt-4o": {"mode": "per_token", "input": 1.0, "output": 2.0}}
+    selections = {"prov": {"gpt-4o": {"price_key": "or:gpt-4o"}}}
+    usage = {"token_input_other": 1_000_000, "token_output": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "gpt-4o", pricing_full(user, catalog, selections))
+    assert abs(cost - 11.9) < 1e-9  # 9.9 + 2.0
+
+
+def test_per_token_explicit_zero_not_inherited():
+    # 显式 0 视为已配置，不继承
+    user = {"prov": _per_token_partial(input=9.9, output=0.0)}
+    usage = {"token_input_other": 1_000_000, "token_output": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "gpt-4o", pricing_full(user))
+    assert abs(cost - 9.9) < 1e-9  # output 保持 0
+
+
+def test_per_token_no_fallback_zero():
+    # 无候选无默认 → 未配置字段按 0（旧行为）
+    user = {"prov": _per_token_partial(input=9.9)}
+    usage = {"token_input_other": 1_000_000, "token_output": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "zzz-no-such", pricing_full(user))
+    assert abs(cost - 9.9) < 1e-9  # 仅 input 计费
+
+
+# ---- per_tier ----
+
+
+def _per_tier_rule(base, context_tiers=None, service_tiers=None):
+    return {
+        "mode": "per_tier",
+        "base": base,
+        "context_tiers": context_tiers or [],
+        "service_tiers": service_tiers or [],
+    }
+
+
+def test_per_tier_context_tier_override():
+    rule = _per_tier_rule(
+        {"input": 1.0, "output": 2.0},
+        context_tiers=[{"threshold_tokens": 1000, "input": 5.0, "output": 10.0}],
+    )
+    user = {"prov": rule}
+    short = compute_cost_value(
+        {"token_input_other": 500, "token_output": 100}, "prov", "m", pricing_full(user)
+    )
+    assert abs(short - (500 * 1.0 + 100 * 2.0) / 1e6) < 1e-12
+    long = compute_cost_value(
+        {"token_input_other": 2000, "token_output": 100}, "prov", "m", pricing_full(user)
+    )
+    assert abs(long - (2000 * 5.0 + 100 * 10.0) / 1e6) < 1e-12
+
+
+def test_per_tier_service_tier_multiplier():
+    rule = _per_tier_rule(
+        {"input": 1.0, "output": 2.0},
+        service_tiers=[{"match": "priority", "input_multiplier": 2.0, "output_multiplier": 2.0}],
+    )
+    user = {"prov": rule}
+    base = compute_cost_value(
+        {"token_input_other": 1000, "token_output": 100}, "prov", "m", pricing_full(user)
+    )
+    assert abs(base - (1000 * 1.0 + 100 * 2.0) / 1e6) < 1e-12
+    prio = compute_cost_value(
+        {
+            "token_input_other": 1000,
+            "token_output": 100,
+            "billing_context": {"service_tier": "priority"},
+        },
+        "prov",
+        "m",
+        pricing_full(user),
+    )
+    assert abs(prio - (1000 * 2.0 + 100 * 4.0) / 1e6) < 1e-12
+
+
+def test_per_tier_row_aggregate():
+    user = {"prov": _per_tier_rule({"input": 1.0, "output": 2.0})}
+    row = {
+        "provider_id": "prov",
+        "provider_model": "m",
+        "count": 3,
+        "token_input_other": 1_000_000,
+        "token_output": 0,
+    }
+    assert abs(compute_row_cost(row, pricing_full(user)) - 1.0) < 1e-9
+
+
+# ---- tiered_expr ----
+
+
+def test_tiered_expr_computation_and_tier_backfill():
+    user = {"prov": {"mode": "tiered_expr", "expr": 'tier("std", p*1.5 + c*7.5)'}}
+    usage = {"token_input_other": 100000, "token_output": 5000}
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert abs(cost - (100000 * 1.5 + 5000 * 7.5) / 1e6) < 1e-12
+    assert usage["_matched_tier"] == "std"
+
+
+def test_tiered_expr_invalid_returns_zero():
+    user = {"prov": {"mode": "tiered_expr", "expr": "p * * c"}}
+    usage = {"token_input_other": 100}
+    assert compute_cost_value(usage, "prov", "m", pricing_full(user)) == 0.0
+
+
+def test_tiered_expr_row_aggregate():
+    user = {"prov": {"mode": "tiered_expr", "expr": "p * 2"}}
+    row = {
+        "provider_id": "prov",
+        "provider_model": "m",
+        "count": 1,
+        "token_input_other": 1_000_000,
+        "token_output": 0,
+    }
+    assert abs(compute_row_cost(row, pricing_full(user)) - 2.0) < 1e-9
+
+
+def test_unique_catalog_candidate_applies_without_persisted_selection():
+    """唯一高置信候选应参与实际结算，不只在定价页面展示。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    price = CatalogPrice(
+        source="newapi:gateway",
+        source_model_id="private-model",
+        prompt=3.0,
+        completion=7.0,
+    )
+    catalog = PriceCatalog(prices={price.price_key: price})
+    pricing = pricing_struct()
+    pricing["catalog"] = {price.price_key: price.to_dict()}
+    pricing["catalog_obj"] = catalog
+    usage = {"token_input_other": 1_000_000, "token_output": 1_000_000}
+    assert compute_cost_value(usage, "prov", "private-model", pricing) == 10.0
+
+
+def test_ambiguous_catalog_candidates_do_not_auto_apply():
+    """两个高置信候选不能自动选择，必须留给用户在 WebUI 中确认。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    first = CatalogPrice(source="modelsdev", source_model_id="private-model", prompt=3.0)
+    second = CatalogPrice(source="openrouter", source_model_id="private-model", prompt=4.0)
+    catalog = PriceCatalog(prices={first.price_key: first, second.price_key: second})
+    pricing = pricing_struct()
+    pricing["catalog"] = {
+        first.price_key: first.to_dict(),
+        second.price_key: second.to_dict(),
+    }
+    pricing["catalog_obj"] = catalog
+    assert resolve_pricing("prov", "private-model", pricing) is None
+
+
+def test_disabled_source_does_not_auto_apply_but_confirmed_selection_still_applies():
+    """停用源不自动匹配，但历史确认选择保持有效。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    price = CatalogPrice(
+        source="openrouter", source_model_id="private-model", prompt=3.0, completion=7.0
+    )
+    catalog = PriceCatalog(prices={price.price_key: price})
+    pricing = pricing_struct()
+    pricing["catalog"] = {price.price_key: price.to_dict()}
+    pricing["catalog_obj"] = catalog
+    pricing["enabled_sources"] = []
+    assert resolve_pricing("prov", "private-model", pricing) is None
+
+    pricing["selections"] = {
+        "prov": {"private-model": {"price_key": price.price_key, "confirmed": True}}
+    }
+    rule = resolve_pricing("prov", "private-model", pricing)
+    assert rule is not None
+    assert rule["input"] == 3.0

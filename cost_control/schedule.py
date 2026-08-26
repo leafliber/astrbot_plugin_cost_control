@@ -9,8 +9,6 @@
 配合 ``persistent=False``（不持久化 handler 引用，由插件生命周期自管理）。
 
 cron 触发时按 ``handler()`` 无参调用（``payload`` 为空）。
-
-阶段 2 实现。
 """
 
 from __future__ import annotations
@@ -21,13 +19,13 @@ from typing import Any
 from astrbot import logger
 
 from .budget import day_window_start, month_window_start, resolve_tz
-from .config import get_config, get_rates
+from .config import get_config, get_price_sync_config, get_pricing, get_rates
 from .cost import compute_cost_grouped_in_main
 from .exchange_rates import currency_to_symbol, get_main_currency
 
 REPORT_JOB_NAME = "cost_control_daily_report"
 CLEANUP_JOB_NAME = "cost_control_cleanup"
-# 历史清理固定在本地 04:00（避开日报时段）。
+PRICE_SYNC_JOB_NAME = "cost_control_price_sync"
 _CLEANUP_CRON = "0 4 * * *"
 
 
@@ -74,7 +72,7 @@ class ScheduleMixin:
             cm = self.context.cron_manager
             existing = await cm.list_jobs(job_type="basic")
             for j in existing or []:
-                if j.name in (REPORT_JOB_NAME, CLEANUP_JOB_NAME):
+                if j.name in (REPORT_JOB_NAME, CLEANUP_JOB_NAME, PRICE_SYNC_JOB_NAME):
                     try:
                         await cm.delete_job(j.job_id)
                     except Exception as e:
@@ -106,7 +104,26 @@ class ScheduleMixin:
                 enabled=True,
                 persistent=False,
             )
-            logger.info("[cost_control] CronJob 注册完成 (daily_report=%s)", enable_report)
+            price_sync = get_price_sync_config(getattr(self, "cfg", None))
+            enable_price_sync = bool(price_sync.get("auto_enabled", False))
+            if enable_price_sync:
+                try:
+                    await cm.add_basic_job(
+                        name=PRICE_SYNC_JOB_NAME,
+                        cron_expression=str(price_sync.get("cron") or "0 4 * * *"),
+                        handler=self.sync_prices,
+                        description="cost_control 价格目录同步",
+                        timezone=tz_key,
+                        enabled=True,
+                        persistent=False,
+                    )
+                except Exception as e:
+                    logger.warning("[cost_control] 价格同步 CronJob 注册失败: %s", e)
+            logger.info(
+                "[cost_control] CronJob 注册完成 (daily_report=%s, price_sync=%s)",
+                enable_report,
+                enable_price_sync,
+            )
         except Exception as e:
             logger.warning("[cost_control] CronJob 注册失败: %s", e)
 
@@ -142,6 +159,39 @@ class ScheduleMixin:
         except Exception as e:
             logger.warning("[cost_control] 日报生成失败: %s", e)
 
+    async def sync_prices(self) -> None:
+        """CronJob 回调：同步启用的价格源；失败仅记录日志，保留旧目录。"""
+        try:
+            from .price_sources import sync_all
+
+            def provider_cfg(provider_id: str) -> dict[str, Any] | None:
+                try:
+                    config = self.context.get_config() or {}
+                    providers = config.get("provider") if isinstance(config, dict) else None
+                    for provider in providers if isinstance(providers, list) else []:
+                        if (
+                            isinstance(provider, dict)
+                            and str(provider.get("id") or "") == provider_id
+                        ):
+                            return provider
+                except Exception:
+                    pass
+                return None
+
+            data_dir = str(getattr(self, "_data_dir", None) or self.get_data_dir())
+            report = await sync_all(
+                getattr(self, "cfg", None) or {},
+                data_dir,
+                provider_cfg=provider_cfg,
+            )
+            logger.info(
+                "[cost_control] 定时价格同步完成: %d 成功, %d 失败",
+                sum(1 for result in report.get("results", []) if result.get("status") == "ok"),
+                sum(1 for result in report.get("results", []) if result.get("status") == "error"),
+            )
+        except Exception as e:
+            logger.warning("[cost_control] 定时价格同步失败: %s", e)
+
     async def cleanup_old(self) -> None:
         """CronJob 回调：按 ``schedule.retain_days`` 清理过期补充记录。"""
         try:
@@ -161,7 +211,8 @@ class ScheduleMixin:
         try:
             rows = await self.query_usage_grouped(by="provider_model", start=start)
             cfg = getattr(self, "cfg", None)
-            pricing = self.get_pricing()
+            pricing_getter = getattr(self, "get_pricing", None)
+            pricing = pricing_getter() if callable(pricing_getter) else get_pricing(cfg)
             return compute_cost_grouped_in_main(
                 rows, pricing, get_main_currency(cfg), get_rates(cfg)
             )

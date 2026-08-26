@@ -18,8 +18,6 @@ Anthropic 的 ``cache_creation`` 在 ``raw_completion`` 不可得（源未设置
 
 可测性设计：``hit_rate`` 与 ``diagnose_changes`` 抽成模块级纯函数，不依赖
 astrbot，可单测。
-
-阶段 3 实现。
 """
 
 from __future__ import annotations

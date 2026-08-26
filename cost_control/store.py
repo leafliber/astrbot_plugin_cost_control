@@ -6,8 +6,6 @@
 设计决策：补充数据（每请求的 cache_creation、归因注入量、user_id 等原生 ``ProviderStat``
 没有的字段）存独立 sqlite，与 AstrBot 主库解耦——零 schema 干扰、astrbot 升级免疫。
 与 ``ProviderStat`` 的关联在应用层按 ``umo + provider_id + created_at`` 完成。
-
-阶段 1 实现。
 """
 
 from __future__ import annotations
@@ -62,7 +60,7 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     # 原始 usage（provider 原生结构的序列化，供缓存诊断排查）
     raw_usage: dict[str, Any] | None = Field(default=None, sa_type=JSON)
 
-    # 归因（阶段 3 填充）
+    # 归因结果
     injection_total: int | None = Field(default=None)
     attribution: dict[str, Any] | None = Field(default=None, sa_type=JSON)
 
@@ -75,6 +73,11 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     # 固化的原始计费货币代码（如 "USD"/"CNY"；NULL=历史数据，回退主货币）。
     currency_symbol: str | None = Field(default=None)
 
+    # 计费上下文（tiered_expr / per_tier 求值所需：service_tier、cc1h、白名单 header 等）。
+    # 白名单提取，绝不采集 Authorization 等敏感头；旧记录为 NULL，求值时降级。
+    billing_context: dict[str, Any] | None = Field(default=None, sa_type=JSON)
+    # 表达式/阶梯求值命中的阶梯名（tier() 回填），供审计与调试；旧记录为 NULL。
+    matched_tier: str | None = Field(default=None)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         index=True,
@@ -188,6 +191,14 @@ class StoreMixin:
                 await conn.execute(
                     text("ALTER TABLE cost_supplements ADD COLUMN currency_symbol TEXT")
                 )
+            if "billing_context" not in cols:
+                await conn.execute(
+                    text("ALTER TABLE cost_supplements ADD COLUMN billing_context TEXT")
+                )
+            if "matched_tier" not in cols:
+                await conn.execute(
+                    text("ALTER TABLE cost_supplements ADD COLUMN matched_tier TEXT")
+                )
             # 索引（IF NOT EXISTS 在 SQLite 3.8+ 可用）
             await conn.execute(
                 text(
@@ -234,6 +245,8 @@ class StoreMixin:
             user_id=record.get("user_id"),
             cost_amount=record.get("cost_amount"),
             currency_symbol=record.get("currency_symbol"),
+            billing_context=record.get("billing_context"),
+            matched_tier=record.get("matched_tier"),
             created_at=record.get("created_at") or datetime.now(UTC),
         )
         maker = await self._ensure_session_maker()
@@ -338,7 +351,7 @@ class StoreMixin:
           的行无法归属，跳过。
         """
         try:
-            from .cost import _cost_per_token, resolve_pricing
+            from .cost import compute_cost_value, resolve_pricing
 
             maker = await self._ensure_session_maker()
             async with maker() as session:
@@ -359,21 +372,21 @@ class StoreMixin:
                     if rule is None:
                         continue
                     mode = rule.get("mode", "per_token")
-                    if mode == "per_token":
-                        total += _cost_per_token(
-                            {
-                                "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
-                                "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
-                                "token_output": int(getattr(r, "token_output", 0) or 0),
-                                "cache_creation": getattr(r, "cache_creation", None),
-                            },
-                            rule,
-                        )
-                    elif mode == "per_turn":
-                        total += float(rule.get("price", 0.0) or 0.0)
-                    elif mode == "per_request":
+                    if mode == "per_request":
                         pid = provider_id or ""
                         req_prices[pid] = float(rule.get("price", 0.0) or 0.0)
+                        continue
+                    # per_token / per_turn / per_tier / tiered_expr 统一走 compute_cost_value；
+                    # usage 带 billing_context（service_tier 等）与 created_at（时间函数）。
+                    usage = {
+                        "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
+                        "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
+                        "token_output": int(getattr(r, "token_output", 0) or 0),
+                        "cache_creation": getattr(r, "cache_creation", None),
+                        "billing_context": getattr(r, "billing_context", None),
+                        "created_at": getattr(r, "created_at", None),
+                    }
+                    total += compute_cost_value(usage, provider_id, model, pricing)
                 except Exception:
                     continue
 
@@ -516,6 +529,8 @@ class StoreMixin:
                             "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
                             "token_output": int(getattr(r, "token_output", 0) or 0),
                             "cache_creation": getattr(r, "cache_creation", None),
+                            "billing_context": getattr(r, "billing_context", None),
+                            "created_at": getattr(r, "created_at", None),
                         }
                         cost_usd = round(
                             compute_cost_value(

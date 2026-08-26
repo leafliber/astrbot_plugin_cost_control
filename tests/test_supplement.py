@@ -95,3 +95,86 @@ def test_read_request_id_none_when_absent():
     from cost_control.supplement import _read_request_id
 
     assert _read_request_id(SimpleNamespace()) is None
+
+
+# ===== 计费上下文采集（billing_context） =====
+
+
+def test_extract_billing_context_service_tier_from_raw_attr():
+    from cost_control.supplement import _extract_billing_context
+
+    raw = SimpleNamespace(service_tier="priority")
+    ctx = _extract_billing_context(raw, {})
+    assert ctx["service_tier"] == "priority"
+
+
+def test_extract_billing_context_service_tier_from_raw_dict():
+    from cost_control.supplement import _extract_billing_context
+
+    ctx = _extract_billing_context({"service_tier": "flex"}, {})
+    assert ctx["service_tier"] == "flex"
+
+
+def test_extract_billing_context_response_overrides_request():
+    from cost_control.supplement import _extract_billing_context
+
+    raw = SimpleNamespace(service_tier="priority")
+    ctx = _extract_billing_context(raw, {"service_tier": "default"})
+    assert ctx["service_tier"] == "priority"
+
+
+def test_extract_req_billing_from_extra_body():
+    from cost_control.supplement import _extract_req_billing
+
+    req = SimpleNamespace(extra_body={"service_tier": "fast"})
+    assert _extract_req_billing(req)["service_tier"] == "fast"
+
+
+def test_extract_req_billing_anthropic_beta_1h():
+    from cost_control.supplement import _extract_req_billing
+
+    req = SimpleNamespace(
+        extra_body={}, headers={"anthropic-beta": "prompt-caching-1h"}
+    )
+    ctx = _extract_req_billing(req)
+    assert ctx.get("cache_ttl_1h") is True
+    assert ctx["headers"]["anthropic-beta"] == "prompt-caching-1h"
+
+
+def test_extract_req_billing_never_captures_authorization():
+    from cost_control.supplement import _extract_req_billing
+
+    req = SimpleNamespace(
+        extra_body={},
+        headers={"anthropic-beta": "x", "Authorization": "Bearer SECRET"},
+    )
+    ctx = _extract_req_billing(req)
+    assert "Authorization" not in str(ctx)
+    assert "SECRET" not in str(ctx)
+
+
+def test_extract_req_billing_none_and_garbage():
+    from cost_control.supplement import _extract_req_billing
+
+    assert _extract_req_billing(None) == {}
+    # headers 非 dict、extra_body 缺失等异常形状都吞掉返回 {}
+    assert _extract_req_billing(SimpleNamespace(extra_body="notdict", headers=42)) == {}
+
+
+def test_read_req_billing_roundtrip():
+    from cost_control.supplement import SupplementMixin, _read_req_billing
+
+    mixin = SupplementMixin()
+    event = SimpleNamespace()
+    req = SimpleNamespace(extra_body={"service_tier": "fast"})
+    mixin.capture_req_billing(event, req)
+    assert _read_req_billing(event)["service_tier"] == "fast"
+
+
+def test_capture_req_billing_empty_not_stashed():
+    from cost_control.supplement import SupplementMixin, _read_req_billing
+
+    mixin = SupplementMixin()
+    event = SimpleNamespace()
+    mixin.capture_req_billing(event, SimpleNamespace())  # 无可提取内容
+    assert _read_req_billing(event) == {}

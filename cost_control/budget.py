@@ -672,9 +672,12 @@ class BudgetMixin:
         if result.get("metric") == "cost":
             from .exchange_rates import currency_to_symbol, get_main_currency
 
-            cur = str(result.get("currency") or "") or get_main_currency(getattr(self, "cfg", None))
+            cur_raw = str(result.get("currency") or "")
+            cur = cur_raw or get_main_currency(getattr(self, "cfg", None))
             sym = currency_to_symbol(cur)
-            return f"⏸ 已超出花费预算（{dim}）：{sym}{float(used or 0):.4f} / {sym}{float(limit or 0):.2f}"
+            used_f = float(used or 0)
+            limit_f = float(limit or 0)
+            return f"⏸ 已超出花费预算（{dim}）：{sym}{used_f:.4f} / {sym}{limit_f:.2f}"
         # token 维度的 used/limit 来自 float() 包装，转 int 避免显示 "150.0"。
         return f"⏸ 已超出预算（{dim}）：用 {int(used or 0)} / 限 {int(limit or 0)} token"
 

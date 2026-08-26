@@ -444,19 +444,19 @@ class AiDiagMixin:
         兼容三种情况：纯 JSON、```json ...``` 代码块、混杂文本中提取。
         """
         text = text.strip()
-        # 方案1：直接解析
+        # 直接解析整段 JSON
         try:
             return json.loads(text)
         except Exception:
             pass
-        # 方案2：提取 ```json ... ``` 代码块
+        # 降级 1：提取 ```json ...``` 代码块
         m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if m:
             try:
                 return json.loads(m.group(1).strip())
             except Exception:
                 pass
-        # 方案3：提取第一个 { ... } 块
+        # 降级 2：提取首个 {...} 花括号块
         m = re.search(r"\{[\s\S]*\}", text)
         if m:
             try:

@@ -71,7 +71,7 @@ class Main(
 
         ``self.cfg`` = ``CONFIG_DEFAULTS`` ⊕ 插件自有配置文件(``config.json``) ⊕
         AstrBot 开关(``self.config``)。详细配置存插件文件（不被 AstrBot schema 裁剪）；
-        schema 仅保留总开关 ``enabled``，其余所有参数一律走 ``config.json``（仪表盘「设置」页编辑）。
+        schema 仅保留总开关 ``enabled``，其余参数一律走 ``config.json``（仪表盘「设置」页编辑）。
         """
         try:
             from .cost_control.config import (
@@ -127,8 +127,9 @@ class Main(
         # 独立 try，绝不影响后续预算/归因逻辑。
         try:
             self.ensure_request_id(event)
+            self.capture_req_billing(event, req)
         except Exception as e:
-            logger.warning("[cost_control] request_id 生成失败: %s", e)
+            logger.warning("[cost_control] request_id/计费上下文生成失败: %s", e)
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             model = getattr(req, "model", None) or None
@@ -143,7 +144,7 @@ class Main(
                     return
         except Exception as e:
             logger.warning("[cost_control] 预算检查失败: %s", e)
-        # 阶段 3：归因初始快照（head，所有插件执行前；采样在 record_initial_context 内判定）
+        # 归因初始快照（head，所有插件执行前；采样在 record_initial_context 内判定）
         try:
             self.record_initial_context(req)
         except Exception as e:
@@ -161,12 +162,11 @@ class Main(
             self.pop_injection(req, umo)
             await self.run_cache_diag(req, umo)
         except Exception as e:
-            logger.warning("[cost_control] 阶段3请求尾处理失败: %s", e)
+            logger.warning("[cost_control] LLM 请求尾处理失败: %s", e)
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp) -> None:
-        """LLM 响应后：采集 usage + raw cache 写补充表（阶段 1）+
-        注入归因填充（阶段 3）+ 缓存命中率告警（阶段 3）。
+        """LLM 响应后：采集 usage + raw cache 写补充表、注入归因填充、缓存命中率告警。
 
         coroutine（走 ``call_event_hook``），不 yield。任何异常都被捕获并降级
         （仅记录日志），绝不影响 AstrBot 主流程。
@@ -174,14 +174,14 @@ class Main(
         try:
             record = await self.collect_response(event, resp)
             umo = record.get("umo", "") or ""
-            # 阶段 3：把 tail 算出的注入归因挂到本次补充记录
+            # 把 tail 算出的注入归因挂到本次补充记录
             if umo:
                 inj = self.consume_last_injection(umo)
                 if inj:
                     record["injection_total"] = inj.get("injected_total")
                     record["attribution"] = inj.get("final")
             await self.save_supplement(record)
-            # 阶段 3：缓存命中率低于阈值则告警（带冷却）
+            # 缓存命中率低于阈值则告警（带冷却）
             rate, alert = self.check_hit_rate(record)
             if alert:
                 await self.notify(

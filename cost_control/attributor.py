@@ -23,8 +23,6 @@ head 存、tail 取删。asyncio 单线程且 head→tail 在同一 ``call_event
 
 可测性设计：token 估算（``_str_tokens`` / ``_content_tokens`` /
 ``estimate_tokens``）抽成模块级纯函数，不依赖 astrbot，可单测。
-
-阶段 3 实现。
 """
 
 from __future__ import annotations
