@@ -436,21 +436,3 @@ class CostMixin:
         from .config import get_rates
 
         return get_rates(getattr(self, "cfg", None))
-
-    async def compute_cost(
-        self,
-        usage: dict[str, Any],
-        provider_id: str | None,
-        model: str | None,
-    ) -> float:
-        """按生效定价把单条 usage 换算为 USD 成本。
-
-        Args:
-            usage: 聚合用量 dict。
-            provider_id: Provider ID（用户定价匹配）。
-            model: 模型名（默认表匹配）。
-
-        Returns:
-            USD 成本（float）。
-        """
-        return compute_cost_value(usage, provider_id, model, self.get_pricing())

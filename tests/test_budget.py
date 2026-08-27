@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 
 from cost_control.budget import (
     BudgetMixin,
-    _groups_cost,
     check_dimensions,
     check_dimensions_dual,
     day_window_start,
@@ -22,7 +21,6 @@ from cost_control.budget import (
     truncate_contexts,
 )
 from cost_control.config import (
-    DEFAULT_PRICING,
     enabled_fallback_providers,
     enabled_overrides,
     normalize_budget_override,
@@ -364,46 +362,6 @@ def test_check_dimensions_dual_zero_limits_skipped():
         {"global_daily": 9999}, {"global_daily": 9999.0}, {"global_daily": 0}, {"global_daily": 0}
     )
     assert r["exceeded"] is False
-
-
-def test_groups_cost_multi_model():
-    pricing = {"defaults": DEFAULT_PRICING, "user": {}}
-    groups = [
-        {
-            "provider_id": None,
-            "provider_model": "gpt-4o",
-            "token_input_other": 1_000_000,
-            "token_input_cached": 0,
-            "token_output": 0,
-        },
-        {
-            "provider_id": None,
-            "provider_model": "gpt-4o-mini",
-            "token_input_other": 1_000_000,
-            "token_input_cached": 0,
-            "token_output": 0,
-        },
-    ]
-    # gpt-4o 1M input = $2.5；gpt-4o-mini 1M input = $0.15 → 合计 $2.65
-    assert abs(_groups_cost(groups, pricing) - 2.65) < 1e-6
-
-
-def test_groups_cost_unpriced_zero():
-    pricing = {"defaults": DEFAULT_PRICING, "user": {}}
-    groups = [
-        {
-            "provider_id": None,
-            "provider_model": "nonexistent-xyz",
-            "token_input_other": 1_000_000,
-            "token_input_cached": 0,
-            "token_output": 0,
-        },
-    ]
-    assert _groups_cost(groups, pricing) == 0.0
-
-
-def test_groups_cost_empty():
-    assert _groups_cost([], {"defaults": DEFAULT_PRICING, "user": {}}) == 0.0
 
 
 class _BudgetStub(BudgetMixin):

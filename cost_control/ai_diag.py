@@ -267,6 +267,28 @@ class AiDiagMixin:
             limits = self.get_budgets()
             limits_cost = self.get_budgets_cost()
 
+            # 预算 cost 维度：限额与花费均换算到主货币口径（与 /budgets、/alerts 一致）
+            from .config import get_budgets_cost_currency
+            from .cost import compute_cost_grouped_in_main
+            from .exchange_rates import convert, get_main_currency, get_rates
+
+            _main_cur = get_main_currency(getattr(self, "cfg", None))
+            _rates = get_rates(getattr(self, "cfg", None))
+            _bcc = get_budgets_cost_currency(getattr(self, "cfg", None))
+            _pricing = self.get_pricing()
+            day_cost_c = compute_cost_grouped_in_main(
+                await self.query_usage_grouped(by="provider_model", start=d_start),
+                _pricing,
+                _main_cur,
+                _rates,
+            )
+            month_cost_c = compute_cost_grouped_in_main(
+                await self.query_usage_grouped(by="provider_model", start=m_start),
+                _pricing,
+                _main_cur,
+                _rates,
+            )
+
             dims: list[dict[str, Any]] = []
             dim_labels = {
                 "global_daily": "每日全局",
@@ -276,20 +298,32 @@ class AiDiagMixin:
                 "per_model_daily": "每模型·每日",
             }
             dim_used = {"global_daily": day_total, "global_monthly": month_total}
+            dim_used_c = {"global_daily": day_cost_c, "global_monthly": month_cost_c}
             for d in _DIM_ORDER:
                 lt = int(limits.get(d, 0) or 0)
-                lc = float(limits_cost.get(d, 0) or 0)
-                used = dim_used.get(d, 0)
-                if lt > 0 or lc > 0:
-                    ratio = round(used * 100.0 / lt, 1) if lt > 0 else 0
+                lc_raw = float(limits_cost.get(d, 0) or 0)
+                used_t = dim_used.get(d, 0)
+                used_c = dim_used_c.get(d, 0)
+                if lt > 0 or lc_raw > 0:
+                    d_cur = str(_bcc.get(d, "") or "") or _main_cur
+                    lc = (
+                        round(convert(lc_raw, d_cur, _main_cur, _rates), 6)
+                        if lc_raw > 0 and d_cur != _main_cur
+                        else lc_raw
+                    )
+                    ratio_t = round(used_t * 100.0 / lt, 1) if lt > 0 else 0
+                    ratio_c = round(used_c * 100.0 / lc, 1) if lc > 0 else 0
                     dims.append(
                         {
                             "dimension": dim_labels.get(d, d),
                             "token_limit": lt,
-                            "token_used": used,
-                            "token_ratio": ratio,
+                            "token_used": used_t,
+                            "token_ratio": ratio_t,
                             "cost_limit": lc,
-                            "exceeded": used >= lt if lt > 0 else False,
+                            "cost_used": round(used_c, 6),
+                            "cost_ratio": ratio_c,
+                            "exceeded": (used_t >= lt if lt > 0 else False)
+                            or (used_c >= lc if lc > 0 else False),
                         }
                     )
             data["budgets"] = {"dimensions": dims}

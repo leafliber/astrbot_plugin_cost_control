@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from .budget import day_window_start, resolve_tz
 from .cache_diag import hit_rate
 from .config import get_config
-from .cost import compute_cost_in_main, compute_row_cost, compute_row_cost_in_main
+from .cost import compute_cost_in_main, compute_row_cost_in_main
 
 
 def report_window_start(
@@ -80,11 +80,6 @@ def compare_windows(
         prev_start = cur_start - timedelta(days=1)
         prev_end = cur_start
     return cur_start, cur_end, prev_start, prev_end
-
-
-def _row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
-    """按 (provider_id, model) 解析定价算单行成本（纯函数辅助）。无定价返回 0.0。"""
-    return compute_row_cost(row, pricing)
 
 
 def _row_cost_in_main(

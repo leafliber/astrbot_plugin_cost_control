@@ -283,7 +283,7 @@ class WebApiMixin:
     def _supplement_to_dict(
         s: Any,
         pricing: dict[str, Any] | None = None,
-        main_cur: str = "$",
+        main_cur: str = "USD",
         rates: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """把 ``CostSupplement`` 行序列化为 JSON 友好 dict。
@@ -499,6 +499,9 @@ class WebApiMixin:
                         + int(r.get("token_output", 0) or 0)
                     )
             if unpriced_count > 0:
+                from .exchange_rates import currency_to_symbol, get_main_currency
+
+                _unpriced_sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
                 alerts.append(
                     {
                         "level": "warn",
@@ -506,7 +509,8 @@ class WebApiMixin:
                         "title": "存在未定价模型",
                         "detail": (
                             f"检测到 {unpriced_count} 个模型未配置定价"
-                            f"（涉及 {unpriced_tokens} token 用量），其成本被计为 $0，"
+                            f"（涉及 {unpriced_tokens} token 用量），其成本被计为 "
+                            f"{_unpriced_sym}0，"
                             "导致成本统计偏低。请前往定价页为对应 provider 设置单价。"
                         ),
                         "tab": "pricing",
@@ -559,7 +563,8 @@ class WebApiMixin:
 
             # 将各维度 cost 限额换算到主货币（budgets_cost_currency 可能设了独立货币）
             from .config import get_budgets_cost_currency
-            from .exchange_rates import convert as _conv_alert, get_main_currency, get_rates
+            from .exchange_rates import convert as _conv_alert
+            from .exchange_rates import get_main_currency, get_rates
 
             _alert_bcc = get_budgets_cost_currency(cfg)
             _alert_main = get_main_currency(cfg)
@@ -641,7 +646,6 @@ class WebApiMixin:
 
             from .analytics import compare_windows
             from .budget import total_tokens
-            from .cost import compute_cost_grouped
 
             window = self._param("window", "daily") or "daily"
             now = datetime.now(UTC)
@@ -804,8 +808,6 @@ class WebApiMixin:
         （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
         """
         try:
-            from .cost import compute_row_cost
-
             by = self._param("by", "model") or "model"
             if by not in ("model", "provider", "umo"):
                 by = "model"

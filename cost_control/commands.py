@@ -22,9 +22,9 @@ from astrbot.api.event import AstrMessageEvent, filter
 
 from .attributor import ESTIMATION_NOTE
 from .budget import _DIM_ORDER, day_window_start, resolve_tz
-from .config import get_config
+from .config import get_budgets_cost_currency, get_config
 from .cost import compute_row_cost_in_main
-from .exchange_rates import currency_to_symbol, get_main_currency, get_rates
+from .exchange_rates import convert, currency_to_symbol, get_main_currency, get_rates
 
 # 插件主模块路径（``main.py``）。AstrBot 的 ``star_map`` 以 ``Main.__module__``
 # 为键，而 ``update_command_permission`` 等管理接口通过 ``handler.__module__``
@@ -111,7 +111,10 @@ class CommandsMixin:
         """``/budget``：查询预算配置与当前超限状态。"""
         try:
             umo = self._umo(event)
-            sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
+            main_cur = get_main_currency(getattr(self, "cfg", None))
+            rates = get_rates(getattr(self, "cfg", None))
+            bcc = get_budgets_cost_currency(getattr(self, "cfg", None))
+            sym = currency_to_symbol(main_cur)
             budgets = self.get_budgets()
             budgets_cost = self.get_budgets_cost()
             overrides = self.get_budget_overrides(getattr(self, "cfg", None))
@@ -126,7 +129,13 @@ class CommandsMixin:
                     if t > 0:
                         parts.append(f"token {t}")
                     if c > 0:
-                        parts.append(f"花费 {sym}{c:.2f}")
+                        dim_cur = str(bcc.get(dim, "") or "") or main_cur
+                        c_main = (
+                            round(convert(c, dim_cur, main_cur, rates), 6)
+                            if dim_cur != main_cur
+                            else c
+                        )
+                        parts.append(f"花费 {sym}{c_main:.2f}")
                     lines.append(f"  {dim}: " + " / ".join(parts))
                     any_cfg = True
             if not any_cfg:
@@ -138,7 +147,14 @@ class CommandsMixin:
                     if ov.get("token_limit", 0) > 0:
                         parts.append(f"token {ov['token_limit']}")
                     if ov.get("cost_limit", 0) > 0:
-                        parts.append(f"花费 {sym}{ov['cost_limit']:.2f}")
+                        ov_cur = str(ov.get("cost_currency") or "") or main_cur
+                        ov_c = float(ov.get("cost_limit") or 0)
+                        ov_c_main = (
+                            round(convert(ov_c, ov_cur, main_cur, rates), 6)
+                            if ov_cur != main_cur
+                            else ov_c
+                        )
+                        parts.append(f"花费 {sym}{ov_c_main:.2f}")
                     lines.append(
                         f"  · {ov.get('target_type')}:{ov.get('target_value')} "
                         f"({'/'.join(parts) or '不限'}) "

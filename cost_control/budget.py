@@ -33,7 +33,6 @@ from zoneinfo import ZoneInfo
 
 from .attributor import _str_tokens
 from .config import enabled_overrides, get_config
-from .cost import compute_row_cost
 
 
 def resolve_tz(context: Any) -> ZoneInfo:
@@ -130,24 +129,6 @@ def check_dimensions_dual(
         if lc > 0 and uc >= lc:
             return {"exceeded": True, "dim": dim, "metric": "cost", "limit": lc, "used": uc}
     return {"exceeded": False, "dim": None, "metric": None, "limit": 0.0, "used": 0.0}
-
-
-def _groups_cost(
-    groups: list[dict[str, Any]],
-    pricing: dict[str, Any],
-) -> float:
-    """把 ``query_usage_grouped(by="provider_model")`` 结果按行求和花费（纯函数）。
-
-    每行含 ``provider_id`` / ``provider_model`` / ``count`` / token 字段，委托
-    :func:`cost_control.cost.compute_row_cost`（按 provider_id 匹配用户定价、按 mode 计费）。
-    """
-    total = 0.0
-    for g in groups or []:
-        try:
-            total += compute_row_cost(g, pricing)
-        except Exception:
-            continue
-    return round(total, 6)
 
 
 def total_tokens(usage: dict[str, Any]) -> int:
@@ -327,7 +308,7 @@ class BudgetMixin:
         provider_id: str | None,
         d_start: datetime,
         pricing: dict[str, Any],
-        main_cur: str = "$",
+        main_cur: str = "USD",
         rates: dict[str, float] | None = None,
     ) -> float:
         """按 override target 聚合当前周期的 ``metric`` 用量（token 数 / 主货币花费）。
@@ -679,7 +660,10 @@ class BudgetMixin:
 
             cur = str(result.get("currency") or "") or get_main_currency(getattr(self, "cfg", None))
             sym = currency_to_symbol(cur)
-            return f"⏸ 已超出花费预算（{dim}）：{sym}{float(used or 0):.4f} / {sym}{float(limit or 0):.2f}"
+            return (
+                f"⏸ 已超出花费预算（{dim}）：{sym}{float(used or 0):.4f} / "
+                f"{sym}{float(limit or 0):.2f}"
+            )
         # token 维度的 used/limit 来自 float() 包装，转 int 避免显示 "150.0"。
         return f"⏸ 已超出预算（{dim}）：用 {int(used or 0)} / 限 {int(limit or 0)} token"
 
