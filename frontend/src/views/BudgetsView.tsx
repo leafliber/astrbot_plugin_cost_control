@@ -35,7 +35,7 @@ function emptyOverride(targetType: OverrideTarget = "umo"): BudgetOverrideRow {
     stop_message: "",
     fallback_provider_ids: [],
     fallback_token_limit: 0,
-    current: { token: { used: 0, ratio: 0, exceeded: false }, cost: { used: 0, ratio: 0, exceeded: false } },
+    current: { token: { used: 0, ratio: 0, exceeded: false }, cost: { used: 0, limit: 0, ratio: 0, exceeded: false } },
   };
 }
 

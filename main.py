@@ -105,6 +105,13 @@ class Main(
                 logger.info("[cost_control] 已为 %d 条历史记录补算 cost_amount", n)
         except Exception as e:
             logger.warning("[cost_control] 历史记录补算失败（不影响运行）: %s", e)
+        # 一次性迁移：修正旧版 backfill 误标 USD 的历史行
+        try:
+            n = await self.fix_mislabeled_cost_currency(self.get_pricing())
+            if n > 0:
+                logger.info("[cost_control] 已修正 %d 条历史记录的货币标记", n)
+        except Exception as e:
+            logger.warning("[cost_control] 历史货币标记修正失败（不影响运行）: %s", e)
         try:
             await self.register_cron()
         except Exception as e:

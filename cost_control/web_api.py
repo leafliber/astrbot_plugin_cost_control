@@ -366,7 +366,7 @@ class WebApiMixin:
         从固化的原始货币换算到主货币 ``main_cur``，``cost_original`` 保留原始金额；
         否则 ``cost`` 由 pricing 即时算出（回退，用于历史未回填行）。
         """
-        from .cost import TieredExprEvaluationError, compute_cost_value
+        from .cost import TieredExprEvaluationError, compute_cost_in_main
         from .exchange_rates import convert
 
         created = getattr(s, "created_at", None)
@@ -387,10 +387,10 @@ class WebApiMixin:
             cur = str(currency_symbol or "USD")
             cost = round(convert(cost_original, cur, main_cur, rates or {}), 6)
         elif pricing is not None:
-            # 回退：无固化金额，按定价即时算（USD 口径）
+            # 回退：无固化金额，按定价即时算并换算到主货币；expr 失败置 None 而非打挂接口
             try:
                 cost = round(
-                    compute_cost_value(
+                    compute_cost_in_main(
                         {
                             "token_input_other": token_input_other,
                             "token_input_cached": token_input_cached,
@@ -402,6 +402,8 @@ class WebApiMixin:
                         getattr(s, "provider_id", None) or None,
                         getattr(s, "provider_model", None),
                         pricing,
+                        main_cur,
+                        rates or {},
                     ),
                     6,
                 )
@@ -1082,6 +1084,22 @@ class WebApiMixin:
             else:
                 day_cost = month_cost = ses_cost = mod_cost = 0.0
 
+            # 全局 cost 限额可能带每维度货币（budgets_cost_currency），统一换算到主货币。
+            # limits_cost 保留原始值供前端编辑框初始值，limits_cost_main 供展示/判定。
+            from .config import get_budgets_cost_currency
+            from .exchange_rates import convert as _conv
+
+            _bcc = get_budgets_cost_currency(cfg)
+            limits_cost_main: dict[str, float] = {}
+            for _d in _DIM_ORDER:
+                _lc_raw = float(limits_cost.get(_d, 0) or 0)
+                _d_cur = str(_bcc.get(_d, "") or "") or main_cur
+                limits_cost_main[_d] = (
+                    round(_conv(_lc_raw, _d_cur, main_cur, rates), 6)
+                    if _lc_raw > 0 and _d_cur != main_cur
+                    else _lc_raw
+                )
+
             def _part(limit: Any, used: Any) -> dict[str, Any]:
                 limit = float(limit or 0)
                 used = float(used or 0)
@@ -1102,7 +1120,7 @@ class WebApiMixin:
                         "note": note,
                     },
                     "cost": {
-                        **_part(limits_cost.get(key, 0), used_c),
+                        **_part(limits_cost_main.get(key, 0), used_c),
                         "top_key": top_key,
                         "note": note,
                     },
@@ -1113,7 +1131,6 @@ class WebApiMixin:
             pricing = self.get_pricing() if has_cost or overrides_raw else {}
             if has_cost or overrides_raw:
                 from .cost import compute_cost_grouped_in_main
-                from .exchange_rates import convert as _conv
 
             overrides_out: list[dict[str, Any]] = []
             for idx, ov in enumerate(overrides_raw):
@@ -1154,9 +1171,12 @@ class WebApiMixin:
                         if ov.get("token_limit", 0) > 0 and hasattr(self, "query_user_token_total"):
                             used_t_v = float(await self.query_user_token_total(tv, d_start))
                         if ov.get("cost_limit", 0) > 0 and hasattr(self, "query_user_cost_total"):
-                            # query_user_cost_total 返回 USD 口径，换算到主货币
-                            _uc = float(await self.query_user_cost_total(tv, d_start, pricing))
-                            used_c_v = round(_conv(_uc, "USD", main_cur, rates), 6)
+                            used_c_v = round(
+                                await self.query_user_cost_total(
+                                    tv, d_start, pricing, main_cur, rates
+                                ),
+                                6,
+                            )
                 except Exception:
                     # 单条 override 聚合失败不影响其它条
                     pass
@@ -1164,11 +1184,21 @@ class WebApiMixin:
                 def _ratio(used: float, limit: Any) -> dict[str, Any]:
                     limit_f = float(limit or 0)
                     return {
+                        "limit": round(limit_f, 6),
                         "used": round(used, 6),
                         "ratio": round(used * 100.0 / limit_f, 1) if limit_f > 0 else 0.0,
                         "exceeded": limit_f > 0 and used >= limit_f,
                     }
 
+                # override 的 cost_limit 可能带 cost_currency，先换算到主货币再比较/展示。
+                # cost_limit / cost_currency 保留原始值供前端编辑框；current.cost 用主货币口径。
+                _ov_lc = float(ov.get("cost_limit") or 0.0)
+                _ov_cur = str(ov.get("cost_currency") or "") or main_cur
+                _ov_lc_main = (
+                    round(_conv(_ov_lc, _ov_cur, main_cur, rates), 6)
+                    if _ov_lc > 0 and _ov_cur != main_cur
+                    else _ov_lc
+                )
                 overrides_out.append(
                     {
                         "id": f"ovo_{idx}",
@@ -1184,7 +1214,7 @@ class WebApiMixin:
                         "fallback_token_limit": int(ov.get("fallback_token_limit") or 0),
                         "current": {
                             "token": _ratio(used_t_v, ov.get("token_limit", 0)),
-                            "cost": _ratio(used_c_v, ov.get("cost_limit", 0)),
+                            "cost": _ratio(used_c_v, _ov_lc_main),
                         },
                     }
                 )
@@ -1192,13 +1222,14 @@ class WebApiMixin:
             fallback_providers = get_fallback_providers(cfg)
 
             # 各维度 cost 限额的独立货币（budgets_cost_currency）
-            from .config import get_budgets_cost_currency, get_currency_symbol
+            from .config import get_currency_symbol
             from .exchange_rates import get_rate_updated_at
 
             return self._ok(
                 {
                     "limits": limits,
                     "limits_cost": limits_cost,
+                    "limits_cost_main": limits_cost_main,
                     "limits_cost_currency": get_budgets_cost_currency(cfg),
                     "currency_symbol": get_currency_symbol(cfg),
                     "exchange_rates": rates,

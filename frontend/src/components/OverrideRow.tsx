@@ -200,11 +200,11 @@ export function OverrideRow({
             <StatLine
               label="cost"
               used={row.current?.cost?.used || 0}
-              limit={row.cost_limit || 0}
+              limit={row.current?.cost?.limit || 0}
               ratio={row.current?.cost?.ratio || 0}
               exceeded={!!row.current?.cost?.exceeded}
               fmt={fmtCost}
-              prefix={currencyToSymbol(row.cost_currency || getCurrencyCode())}
+              prefix={currencyToSymbol(getCurrencyCode())}
             />
           )}
         </div>

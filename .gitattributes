@@ -1,0 +1,6 @@
+# 前端构建产物：PR diff 默认折叠（linguist-generated），统一 LF 消除跨平台换行噪音
+pages/dashboard/* linguist-generated text eol=lf
+
+# 锁文件不参与代码统计
+uv.lock linguist-generated
+frontend/package-lock.json linguist-generated

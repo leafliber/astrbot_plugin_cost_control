@@ -162,7 +162,7 @@ export type OnExceeded = "stop" | "fallback" | "warn";
 
 export interface OverrideCurrent {
   token: { used: number; ratio: number; exceeded: boolean };
-  cost: { used: number; ratio: number; exceeded: boolean };
+  cost: { used: number; limit: number; ratio: number; exceeded: boolean };
 }
 
 export interface BudgetOverride {
@@ -192,6 +192,7 @@ export interface FallbackProvider {
 export interface BudgetResponse {
   limits?: Record<string, number>;
   limits_cost?: Record<string, number>;
+  limits_cost_main?: Record<string, number>;
   limits_cost_currency?: Record<string, string>;
   currency_symbol?: string;
   exchange_rates?: Record<string, number>;
