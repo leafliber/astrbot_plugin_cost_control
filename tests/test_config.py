@@ -128,7 +128,6 @@ def test_plugin_config_overwrite(tmp_path):
     assert load_plugin_config(d) == {"a": 2, "b": 3}
 
 
-
 def test_price_sources_backfill_public_defaults_for_partial_config():
     """动态 New API 源不能覆盖三种公共源的默认配置。"""
     sources = get_price_sources({"price_sources": {"newapi:gateway": {"enabled": True}}})

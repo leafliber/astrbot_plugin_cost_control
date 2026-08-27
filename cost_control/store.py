@@ -383,7 +383,7 @@ class StoreMixin:
                         pid = provider_id or ""
                         req_prices[pid] = (float(rule.get("price", 0.0) or 0.0), cur)
                         continue
-                    # per_token / per_turn / per_tier / tiered_expr 统一走 compute_cost_with_currency；
+                    # per_token/per_turn/per_tier/tiered_expr 统一走 compute_cost_with_currency；
                     # usage 带 billing_context（service_tier 等）与 created_at（时间函数）。
                     raw, _cur = compute_cost_with_currency(
                         {

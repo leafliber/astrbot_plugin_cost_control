@@ -77,8 +77,6 @@ def _iso_utc(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-
-
 def _attach_selection_price(sel: dict[str, Any], catalog: Any) -> None:
     """给单个 selection 条目附生效价格摘要（prompt/completion → input/output 映射）。"""
     from .cost import _catalog_field_values
@@ -867,7 +865,6 @@ class WebApiMixin:
         （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
         """
         try:
-
             by = self._param("by", "model") or "model"
             if by not in ("model", "provider", "umo"):
                 by = "model"
@@ -1701,8 +1698,10 @@ class WebApiMixin:
                             candidates.setdefault(pid, {})[m] = [
                                 self._candidate_brief(c) for c in cands[:8]
                             ]
-            except Exception:
-                pass
+            except Exception as e:
+                from astrbot import logger
+
+                logger.warning("[cost_control] /pricing 候选匹配降级（返回空候选）: %s", e)
             return self._ok(
                 {
                     "provider_models": provider_models,
@@ -1734,33 +1733,11 @@ class WebApiMixin:
 
         provider 顶层无 ``api_base`` 时（4.25+ source 架构），用 ``provider_source_id``
         从 ``provider_sources[]`` 条目回填 ``api_base``，供 derive_newapi_root 剥离 /v1。
+        与定时同步共用 :func:`price_sources.provider_cfg_from_astrbot`，口径一致。
         """
+        from .price_sources import provider_cfg_from_astrbot
 
-        def _get(pid: str) -> dict[str, Any] | None:
-            try:
-                cfg = self.context.get_config() or {}
-                prov_list = cfg.get("provider") if isinstance(cfg, dict) else None
-                if not isinstance(prov_list, list):
-                    return None
-                for p in prov_list:
-                    if isinstance(p, dict) and str(p.get("id") or "").strip() == pid:
-                        if p.get("api_base"):
-                            return p
-                        source_list = cfg.get("provider_sources") if isinstance(cfg, dict) else None
-                        sid = str(p.get("provider_source_id") or "").strip()
-                        if isinstance(source_list, list) and sid:
-                            for s in source_list:
-                                if (
-                                    isinstance(s, dict)
-                                    and str(s.get("id") or "").strip() == sid
-                                ):
-                                    return {**p, "api_base": s.get("api_base")}
-                        return p
-            except Exception:
-                pass
-            return None
-
-        return _get
+        return provider_cfg_from_astrbot(self.context.get_config() or {})
 
     @staticmethod
     def _candidate_brief(c: Any) -> dict[str, Any]:

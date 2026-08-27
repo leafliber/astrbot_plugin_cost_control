@@ -133,9 +133,7 @@ def test_extract_req_billing_from_extra_body():
 def test_extract_req_billing_anthropic_beta_1h():
     from cost_control.supplement import _extract_req_billing
 
-    req = SimpleNamespace(
-        extra_body={}, headers={"anthropic-beta": "prompt-caching-1h"}
-    )
+    req = SimpleNamespace(extra_body={}, headers={"anthropic-beta": "prompt-caching-1h"})
     ctx = _extract_req_billing(req)
     assert ctx.get("cache_ttl_1h") is True
     assert ctx["headers"]["anthropic-beta"] == "prompt-caching-1h"

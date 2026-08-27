@@ -259,7 +259,6 @@ def test_sync_source_newapi_uses_provider_key(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer sk-secret"
 
 
-
 def test_sync_source_newapi_strips_v1_from_manual_base_url(monkeypatch):
     """手动填写的 base_url 带 /v1 时同样剥掉，避免拼出 /v1/api/pricing。"""
     captured = {}
@@ -306,6 +305,7 @@ def test_provider_cfg_fn_falls_back_to_provider_sources_api_base():
     }
     legacy_fn_ret = api._provider_cfg_fn()("p1")
     assert legacy_fn_ret["api_base"] == "https://x/v1"
+
 
 def test_sync_all_isolates_failures_and_saves(monkeypatch, tmp_path):
     litellm_url = ps.SOURCE_URLS["litellm"]
@@ -358,3 +358,84 @@ def test_sync_all_failure_preserves_old_prices(monkeypatch, tmp_path):
     assert cat.prices["litellm:m"].prompt == pytest.approx(1.0)  # 旧数据未丢
     assert cat.get_source("litellm").status == "error"
     assert cat.get_source("litellm").models == 1  # 保留旧计数
+
+
+# ===== 审计修复回归 =====
+
+
+def test_sync_etag_keeps_quotes_for_304(monkeypatch):
+    """ETag 须原样保存（含引号），If-None-Match 原样回传才能命中 304。"""
+    url = ps.SOURCE_URLS["modelsdev"]
+    monkeypatch.setattr(ps, "_http_get", _mock_http({url: ({}, 200, {"ETag": '"abc42"'}, "")}))
+    res = ps.sync_source("modelsdev")
+    assert res.etag == '"abc42"'
+
+    captured = {}
+
+    def fake(u, headers, timeout):
+        captured["inm"] = headers.get("If-None-Match")
+        return None, 304, {}, ""
+
+    monkeypatch.setattr(ps, "_http_get", fake)
+    prev = SourceStatus(source="modelsdev", status="ok", models=5, etag=res.etag)
+    res2 = ps.sync_source("modelsdev", prev)
+    assert captured["inm"] == '"abc42"'
+    assert res2.status == "ok" and res2.not_modified
+
+
+def test_newapi_private_host_skips_provider_key(monkeypatch):
+    """base_url 指向内网/环回时不得携带 provider key（凭据外泄原语）。"""
+    captured = {}
+
+    def fake(url, headers, timeout):
+        captured["headers"] = headers
+        return b"{}", 200, {}, ""
+
+    monkeypatch.setattr(ps, "_http_get", fake)
+    cfg = {"price_sources": {"newapi:us": {"enabled": True, "use_provider_key": True}}}
+    provider_cfg = lambda pid: {"api_base": "http://127.0.0.1:3000/v1", "key": ["sk-secret"]}  # noqa: E731
+    res = ps.sync_source("newapi:us", None, cfg=cfg, provider_cfg=provider_cfg)
+    assert res.status == "ok"
+    assert "Authorization" not in captured["headers"]
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("http://127.0.0.1:3000/v1", True),
+        ("http://localhost:3000/", True),
+        ("http://192.168.1.5/x", True),
+        ("http://10.0.0.2/x", True),
+        ("http://172.16.0.1/x", True),
+        ("http://169.254.169.254/latest/meta-data", True),
+        ("http://[::1]:8080/", True),
+        ("https://api.example.com/v1", False),
+        ("https://8.8.8.8/v1", False),
+    ],
+)
+def test_is_private_host(url, expected):
+    assert ps._is_private_host(url) is expected
+
+
+def test_http_get_enforces_size_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(ps, "MAX_RESPONSE_BYTES", 10)
+    f = tmp_path / "big.json"
+    f.write_text("x" * 20)
+    body, status, headers, err = ps._http_get(f.as_uri(), {}, 5)
+    assert body is None
+    assert "上限" in err
+
+
+def test_provider_cfg_from_astrbot_backfills_api_base():
+    """4.25+ source 架构：顶层无 api_base 时从 provider_sources 回填（cron 同步修复）。"""
+    cfg = {
+        "provider": [{"id": "p1", "provider_source_id": "s1"}],
+        "provider_sources": [{"id": "s1", "api_base": "https://na/v1"}],
+    }
+    fn = ps.provider_cfg_from_astrbot(cfg)
+    got = fn("p1")
+    assert got is not None and got["api_base"] == "https://na/v1"
+    assert fn("missing") is None
+    # 无 provider_sources 时原样返回
+    fn2 = ps.provider_cfg_from_astrbot({"provider": [{"id": "p2", "api_base": "https://x"}]})
+    assert fn2("p2")["api_base"] == "https://x"

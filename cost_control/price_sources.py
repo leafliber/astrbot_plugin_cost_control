@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -25,6 +27,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .price_catalog import CatalogPrice, SourceStatus, load_catalog
+
+logger = logging.getLogger("astrbot.plugin.cost_control")
 
 SOURCE_MODELS_DEV = "modelsdev"
 SOURCE_LITELLM = "litellm"
@@ -47,6 +51,35 @@ NEWAPI_RATIO_TO_PRICE = 2.0
 NEWAPI_DEFAULT_CREATE_CACHE_RATIO = 1.25
 
 PER_TOKEN_MULTIPLIER = 1_000_000
+
+# 响应体大小上限（字节）：models.dev 目录约 10~20MB，留余量防恶意超大响应耗尽内存。
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+def _is_private_host(url: str) -> bool:
+    """判断 URL 主机是否为内网/环回/链路本地地址（仅判字面 IP 与常见本地名）。
+
+    用于决定是否携带 provider key：key 发往内网服务等于把凭据投递给不可信网络面
+    （面板暴露时的 key 窃取原语）。不做 DNS 解析（防重绑定需要 resolver 钩子，超出
+    插件范围）；自建 New API 在内网时仍可无 key 同步 ``/api/pricing``（通常免鉴权）。
+    """
+    try:
+        host = (urlparse(url).hostname or "").strip().lower()
+    except ValueError:
+        return True
+    if not host or host in ("localhost",) or host.endswith(".local") or host.endswith(".internal"):
+        return bool(host)
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
 
 
 # ---- 公共工具 ----
@@ -609,11 +642,20 @@ def _resolve_source_request(
         if not is_http_url(base_url):
             return "", {}, f"New API 源 {source} base_url 非法: {base_url!r}", base_url, pid
         headers: dict[str, str] = {}
+        url = newapi_pricing_url(base_url)
         if settings.get("use_provider_key", True) and provider:
             token = _provider_token(provider)
             if token:
-                headers["Authorization"] = f"Bearer {token}"
-        return newapi_pricing_url(base_url), headers, "", base_url, pid
+                if _is_private_host(url):
+                    # key 绝不发往内网/环回地址（防面板暴露时的凭据外泄）；
+                    # /api/pricing 通常免鉴权，同步继续。
+                    logger.warning(
+                        "[cost_control] 价格源 %s 的 base_url 指向内网地址，已跳过携带 provider key",  # noqa: E501
+                        source,
+                    )
+                else:
+                    headers["Authorization"] = f"Bearer {token}"
+        return url, headers, "", base_url, pid
     return "", {}, f"未知价格源: {source}", "", ""
 
 
@@ -626,14 +668,51 @@ def _provider_token(provider: dict[str, Any]) -> str:
     return ""
 
 
+def provider_cfg_from_astrbot(astrbot_config: Any) -> Callable[[str], dict[str, Any] | None]:
+    """构建 ``provider_id → provider 配置`` 回调（供 New API 源解析 api_base/key）。
+
+    provider 顶层无 ``api_base`` 时（AstrBot 4.25+ source 架构），用
+    ``provider_source_id`` 从 ``provider_sources[]`` 条目回填 ``api_base``。
+    手动同步（web_api）与定时同步（schedule）共用，保证两条路径口径一致。
+    """
+
+    def _get(pid: str) -> dict[str, Any] | None:
+        try:
+            cfg = astrbot_config if isinstance(astrbot_config, dict) else {}
+            prov_list = cfg.get("provider")
+            if not isinstance(prov_list, list):
+                return None
+            for p in prov_list:
+                if isinstance(p, dict) and str(p.get("id") or "").strip() == pid:
+                    if p.get("api_base"):
+                        return p
+                    source_list = cfg.get("provider_sources")
+                    sid = str(p.get("provider_source_id") or "").strip()
+                    if isinstance(source_list, list) and sid:
+                        for s in source_list:
+                            if isinstance(s, dict) and str(s.get("id") or "").strip() == sid:
+                                return {**p, "api_base": s.get("api_base")}
+                    return p
+        except Exception:
+            pass
+        return None
+
+    return _get
+
+
 def _http_get(
     url: str, headers: dict[str, str], timeout: float
 ) -> tuple[bytes | None, int, dict[str, str], str]:
-    """同步 HTTP GET。返回 ``(body, status, resp_headers, error)``；error 非空即失败。"""
+    """同步 HTTP GET。返回 ``(body, status, resp_headers, error)``；error 非空即失败。
+
+    响应体读取带 ``MAX_RESPONSE_BYTES`` 上限，超限中止连接（防超大/恶意响应耗尽内存）。
+    """
     req = urllib.request.Request(url, headers={**_UA, **headers})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            body = resp.read()
+            body = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(body) > MAX_RESPONSE_BYTES:
+                return None, resp.status, {}, f"响应体超过 {MAX_RESPONSE_BYTES} 字节上限"
             return body, resp.status, dict(resp.headers), ""
     except urllib.error.HTTPError as e:
         if e.code == 304:
@@ -702,7 +781,8 @@ def sync_source(
     result.models = len(prices)
     result.skipped = max(0, _raw_entry_count(source, raw) - len(prices))
     etag = resp_headers.get("ETag") or resp_headers.get("etag") or ""
-    result.etag = etag.strip().strip('"')
+    # 保留原始 ETag（含引号/弱标记 W/"..."）：If-None-Match 必须原样回传才能命中 304。
+    result.etag = etag.strip()
     return result
 
 
