@@ -105,8 +105,7 @@ export function GlobalDefaultsPanel({
                     ))}
                   </select>
                   <div className="muted small budget-cell-used">
-                    {fmtCost(c.used, budgetsCostCurrency[d.key] || "")} /{" "}
-                    {fmtCost(limitsCost[d.key] || 0, budgetsCostCurrency[d.key] || "")}
+                    {fmtCost(c.used)} / {fmtCost(c.limit)}
                   </div>
                   {c.limit > 0 ? (
                     <ProgressBar ratio={c.ratio}>{c.ratio || 0}%</ProgressBar>

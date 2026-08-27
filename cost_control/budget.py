@@ -364,7 +364,9 @@ class BudgetMixin:
         if tt == "user":
             if not user_id:
                 return 0.0
-            return float(await self.query_user_cost_total(tv, d_start, pricing))
+            return round(
+                await self.query_user_cost_total(tv, d_start, pricing, main_cur, _rates), 6
+            )
         return 0.0
 
     async def check_budget(
@@ -500,7 +502,7 @@ class BudgetMixin:
                                 "metric": "cost",
                                 "limit": lc_main,
                                 "used": used_c,
-                                "currency": ov_cur,
+                                "currency": main_cur,
                                 "on_exceeded": str(ov.get("on_exceeded") or "stop"),
                                 "fallback_provider_ids": list(
                                     ov.get("fallback_provider_ids") or []
@@ -571,9 +573,12 @@ class BudgetMixin:
                 user_total_c = ses_cost
                 if user_id and lc_user > 0:
                     try:
-                        # query_user_cost_total 返回 USD 口径，换算到主货币
-                        _uc = float(await self.query_user_cost_total(user_id, d_start, pricing))
-                        user_total_c = round(_convert(_uc, "USD", main_cur, rates), 6)
+                        user_total_c = round(
+                            await self.query_user_cost_total(
+                                user_id, d_start, pricing, main_cur, rates
+                            ),
+                            6,
+                        )
                     except Exception:
                         user_total_c = ses_cost
                 used_c_map = {

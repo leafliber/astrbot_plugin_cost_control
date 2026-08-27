@@ -23,8 +23,8 @@ from astrbot.api.event import AstrMessageEvent, filter
 from .attributor import ESTIMATION_NOTE
 from .budget import _DIM_ORDER, day_window_start, resolve_tz
 from .config import get_config
-from .cost import compute_row_cost
-from .exchange_rates import currency_to_symbol, get_main_currency
+from .cost import compute_row_cost_in_main
+from .exchange_rates import currency_to_symbol, get_main_currency, get_rates
 
 # 插件主模块路径（``main.py``）。AstrBot 的 ``star_map`` 以 ``Main.__module__``
 # 为键，而 ``update_command_permission`` 等管理接口通过 ``handler.__module__``
@@ -85,8 +85,12 @@ class CommandsMixin:
             usage = await self.query_usage(umo=umo, start=d_start)
             rows = await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start)
             pricing = self.get_pricing()
-            sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
-            cost = round(sum(compute_row_cost(r, pricing) for r in rows), 6)
+            main_cur = get_main_currency(getattr(self, "cfg", None))
+            rates = get_rates(getattr(self, "cfg", None))
+            sym = currency_to_symbol(main_cur)
+            cost = round(
+                sum(compute_row_cost_in_main(r, pricing, main_cur, rates) for r in rows), 6
+            )
             lines = [
                 "💰 今日用量（本会话）",
                 f"调用 {usage.get('count', 0)} 次，成本 ≈ {sym}{cost:.4f}",
@@ -95,7 +99,7 @@ class CommandsMixin:
                 f"输出 {usage.get('token_output', 0)}",
             ]
             for r in rows[:5]:
-                c = round(compute_row_cost(r, pricing), 6)
+                c = round(compute_row_cost_in_main(r, pricing, main_cur, rates), 6)
                 name = r.get("provider_model") or r.get("key") or "?"
                 lines.append(f"  · {name}：{r.get('count', 0)}次 / {sym}{c:.4f}")
             yield event.plain_result("\n".join(lines))

@@ -340,19 +340,25 @@ class StoreMixin:
         user_id: str,
         start: datetime,
         pricing: dict[str, Any],
+        main_cur: str = "USD",
+        rates: dict[str, float] | None = None,
     ) -> float:
-        """按 user_id 聚合自 ``start`` 以来的花费（supplement 路径，精确含 per_request）。
+        """按 user_id 聚合自 ``start`` 以来的花费，换算到 ``main_cur``（主货币口径）。
 
-        逐行按 (provider_id, model) 解析定价规则：
+        逐行按 (provider_id, model) 解析定价规则，取**原始计费货币**金额后经汇率
+        换算到 ``main_cur`` 累加：
 
-        - per_token / per_turn：逐行算后求和。
+        - per_token / per_turn / per_tier / tiered_expr：逐行算后换算求和（带
+          ``billing_context`` 与 ``created_at``，供 service_tier / 时间函数使用）。
         - per_request：按 provider 聚合 distinct ``request_id`` 数 × price（**精确**，
-          supplement 表有 request_id；主表路径无此字段只能近似）。request_id 为 NULL
-          的行无法归属，跳过。
+          supplement 表有 request_id；主表路径无此字段只能近似），再换算到主货币。
+          request_id 为 NULL 的行无法归属，跳过。
         """
         try:
-            from .cost import compute_cost_value, resolve_pricing
+            from .cost import compute_cost_with_currency, resolve_pricing
+            from .exchange_rates import convert as _convert
 
+            _rates = rates if rates else {}
             maker = await self._ensure_session_maker()
             async with maker() as session:
                 stmt = select(CostSupplement).where(CostSupplement.user_id == user_id)
@@ -362,8 +368,8 @@ class StoreMixin:
                 rows = list(result.scalars().all())
 
             total = 0.0
-            # per_request：按 provider 聚合 distinct request_id（精确）
-            req_prices: dict[str, float] = {}
+            # per_request：按 provider 聚合 (price, 货币代码)
+            req_prices: dict[str, tuple[float, str]] = {}
             for r in rows:
                 try:
                     provider_id = getattr(r, "provider_id", "") or None
@@ -371,26 +377,32 @@ class StoreMixin:
                     rule = resolve_pricing(provider_id, model, pricing)
                     if rule is None:
                         continue
+                    cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
                     mode = rule.get("mode", "per_token")
                     if mode == "per_request":
                         pid = provider_id or ""
-                        req_prices[pid] = float(rule.get("price", 0.0) or 0.0)
+                        req_prices[pid] = (float(rule.get("price", 0.0) or 0.0), cur)
                         continue
-                    # per_token / per_turn / per_tier / tiered_expr 统一走 compute_cost_value；
+                    # per_token / per_turn / per_tier / tiered_expr 统一走 compute_cost_with_currency；
                     # usage 带 billing_context（service_tier 等）与 created_at（时间函数）。
-                    usage = {
-                        "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
-                        "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
-                        "token_output": int(getattr(r, "token_output", 0) or 0),
-                        "cache_creation": getattr(r, "cache_creation", None),
-                        "billing_context": getattr(r, "billing_context", None),
-                        "created_at": getattr(r, "created_at", None),
-                    }
-                    total += compute_cost_value(usage, provider_id, model, pricing)
+                    raw, _cur = compute_cost_with_currency(
+                        {
+                            "token_input_other": int(getattr(r, "token_input_other", 0) or 0),
+                            "token_input_cached": int(getattr(r, "token_input_cached", 0) or 0),
+                            "token_output": int(getattr(r, "token_output", 0) or 0),
+                            "cache_creation": getattr(r, "cache_creation", None),
+                            "billing_context": getattr(r, "billing_context", None),
+                            "created_at": getattr(r, "created_at", None),
+                        },
+                        provider_id,
+                        model,
+                        pricing,
+                    )
+                    total += _convert(raw, _cur, main_cur, _rates)
                 except Exception:
                     continue
 
-            # per_request 精确：每个 provider 的 distinct request_id 数 × price
+            # per_request 精确：每个 provider 的 distinct request_id 数 × price，再换算到主货币
             if req_prices:
                 distinct: dict[str, set[str]] = {}
                 for r in rows:
@@ -400,8 +412,9 @@ class StoreMixin:
                     rid = getattr(r, "request_id", None)
                     if rid:
                         distinct.setdefault(pid, set()).add(str(rid))
-                for pid, price in req_prices.items():
-                    total += len(distinct.get(pid, set())) * price
+                for pid, (price, cur) in req_prices.items():
+                    cnt = len(distinct.get(pid, set()))
+                    total += _convert(cnt * price, cur, main_cur, _rates)
             return round(total, 6)
         except Exception as e:
             logger.warning("[cost_control] query_user_cost_total 失败: %s", e)
@@ -501,9 +514,9 @@ class StoreMixin:
     async def backfill_cost_amounts(self, pricing: dict[str, Any]) -> int:
         """一次性回填 ``cost_amount IS NULL`` 的存量记录（幂等）。
 
-        逐行按 ``(provider_id, provider_model)`` 解析定价规则（历史定价无 currency
-        字段，按 USD 口径算），把 USD 金额固化为 ``cost_amount``、
-        ``currency_symbol="USD"``。失败行跳过（保持 NULL，展示时按主货币回退重算）。
+        逐行按 ``(provider_id, provider_model)`` 解析定价规则，把**原始计费货币**
+        金额固化为 ``cost_amount``、``currency_symbol``（定价条目 ``currency`` 字段，
+        缺省 ``"USD"``）。失败行跳过（保持 NULL，展示时按主货币回退重算）。
         已有值的行不动。
 
         Args:
@@ -513,7 +526,7 @@ class StoreMixin:
             成功回填的行数（失败返回 0）。
         """
         try:
-            from .cost import compute_cost_value
+            from .cost import compute_cost_with_currency
 
             maker = await self._ensure_session_maker()
             async with maker() as session:
@@ -532,17 +545,14 @@ class StoreMixin:
                             "billing_context": getattr(r, "billing_context", None),
                             "created_at": getattr(r, "created_at", None),
                         }
-                        cost_usd = round(
-                            compute_cost_value(
-                                usage,
-                                getattr(r, "provider_id", "") or None,
-                                getattr(r, "provider_model", None),
-                                pricing,
-                            ),
-                            6,
+                        raw, cur = compute_cost_with_currency(
+                            usage,
+                            getattr(r, "provider_id", "") or None,
+                            getattr(r, "provider_model", None),
+                            pricing,
                         )
-                        r.cost_amount = cost_usd  # type: ignore[assignment]
-                        r.currency_symbol = "USD"  # type: ignore[assignment]
+                        r.cost_amount = round(raw, 6)  # type: ignore[assignment]
+                        r.currency_symbol = cur or "USD"  # type: ignore[assignment]
                         n += 1
                     except Exception:
                         continue
@@ -550,6 +560,54 @@ class StoreMixin:
                 return n
         except Exception as e:
             logger.warning("[cost_control] backfill_cost_amounts 失败: %s", e)
+            return 0
+
+    async def fix_mislabeled_cost_currency(self, pricing: dict[str, Any]) -> int:
+        """一次性迁移：修正旧版 backfill 误标 USD 的历史行（幂等）。
+
+        旧版 ``backfill_cost_amounts`` 用 :func:`compute_cost_value` 固化的金额是
+        **原始计费货币**，却一律标 ``currency_symbol="USD"``。本迁移只修正
+        ``currency_symbol`` 为定价条目的实际货币，**不动** ``cost_amount``（保持
+        历史快照）。仅处理 ``cost_amount IS NOT NULL AND currency_symbol == "USD"``
+        的行，避免覆盖已正确固化的数据。
+
+        Args:
+            pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。
+
+        Returns:
+            修正货币标记的行数（失败返回 0）。
+        """
+        try:
+            from .cost import resolve_pricing
+
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                stmt = select(CostSupplement).where(
+                    CostSupplement.cost_amount.is_not(None),  # type: ignore[union-attr]
+                    CostSupplement.currency_symbol == "USD",  # type: ignore[union-attr]
+                )
+                result = await session.execute(stmt)
+                rows = list(result.scalars().all())
+                n = 0
+                for r in rows:
+                    try:
+                        rule = resolve_pricing(
+                            getattr(r, "provider_id", "") or None,
+                            getattr(r, "provider_model", None),
+                            pricing,
+                        )
+                        if rule is None:
+                            continue
+                        cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
+                        if cur != "USD":
+                            r.currency_symbol = cur  # type: ignore[assignment]
+                            n += 1
+                    except Exception:
+                        continue
+                await session.commit()
+                return n
+        except Exception as e:
+            logger.warning("[cost_control] fix_mislabeled_cost_currency 失败: %s", e)
             return 0
 
     async def save_cache_event(self, record: dict[str, Any]) -> None:
