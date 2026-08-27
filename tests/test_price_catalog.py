@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -114,6 +115,23 @@ def test_sources_filter():
     assert {c.source for c in cands} == {"openrouter"}
 
 
+def test_candidate_cache_key_includes_limit_and_none_vs_empty_sources():
+    cat = _catalog_with(
+        _price("litellm", "gpt-4o"),
+        _price("litellm", "gpt-4o-mini"),
+        _price("openrouter", "gpt-4o"),
+    )
+
+    limited = cat.find_candidates("gpt-4o-mini", limit_per_source=1)
+    expanded = cat.find_candidates("gpt-4o-mini", limit_per_source=2)
+    assert len([c for c in limited if c.source == "litellm"]) == 1
+    assert len([c for c in expanded if c.source == "litellm"]) == 2
+
+    assert cat.find_candidates("gpt-4o", sources=set()) == []
+    all_sources = cat.find_candidates("gpt-4o", sources=None)
+    assert {c.source for c in all_sources} == {"litellm", "openrouter"}
+
+
 # ===== 自动匹配判定 =====
 
 
@@ -212,6 +230,32 @@ def test_save_atomic_no_tmp_left(tmp_path):
     # 文件是合法 JSON
     with open(tmp_path / "price_catalog.json", encoding="utf-8") as f:
         json.load(f)
+
+
+def test_save_replace_failure_cleans_unique_tmp(monkeypatch, tmp_path):
+    cat = _catalog_with(_price("litellm", "gpt-4o"))
+
+    def fail_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        cat.save(str(tmp_path))
+    assert [name for name in os.listdir(tmp_path) if name.endswith(".tmp")] == []
+
+
+def test_concurrent_saves_do_not_share_tmp_file(tmp_path):
+    first = _catalog_with(_price("litellm", "first"))
+    second = _catalog_with(_price("openrouter", "second"))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(first.save, str(tmp_path)), pool.submit(second.save, str(tmp_path))]
+        for future in futures:
+            future.result()
+
+    loaded = load_catalog(str(tmp_path))
+    assert set(loaded.prices) in ({"litellm:first"}, {"openrouter:second"})
+    assert [name for name in os.listdir(tmp_path) if name.endswith(".tmp")] == []
 
 
 def test_from_dict_skips_malformed_entries():

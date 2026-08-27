@@ -351,7 +351,7 @@ class StoreMixin:
           的行无法归属，跳过。
         """
         try:
-            from .cost import compute_cost_value, resolve_pricing
+            from .cost import TieredExprEvaluationError, compute_cost_value, resolve_pricing
 
             maker = await self._ensure_session_maker()
             async with maker() as session:
@@ -387,6 +387,8 @@ class StoreMixin:
                         "created_at": getattr(r, "created_at", None),
                     }
                     total += compute_cost_value(usage, provider_id, model, pricing)
+                except TieredExprEvaluationError:
+                    raise
                 except Exception:
                     continue
 
@@ -403,6 +405,8 @@ class StoreMixin:
                 for pid, price in req_prices.items():
                     total += len(distinct.get(pid, set())) * price
             return round(total, 6)
+        except TieredExprEvaluationError:
+            raise
         except Exception as e:
             logger.warning("[cost_control] query_user_cost_total 失败: %s", e)
             return 0.0

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -139,10 +140,10 @@ class PriceCatalog:
     updated_at: str = ""
     sources: dict[str, SourceStatus] = field(default_factory=dict)
     prices: dict[str, CatalogPrice] = field(default_factory=dict)
-    # 候选匹配缓存：key=(model, frozenset(sources))；prices 变更时必须清空
-    _candidate_cache: dict[tuple[str, frozenset[str]], list[Candidate]] = field(
-        default_factory=dict
-    )
+    # 候选匹配缓存：key=(model, limit_per_source, sources-or-None)；prices 变更时必须清空
+    _candidate_cache: dict[
+        tuple[str, int, frozenset[str] | None], list[Candidate]
+    ] = field(default_factory=dict)
     # ---- 持久化 ----
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -182,10 +183,22 @@ class PriceCatalog:
         """原子写：先写临时文件再 ``os.replace``，避免半写损坏。"""
         path = _catalog_path(data_dir)
         os.makedirs(data_dir, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2, default=str)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.",
+            suffix=".tmp",
+            dir=os.path.dirname(path),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.to_dict(), f, ensure_ascii=False, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
     # ---- 源状态维护 ----
     def upsert_source(self, status: SourceStatus) -> None:
@@ -227,7 +240,11 @@ class PriceCatalog:
         if not target_norm:
             return []
 
-        cache_key = (target_raw, frozenset(sources) if sources else frozenset())
+        cache_key = (
+            target_raw,
+            limit_per_source,
+            None if sources is None else frozenset(sources),
+        )
         cached = self._candidate_cache.get(cache_key)
         if cached is not None:
             return cached

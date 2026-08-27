@@ -570,7 +570,12 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     setResetArmed(false);
     setResetResult("重置中…");
     try {
-      await api.postSaveConfig({ pricing: {}, pricing_multipliers: {} });
+      await api.postSaveConfig({
+        pricing: {},
+        pricing_multipliers: {},
+        price_selections: {},
+      });
+      setSelectionsOverride({});
       setResetResult("✅ 已重置，立即生效");
       res.refetch();
     } catch (e) {

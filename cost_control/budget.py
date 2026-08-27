@@ -750,8 +750,16 @@ class BudgetMixin:
         resp: Any,
     ) -> None:
         """把 fallback 调用的 usage 落补充表。"""
-        from .cost import compute_cost_with_currency
-        from .supplement import _extract_cache, _safe_sender_id
+        from astrbot import logger
+
+        from .cost import TieredExprEvaluationError, compute_cost_with_currency
+        from .supplement import (
+            _extract_billing_context,
+            _extract_cache,
+            _read_req_billing,
+            _read_request_id,
+            _safe_sender_id,
+        )
 
         usage = getattr(resp, "usage", None)
         token_input_other = int(getattr(usage, "input_other", 0) or 0)
@@ -759,6 +767,10 @@ class BudgetMixin:
         token_output = int(getattr(usage, "output", 0) or 0)
         raw = getattr(resp, "raw_completion", None)
         cache_creation, cache_read, raw_usage = _extract_cache(raw)
+        billing_context = _extract_billing_context(raw, _read_req_billing(event))
+        params = billing_context.get("params") if isinstance(billing_context, dict) else None
+        params = params if isinstance(params, dict) else {}
+        cache_creation_1h = (cache_creation or 0) if params.get("cache_ttl_1h") else 0
 
         provider_id = str(pid)
         provider_model = ""
@@ -774,15 +786,29 @@ class BudgetMixin:
         )
 
         # 固化原始货币成本金额与符号。
+        created = datetime.now(UTC)
         usage_dict = {
             "token_input_other": token_input_other,
             "token_input_cached": token_input_cached,
             "token_output": token_output,
             "cache_creation": cache_creation,
+            "cache_creation_1h": cache_creation_1h,
+            "billing_context": billing_context,
+            "created_at": created,
         }
         try:
             raw_cost, cur = compute_cost_with_currency(
                 usage_dict, provider_id or None, provider_model or None, self.get_pricing()
+            )
+        except TieredExprEvaluationError as e:
+            # 动态表达式失败不得被 fallback 路径固化为假零成本；保留 NULL，
+            # 让记录页/后续回填可以明确展示并重算。
+            raw_cost, cur = None, "USD"
+            logger.debug(
+                "[cost_control] fallback tiered_expr 计价失败 class=%s provider=%s model=%s",
+                str(e),
+                provider_id or "-",
+                provider_model or "-",
             )
         except Exception:
             raw_cost, cur = 0.0, "USD"
@@ -799,10 +825,13 @@ class BudgetMixin:
             "cache_read": cache_read,
             "raw_usage": raw_usage,
             "response_id": getattr(resp, "id", None),
+            "request_id": _read_request_id(event),
             "user_id": _safe_sender_id(event),
-            "cost_amount": round(raw_cost, 6),
+            "cost_amount": round(raw_cost, 6) if raw_cost is not None else None,
             "currency_symbol": cur,
-            "created_at": datetime.now(UTC),
+            "billing_context": billing_context or None,
+            "matched_tier": usage_dict.pop("_matched_tier", None),
+            "created_at": created,
         }
         await self.save_supplement(record)
 

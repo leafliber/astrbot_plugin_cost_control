@@ -42,9 +42,13 @@ class _ScheduleHost(ScheduleMixin):
         self.context = _FakeContext(self.cron, {"timezone": "UTC", "provider": []})
         self.cfg = cfg
         self._data_dir = str(data_dir)
+        self.pricing_invalidations: list[str] = []
 
     def get_data_dir(self) -> str:
         return self._data_dir
+
+    def invalidate_pricing_cache(self, reason: str) -> None:
+        self.pricing_invalidations.append(reason)
 
 
 def test_register_cron_keeps_price_sync_disabled_by_default(tmp_path: Path) -> None:
@@ -94,6 +98,37 @@ def test_sync_prices_passes_provider_config_without_persisting_key(
 
     assert observed["data_dir"] == str(tmp_path)
     assert observed["provider"] == host.context._config["provider"][0]
+    assert host.pricing_invalidations == ["scheduled_price_sync"]
+
+
+def test_sync_prices_obtains_merged_provider_from_provider_sources(tmp_path, monkeypatch) -> None:
+    """cron 链路与 web 同步同口径：按 provider_source_id 合并出 api_base/key。"""
+    observed: dict[str, object] = {}
+
+    async def fake_sync_all(cfg, data_dir, *, provider_cfg):
+        observed["provider"] = provider_cfg("node-a/newapi-main")
+        return {"results": [{"status": "ok"}]}
+
+    monkeypatch.setattr("cost_control.price_sources.sync_all", fake_sync_all)
+    host = _ScheduleHost(cfg={"price_sources": {}}, data_dir=tmp_path)
+    host.context._config.update(
+        {
+            "provider_sources": [
+                {"id": "node-a", "api_base": "https://cron-na/v1", "key": ["sk-cron-key"]}
+            ],
+            "provider": [
+                {"id": "node-a/newapi-main", "provider_source_id": "node-a", "model": "m1"}
+            ],
+        }
+    )
+
+    asyncio.run(host.sync_prices())
+
+    p = observed["provider"]
+    assert isinstance(p, dict)
+    assert p["id"] == "node-a/newapi-main"
+    assert p["api_base"] == "https://cron-na/v1"
+    assert p["key"] == ["sk-cron-key"]
 
 
 def test_grouped_cost_uses_host_effective_pricing(monkeypatch, tmp_path: Path) -> None:

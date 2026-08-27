@@ -1,7 +1,15 @@
 """成本计算单测：定价匹配、三种计费模式、provider_id 优先级（纯函数）。"""
 
+import logging
+from datetime import UTC
+from types import SimpleNamespace
+
+import pytest
+
 from cost_control.config import DEFAULT_PRICING
 from cost_control.cost import (
+    CostMixin,
+    TieredExprEvaluationError,
     compute_cost_grouped,
     compute_cost_value,
     compute_row_cost,
@@ -18,6 +26,82 @@ def pricing_struct(user=None, multipliers=None, provider_clusters=None):
         "multipliers": multipliers or {},
         "provider_clusters": provider_clusters or {},
     }
+
+
+def test_cost_mixin_caches_runtime_pricing_until_explicit_invalidation(
+    caplog, monkeypatch, tmp_path
+):
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    caplog.set_level(logging.DEBUG, logger="cost_control.cost")
+    calls = 0
+    price = CatalogPrice(source="litellm", source_model_id="m", prompt=1, completion=2)
+    catalog = PriceCatalog(prices={price.price_key: price})
+
+    def fake_load(data_dir):
+        nonlocal calls
+        calls += 1
+        assert data_dir == str(tmp_path)
+        return catalog
+
+    monkeypatch.setattr("cost_control.price_catalog.load_catalog", fake_load)
+    host = CostMixin()
+    host.cfg = {}
+    host._data_dir = str(tmp_path)
+    host.context = SimpleNamespace(get_config=lambda: {"provider": []})
+
+    first = host.get_pricing()
+    second = host.get_pricing()
+
+    assert first is second
+    assert calls == 1
+    assert "运行时定价缓存命中" in "\n".join(r.getMessage() for r in caplog.records)
+
+    host.invalidate_pricing_cache("test")
+    third = host.get_pricing()
+    assert third is not first
+    assert calls == 2
+    assert third["catalog"][price.price_key]["prompt"] == 1
+
+
+def test_auto_selection_failure_is_debug_logged_and_fails_open(caplog):
+    class BrokenCatalog:
+        def find_candidates(self, model, *, sources=None):
+            raise RuntimeError("catalog unavailable")
+
+    caplog.set_level(logging.DEBUG, logger="cost_control.cost")
+    pricing = {
+        "defaults": {},
+        "user": {},
+        "catalog_obj": BrokenCatalog(),
+        "enabled_sources": None,
+    }
+
+    assert resolve_pricing("provider", "model", pricing) is None
+    records = [r for r in caplog.records if "自动价格候选解析失败" in r.getMessage()]
+    assert records
+    assert records[-1].exc_info is not None
+
+
+def test_runtime_pricing_catalog_failure_is_debug_logged_and_fails_open(
+    caplog, monkeypatch, tmp_path
+):
+    def fail_load(data_dir):
+        raise OSError("catalog unavailable")
+
+    monkeypatch.setattr("cost_control.price_catalog.load_catalog", fail_load)
+    caplog.set_level(logging.DEBUG, logger="cost_control.cost")
+    host = CostMixin()
+    host.cfg = {}
+    host._data_dir = str(tmp_path)
+    host.context = SimpleNamespace(get_config=lambda: {"provider": []})
+
+    pricing = host.get_pricing()
+
+    assert pricing["defaults"]
+    records = [r for r in caplog.records if "运行时定价目录加载失败" in r.getMessage()]
+    assert records
+    assert records[-1].exc_info is not None
 
 
 # ===== match_pricing（仅作用于 defaults 表，签名未变）=====
@@ -464,10 +548,12 @@ def test_tiered_expr_computation_and_tier_backfill():
     assert usage["_matched_tier"] == "std"
 
 
-def test_tiered_expr_invalid_returns_zero():
+def test_tiered_expr_invalid_raises_instead_of_returning_zero():
     user = {"prov": {"mode": "tiered_expr", "expr": "p * * c"}}
     usage = {"token_input_other": 100}
-    assert compute_cost_value(usage, "prov", "m", pricing_full(user)) == 0.0
+    with pytest.raises(TieredExprEvaluationError, match="SyntaxError"):
+        compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert usage["_expr_error"] == "SyntaxError"
 
 
 def test_tiered_expr_row_aggregate():
@@ -536,3 +622,247 @@ def test_disabled_source_does_not_auto_apply_but_confirmed_selection_still_appli
     rule = resolve_pricing("prov", "private-model", pricing)
     assert rule is not None
     assert rule["input"] == 3.0
+
+
+# ---- P1 修复回归：优先级、opt-in token 归一化、倍率、禁用路径 ----
+
+
+def _catalog_with(price):
+    """构造带 catalog/catalog_obj 的 pricing 结构（测试辅助）。"""
+    pricing = pricing_struct()
+    pricing["catalog"] = {price.price_key: price.to_dict()}
+    pricing["catalog_obj"] = None  # 默认无运行时目录；按需覆盖
+    return pricing
+
+
+def test_legacy_manual_beats_unconfirmed_auto_candidate():
+    """升级并同步目录后，唯一高置信自动候选不得静默覆盖旧 provider 级手工价（PR#10 #6）。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    catalog_price = CatalogPrice(source="modelsdev", source_model_id="gpt-4o", prompt=9.0)
+    pricing = _catalog_with(catalog_price)
+    pricing["catalog_obj"] = PriceCatalog(prices={catalog_price.price_key: catalog_price})
+    user = {"prov": {"mode": "per_token", "input": 9.9, "output": 3.0}}
+    pricing["user"] = user
+    rule = resolve_pricing("prov", "gpt-4o", pricing)
+    assert rule["mode"] == "per_token"
+    assert rule["input"] == 9.9  # 手工价胜出，不报 9.0 的目录候选价
+
+
+def test_confirmed_selection_beats_legacy_manual_over_same_candidate():
+    """同一候选：用户显式确认的选择仍是蓄意覆盖，可压过手工价。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    catalog_price = CatalogPrice(source="modelsdev", source_model_id="gpt-4o", prompt=9.0)
+    pricing = _catalog_with(catalog_price)
+    pricing["catalog_obj"] = PriceCatalog(prices={catalog_price.price_key: catalog_price})
+    pricing["user"] = {"prov": {"mode": "per_token", "input": 9.9, "output": 3.0}}
+    pricing["selections"] = {
+        "prov": {"gpt-4o": {"price_key": catalog_price.price_key, "confirmed": True}}
+    }
+    rule = resolve_pricing("prov", "gpt-4o", pricing)
+    assert rule["mode"] == "per_token"
+    assert rule["input"] == 9.0
+
+
+# ---- New API 变量 opt-in 归一化（与上游 BuildTieredTokenParams 语义对齐）----
+
+
+def test_tiered_expr_optin_p_includes_cached_when_cr_absent():
+    """80 万文本 + 20 万缓存命中，表达式只用 p → 上游语义成本 $2，不是 $1.6（PR#10 #3）。"""
+    user = {"prov": {"mode": "tiered_expr", "expr": "p * 2"}}
+    usage = {"token_input_other": 800_000, "token_input_cached": 200_000}
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert abs(cost - 2.0) < 1e-12
+
+
+def test_tiered_expr_optin_splits_cache_read_when_cr_referenced():
+    user = {"prov": {"mode": "tiered_expr", "expr": "p * 3 + c * 15 + cr * 0.3"}}
+    usage = {"token_input_other": 800_000, "token_input_cached": 200_000}
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    expected = (800_000 * 3 + 200_000 * 0.3) / 1e6
+    assert abs(cost - expected) < 1e-12
+
+
+def test_tiered_expr_creation_split_cc_cc1h_no_double_count():
+    """5 分钟创建只在 cc，1 小时创建只在 cc1h；未引用的细分回流 p，len 恒为全量。"""
+    from cost_control.cost import _expr_variables
+
+    base_usage = {
+        "token_input_other": 100_000,
+        "cache_creation": 5_000,
+        "cache_creation_1h": 2_000,
+    }
+    # 全部细分都被表达式引用 → p 纯文本；分别引用其一 → 另一细分回流 p。
+    vars_plain = _expr_variables(base_usage, frozenset())
+    vars_cc = _expr_variables(base_usage, frozenset({"cc"}))
+    vars_both = _expr_variables(base_usage, frozenset({"cc", "cc1h"}))
+    assert vars_plain["p"] == pytest.approx(105_000)  # cache_creation 全量回流
+    assert vars_cc["p"] == pytest.approx(102_000)  # 仅 cc1h 回流
+    assert vars_both["p"] == pytest.approx(100_000)
+    assert (vars_plain["cc"], vars_plain["cc1h"]) == (3000.0, 2000.0)  # 不重复计
+    for v in (vars_plain, vars_cc, vars_both):
+        assert v["len"] == pytest.approx(105_000)  # len 不受排除影响
+        assert v["cc"] + v["cc1h"] == pytest.approx(5000.0)
+    # 行为验证：引用 cc/cc1h 时各自单独计费且总创建量不重复
+    split_expr = 'tier("t", p*1 + cc*2 + cc1h*6)'
+    user = {"prov": {"mode": "tiered_expr", "expr": split_expr}}
+    usage = dict(base_usage)
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    # p=100k + cc=3000×2 + cc1h=2000×6
+    expected = (100_000 + 3_000 * 2 + 2_000 * 6) / 1e6
+    assert abs(cost - expected) < 1e-12
+
+
+def test_tiered_expr_v1_prefix_matches_plain_via_compute_path():
+    body = 'p <= 200000 ? tier("std", p*1.5 + c*7.5) : tier("long", p*3.0 + c*11.25)'
+    usage = {"token_input_other": 250_000, "token_output": 5_000}
+    plain = compute_cost_value(
+        dict(usage), "prov", "m", pricing_full({"prov": {"mode": "tiered_expr", "expr": body}})
+    )
+    prefixed = compute_cost_value(
+        dict(usage),
+        "prov",
+        "m",
+        pricing_full({"prov": {"mode": "tiered_expr", "expr": "v1:" + body}}),
+    )
+    assert plain > 0
+    assert prefixed == pytest.approx(plain)
+
+
+# ---- 聚类倍率覆盖 per_tier / tiered_expr（不改动持久化基础规则）----
+
+
+def test_cluster_multiplier_scales_per_tier_copy_without_mutating_base():
+    from copy import deepcopy
+
+    rule = _per_tier_rule(
+        {"input": 1.0, "output": 2.0},
+        context_tiers=[{"threshold_tokens": 1000, "input": 5.0, "output": 10.0}],
+        service_tiers=[{"match": "fast", "input_multiplier": 2.0}],
+    )
+    snapshot = deepcopy(rule)
+    pricing = pricing_struct(
+        user={"prov": rule}, multipliers={"c1": 2.0}, provider_clusters={"prov": "c1"}
+    )
+    resolved = resolve_pricing("prov", "m", pricing)
+    # 结构化副本缩放：base/context 绝对单价均乘倍率；service tier 相对倍率原样保留。
+    assert resolved is not rule
+    assert resolved["base"]["input"] == pytest.approx(2.0)
+    assert resolved["base"]["output"] == pytest.approx(4.0)
+    assert resolved["context_tiers"][0]["threshold_tokens"] == 1000
+    assert resolved["context_tiers"][0]["input"] == pytest.approx(10.0)
+    assert resolved["context_tiers"][0]["output"] == pytest.approx(20.0)
+    assert resolved["service_tiers"][0]["input_multiplier"] == pytest.approx(2.0)
+    # 持久化原字典绝不被修改
+    assert rule == snapshot
+    # 成本行为：用量 2k 越过 1k 阈值走 context tier（10/20，已含倍率），
+    # 再叠 fast 档相对倍率 ×2：input 生效价 20 → 2000×20/1e6 = $0.04
+    usage = {
+        "token_input_other": 2_000,
+        "billing_context": {"params": {"service_tier": "fast"}},
+    }
+    cost = compute_cost_value(usage, "prov", "m", pricing)
+    assert abs(cost - (2_000 * (5.0 * 2.0 * 2.0)) / 1e6) < 1e-12
+
+
+def test_cluster_multiplier_applies_to_tiered_expr_at_result_level():
+    """tiered_expr 倍率作用于成本结果层，不改写表达式语义/阶梯判定。"""
+    from copy import deepcopy
+
+    expr = 'tier("std", p * 2)'
+    rule = {"mode": "tiered_expr", "expr": expr}
+    snapshot_rule = deepcopy(rule)
+    pricing = pricing_struct(
+        user={"prov": rule}, multipliers={"c1": 3.0}, provider_clusters={"prov": "c1"}
+    )
+    usage = {"token_input_other": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "m", pricing)
+    assert abs(cost - 6.0) < 1e-12  # 基础 $2 × 3 倍
+    assert rule == snapshot_rule
+    assert usage.get("_matched_tier") == "std"
+
+
+# ---- 静态非法 tiered_expr：解析层禁用而非静默零成本 ----
+
+
+def test_invalid_catalog_selection_disabled_falls_back_to_defaults():
+    """目录里历史遗留的非法 tiered_expr 在转换时被禁用（回落默认表），而非零成本假象。"""
+    from cost_control.default_pricing import DEFAULT_PRICING as DP
+
+    pricing = pricing_struct()
+    pricing["catalog"] = {"bad:m": {"mode": "tiered_expr", "expr": "p * * c"}}
+    pricing["selections"] = {"prov": {"gpt-4o": {"price_key": "bad:m"}}}
+    rule = resolve_pricing("prov", "gpt-4o", pricing)
+    assert rule is not None
+    assert rule["mode"] == "per_token"
+    assert rule["input"] == DP["gpt-4o"]["input"]  # 2.5，回落到内置默认
+
+
+def test_invalid_catalog_auto_candidate_disabled_falls_back_to_defaults():
+    """自动匹配路径同样过预检：坏候选被禁用后回落默认表。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    broken = CatalogPrice(
+        source="newapi:x", source_model_id="gpt-4o", mode="tiered_expr", expr="p * * c"
+    )
+    pricing = pricing_struct()
+    pricing["catalog"] = {broken.price_key: broken.to_dict()}
+    pricing["catalog_obj"] = PriceCatalog(prices={broken.price_key: broken})
+    rule = resolve_pricing("prov", "gpt-4o", pricing)
+    assert rule is not None and rule["mode"] == "per_token" and rule["input"] == 2.5
+
+
+# ---- tiered_expr 上下文贯通：datetime created_at 与历史扁平 billing_context（P1-4）----
+
+
+def test_tiered_expr_accepts_datetime_created_at_with_iana_zone():
+    """usage.created_at 为 datetime（supplement 新口径）时时间函数确定性求值。"""
+    from datetime import datetime
+
+    user = {"prov": {"mode": "tiered_expr", "expr": 'tier("h", hour("Asia/Shanghai"))'}}
+    usage = {
+        "token_input_other": 0,
+        "created_at": datetime.fromtimestamp(1_700_000_000, tz=UTC),  # 22:13:20 UTC
+    }
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    # 上海 06 点：hour()=6，raw 输出 6，由 compute 层统一 /1_000_000
+    assert cost == pytest.approx(6 / 1_000_000)
+
+
+# ---- New API 文档风格表达式：v1 前缀 + 紧凑运算符 + param/tier 组合 ----
+
+
+def test_newapi_documented_style_expression_end_to_end():
+    """上游文档样式的 billing_expr：v1 前缀、无空格紧凑写法、&& 三元与 service_tier 倍率。
+
+    三个分支各取一条确定向量，覆盖 normal / priority / long_context 全部路径。
+    """
+    from cost_control.expr_eval import validate_tiered_expr
+
+    doc_style = (
+        "v1:p<=100000&&c<=20000?"
+        'tier("normal",(p*1+c*4)*(param("service_tier")=="priority"?2:1)): '
+        'tier("long",p*2+c*8)'
+    )
+    assert validate_tiered_expr(doc_style) is None
+    user = {"prov": {"mode": "tiered_expr", "expr": doc_style}}
+    usage = {"token_input_other": 50_000, "token_output": 10_000}
+    expected_normal = (50_000 * 1 + 10_000 * 4) / 1e6
+    base = compute_cost_value(dict(usage), "prov", "m", pricing_full(user))
+    assert abs(base - expected_normal) < 1e-12
+    # service_tier 走 billing_context.params → param() 分支倍率 ×2
+    prio_usage = {
+        **usage,
+        "billing_context": {"params": {"service_tier": "priority"}},
+    }
+    priority = compute_cost_value(prio_usage, "prov", "m", pricing_full(user))
+    assert abs(priority - expected_normal * 2) < 1e-12
+    # 阈值外回落 long_context tier（×2 单价）且 params 缺省按 1 计
+    long_cost = compute_cost_value(
+        {"token_input_other": 150_000, "token_output": 10_000},
+        "prov",
+        "m",
+        pricing_full(user),
+    )
+    assert abs(long_cost - (150_000 * 2 + 10_000 * 8) / 1e6) < 1e-12

@@ -162,18 +162,12 @@ class ScheduleMixin:
     async def sync_prices(self) -> None:
         """CronJob 回调：同步启用的价格源；失败仅记录日志，保留旧目录。"""
         try:
-            from .price_sources import sync_all
+            from .price_sources import merged_provider_config, sync_all
 
             def provider_cfg(provider_id: str) -> dict[str, Any] | None:
+                # 与 web 同步同口径：>=4.25.5 从 provider_sources 合并 api_base/key
                 try:
-                    config = self.context.get_config() or {}
-                    providers = config.get("provider") if isinstance(config, dict) else None
-                    for provider in providers if isinstance(providers, list) else []:
-                        if (
-                            isinstance(provider, dict)
-                            and str(provider.get("id") or "") == provider_id
-                        ):
-                            return provider
+                    return merged_provider_config(self.context.get_config(), provider_id)
                 except Exception:
                     pass
                 return None
@@ -184,6 +178,9 @@ class ScheduleMixin:
                 data_dir,
                 provider_cfg=provider_cfg,
             )
+            invalidate = getattr(self, "invalidate_pricing_cache", None)
+            if callable(invalidate):
+                invalidate("scheduled_price_sync")
             logger.info(
                 "[cost_control] 定时价格同步完成: %d 成功, %d 失败",
                 sum(1 for result in report.get("results", []) if result.get("status") == "ok"),

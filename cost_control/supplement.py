@@ -14,12 +14,19 @@ Google GenerateContentResponse），cache 字段命名各异，按 duck-typing �
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
+
+# 生产环境经 root logger 汇入 astrbot/loguru；测试经 caplog 可捕获。
+logger = logging.getLogger("cost_control.supplement")
+
+# 允许进入 billing_context 的计费相关请求头白名单（1h 缓存写判定）。
+_BILLING_HEADER_ALLOWLIST = frozenset({"anthropic-beta"})
 
 
 def _extract_cache(
@@ -176,11 +183,26 @@ def _extract_billing_context(
     raw: Any,
     req_ctx: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """合并响应侧（``raw_completion.service_tier``）与请求侧上下文，全异常吞掉返回 ``{}``。"""
+    """合并请求侧与响应侧计费上下文，统一归一化到 ``{"params": {...}}`` 形态。
+
+    白名单内可计费字段（service_tier / anthropic-beta 标志 / cache_ttl_1h）挂在
+    ``params`` 子字典下，与 :func:`expr_eval.eval_tiered_expr` 的 ``param()`` /
+    ``header()`` 读取口径一致；只读旧扁平形态由消费方兼容。全异常吞掉返回 ``{}``。
+    """
     try:
-        out: dict[str, Any] = {}
+        flat: dict[str, Any] = {}
         if isinstance(req_ctx, dict):
-            out.update(req_ctx)
+            # 兼容调用方已经归一化的 ``{"params": {...}}``，同时保留旧扁平形态。
+            nested = req_ctx.get("params")
+            if isinstance(nested, dict):
+                flat.update(nested)
+            flat.update({k: v for k, v in req_ctx.items() if k != "params"})
+            nested_headers = nested.get("headers") if isinstance(nested, dict) else None
+            direct_headers = flat.get("headers")
+            if isinstance(nested_headers, dict) and isinstance(direct_headers, dict):
+                flat["headers"] = {**nested_headers, **direct_headers}
+            elif isinstance(nested_headers, dict) and not isinstance(direct_headers, dict):
+                flat["headers"] = nested_headers
         # 响应侧 service_tier 优先（OpenAI ChatCompletion.service_tier）
         st = getattr(raw, "service_tier", None)
         if st is None and isinstance(raw, dict):
@@ -188,7 +210,29 @@ def _extract_billing_context(
         if st is not None:
             s = str(st).strip()
             if s:
-                out["service_tier"] = s
+                flat["service_tier"] = s
+        if not flat:
+            return {}
+        params: dict[str, Any] = {}
+        headers_flat = flat.get("headers")
+        for key in ("service_tier", "cache_ttl_1h"):
+            if flat.get(key) is not None:
+                params[key] = flat[key]
+        if isinstance(headers_flat, dict):
+            # 双保险：只持久化白名单计费头，绝不保存任意 header（Authorization 等）。
+            kept = {
+                str(k): str(v)
+                for k, v in headers_flat.items()
+                if str(k).lower() in _BILLING_HEADER_ALLOWLIST
+            }
+            if kept:
+                params["headers"] = kept
+        out = {"params": params}
+        logger.debug(
+            "[cost_control] 计费上下文字段 params_keys=%s header_names=%s",
+            sorted(k for k in params if k != "headers"),
+            sorted(params.get("headers", {})),
+        )
         return out
     except Exception:
         return {}
@@ -216,7 +260,7 @@ class SupplementMixin:
             cache_creation / cache_read / raw_usage / response_id / created_at
             / cost_amount / currency_symbol 的补充记录 dict。
         """
-        from .cost import compute_cost_with_currency
+        from .cost import TieredExprEvaluationError, compute_cost_with_currency
 
         usage = getattr(resp, "usage", None)
         token_input_other = int(getattr(usage, "input_other", 0) or 0)
@@ -236,8 +280,10 @@ class SupplementMixin:
         # 计费上下文（service_tier / 1h 缓存判定），供 per_tier / tiered_expr 求值。
         req_ctx = _read_req_billing(event)
         billing_context = _extract_billing_context(raw, req_ctx)
+        bc_params = billing_context.get("params") if isinstance(billing_context, dict) else None
+        bc_params = bc_params if isinstance(bc_params, dict) else {}
         # 1h 缓存写：仅当请求侧标记了 cache_ttl_1h 时计入，否则归到普通 cache_creation。
-        cc1h = (cache_creation or 0) if billing_context.get("cache_ttl_1h") else 0
+        cc1h = (cache_creation or 0) if bc_params.get("cache_ttl_1h") else 0
 
         # 固化原始货币成本金额与符号（展示时按当前汇率换算到主货币）。
         created = datetime.now(UTC)
@@ -250,14 +296,22 @@ class SupplementMixin:
             "billing_context": billing_context,
             "created_at": created,
         }
+        raw_cost: float | None
         try:
             raw_cost, cur = compute_cost_with_currency(
                 usage_dict, provider_id, provider_model, self.get_pricing()
             )
+        except TieredExprEvaluationError:
+            # 表达式失败不得固化为 0；保留 NULL 供后续修正规则后重算/回填。
+            raw_cost, cur = None, "USD"
         except Exception:
             raw_cost, cur = 0.0, "USD"
-        # tiered_expr 命中的阶梯名（tier() 回填到 usage_dict），供审计与调试。
+        # tiered_expr 命中的阶梯名（tier() 回填到 usage_dict），供审计与调试；
+        # 求值失败时把失败类别固化进 billing_context.params（绝不静默归零）。
         matched_tier = usage_dict.pop("_matched_tier", None)
+        expr_error = usage_dict.pop("_expr_error", None)
+        if expr_error and isinstance(billing_context, dict):
+            billing_context.setdefault("params", {})["expr_error"] = str(expr_error)
 
         return {
             "umo": umo,
@@ -275,7 +329,7 @@ class SupplementMixin:
             "user_id": user_id,
             "billing_context": billing_context or None,
             "matched_tier": matched_tier,
-            "cost_amount": round(raw_cost, 6),
+            "cost_amount": round(raw_cost, 6) if raw_cost is not None else None,
             "currency_symbol": cur,
             "created_at": created,
         }

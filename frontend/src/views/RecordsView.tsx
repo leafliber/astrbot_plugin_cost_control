@@ -302,9 +302,17 @@ export function RecordsView({ refreshNonce }: { refreshNonce: number }) {
                   <td>{fmtNum(r.cache_creation)}</td>
                   <td>{r.injection_total == null ? "-" : fmtNum(r.injection_total)}</td>
                   <td>
-                    {r.cost_original != null && r.currency_symbol
-                      ? fmtCost(r.cost_original, r.currency_symbol)
-                      : fmtCost(r.cost)}
+                    {r.cost_error ? (
+                      <span className="bad" title={r.cost_error}>
+                        计价失败
+                      </span>
+                    ) : r.cost_original != null && r.currency_symbol ? (
+                      fmtCost(r.cost_original, r.currency_symbol)
+                    ) : r.cost == null ? (
+                      "—"
+                    ) : (
+                      fmtCost(r.cost)
+                    )}
                   </td>
                 </tr>
               ))}

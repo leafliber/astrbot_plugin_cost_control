@@ -48,6 +48,7 @@ from .config import (
     switches_from_config,
 )
 from .default_pricing import DEFAULT_PRICING
+from .price_sources import merged_provider_config
 from .pricing_clusters import (
     build_provider_pricing_clusters,
     normalize_pricing_multipliers,
@@ -77,15 +78,13 @@ def _iso_utc(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-
-
 def _attach_selection_price(sel: dict[str, Any], catalog: Any) -> None:
     """给单个 selection 条目附生效价格摘要（prompt/completion → input/output 映射）。"""
-    from .cost import _catalog_field_values
+    from .cost import catalog_field_values
 
     entry = catalog.prices.get(str(sel.get("price_key") or ""))
     if entry is not None:
-        sel["price"] = _catalog_field_values(entry.to_dict())
+        sel["price"] = catalog_field_values(entry.to_dict())
 
 
 def _find_newapi_source_by_url(cfg: dict[str, Any], root: str) -> str | None:
@@ -139,6 +138,10 @@ def _deleted_provider_residues(
 class WebApiMixin:
     """注册 REST Web API 路由的 Mixin。"""
 
+    # 配置写端点在读取 request 后，从 self.cfg 快照到 save_plugin_config 的读改写
+    # 区间均为无 await 的同步段，因此单进程 Quart 事件循环内不会交错。若未来启用
+    # 多 worker/多进程写同一 data_dir，必须把这里升级为进程间文件锁。
+
     # 由 ``Main`` 宿主提供（Mixin 不定义 ``__init__``）。
     context: Any
     config: Any
@@ -168,6 +171,11 @@ class WebApiMixin:
     get_data_dir: Any
     register_cron: Any
     daily_report: Any
+
+    def _invalidate_runtime_pricing(self, reason: str) -> None:
+        invalidate = getattr(self, "invalidate_pricing_cache", None)
+        if callable(invalidate):
+            invalidate(reason)
 
     def register_routes(self) -> None:
         """注册所有 Web API 路由（在 ``Main.initialize`` 中调用，幂等）。
@@ -358,7 +366,7 @@ class WebApiMixin:
         从固化的原始货币换算到主货币 ``main_cur``，``cost_original`` 保留原始金额；
         否则 ``cost`` 由 pricing 即时算出（回退，用于历史未回填行）。
         """
-        from .cost import compute_cost_value
+        from .cost import TieredExprEvaluationError, compute_cost_value
         from .exchange_rates import convert
 
         created = getattr(s, "created_at", None)
@@ -370,8 +378,9 @@ class WebApiMixin:
         cost_amount = getattr(s, "cost_amount", None)
         currency_symbol = getattr(s, "currency_symbol", None)
 
-        cost = 0.0
+        cost: float | None = 0.0
         cost_original = None
+        cost_error = None
         if cost_amount is not None:
             # 有固化金额 → 按当前汇率换算到主货币
             cost_original = round(float(cost_amount), 6)
@@ -379,20 +388,26 @@ class WebApiMixin:
             cost = round(convert(cost_original, cur, main_cur, rates or {}), 6)
         elif pricing is not None:
             # 回退：无固化金额，按定价即时算（USD 口径）
-            cost = round(
-                compute_cost_value(
-                    {
-                        "token_input_other": token_input_other,
-                        "token_input_cached": token_input_cached,
-                        "token_output": token_output,
-                        "cache_creation": cache_creation,
-                    },
-                    getattr(s, "provider_id", None) or None,
-                    getattr(s, "provider_model", None),
-                    pricing,
-                ),
-                6,
-            )
+            try:
+                cost = round(
+                    compute_cost_value(
+                        {
+                            "token_input_other": token_input_other,
+                            "token_input_cached": token_input_cached,
+                            "token_output": token_output,
+                            "cache_creation": cache_creation,
+                            "billing_context": getattr(s, "billing_context", None),
+                            "created_at": created,
+                        },
+                        getattr(s, "provider_id", None) or None,
+                        getattr(s, "provider_model", None),
+                        pricing,
+                    ),
+                    6,
+                )
+            except TieredExprEvaluationError as e:
+                cost = None
+                cost_error = str(e)
 
         return {
             "umo": getattr(s, "umo", "") or "",
@@ -407,6 +422,7 @@ class WebApiMixin:
             "injection_total": getattr(s, "injection_total", None),
             "attribution": getattr(s, "attribution", None),
             "cost": cost,
+            "cost_error": cost_error,
             "cost_original": cost_original,
             "currency_symbol": currency_symbol,
             "created_at": _iso_utc(created),
@@ -865,7 +881,6 @@ class WebApiMixin:
         （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
         """
         try:
-
             by = self._param("by", "model") or "model"
             if by not in ("model", "provider", "umo"):
                 by = "model"
@@ -1699,32 +1714,16 @@ class WebApiMixin:
         return getattr(self, "_data_dir", None) or str(self.get_data_dir())
 
     def _provider_cfg_fn(self):
-        """构建 ``provider_id → provider 配置 dict`` 回调（供 New API 源解析 api_base/key）。
+        """构建 ``provider_id → 合并后的 provider 配置``回调（供 New API 源解析 api_base/key）。
 
-        provider 顶层无 ``api_base`` 时（4.25+ source 架构），用 ``provider_source_id``
-        从 ``provider_sources[]`` 条目回填 ``api_base``，供 derive_newapi_root 剥离 /v1。
+        委托 :func:`price_sources.merged_provider_config`：>=4.25.5 按
+        ``provider_source_id`` 用 ``provider_sources[]`` 条目回填 ``api_base`` / ``key``
+        （带 /v1 的 base 由 derive_newapi_root 统一剥离）；平铺旧结构原样返回。
         """
 
         def _get(pid: str) -> dict[str, Any] | None:
             try:
-                cfg = self.context.get_config() or {}
-                prov_list = cfg.get("provider") if isinstance(cfg, dict) else None
-                if not isinstance(prov_list, list):
-                    return None
-                for p in prov_list:
-                    if isinstance(p, dict) and str(p.get("id") or "").strip() == pid:
-                        if p.get("api_base"):
-                            return p
-                        source_list = cfg.get("provider_sources") if isinstance(cfg, dict) else None
-                        sid = str(p.get("provider_source_id") or "").strip()
-                        if isinstance(source_list, list) and sid:
-                            for s in source_list:
-                                if (
-                                    isinstance(s, dict)
-                                    and str(s.get("id") or "").strip() == sid
-                                ):
-                                    return {**p, "api_base": s.get("api_base")}
-                        return p
+                return merged_provider_config(self.context.get_config(), pid)
             except Exception:
                 pass
             return None
@@ -1780,6 +1779,7 @@ class WebApiMixin:
                 sources=sources,
                 provider_cfg=self._provider_cfg_fn(),
             )
+            self._invalidate_runtime_pricing("manual_price_sync")
             return self._ok(report)
         except Exception as e:
             return self._err(str(e))
@@ -1811,12 +1811,7 @@ class WebApiMixin:
 
             from quart import request
 
-            from .price_sources import (
-                _http_get,
-                derive_newapi_root,
-                is_http_url,
-                newapi_pricing_url,
-            )
+            from .price_sources import derive_newapi_root, http_get, is_http_url, newapi_pricing_url
 
             try:
                 body = await request.json
@@ -1846,7 +1841,7 @@ class WebApiMixin:
                     }
                 )
             url = newapi_pricing_url(root)
-            body_b, status, _h, err = await asyncio.to_thread(_http_get, url, {}, 8.0)
+            body_b, status, _h, err = await asyncio.to_thread(http_get, url, {}, 8.0)
             if err or status != 200 or body_b is None:
                 return self._ok(
                     {
@@ -1919,6 +1914,7 @@ class WebApiMixin:
             cfg["price_selections"] = sel
             save_plugin_config(self._pricing_data_dir(), cfg)
             self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            self._invalidate_runtime_pricing("price_selection_changed")
             _attach_selection_price(sel[pid][model], cat)
             return self._ok({"selected": sel[pid][model]})
         except Exception as e:
@@ -1957,6 +1953,7 @@ class WebApiMixin:
             cfg["price_selections"] = sel
             save_plugin_config(self._pricing_data_dir(), cfg)
             self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            self._invalidate_runtime_pricing("price_selection_reset")
             return self._ok({"removed": removed})
         except Exception as e:
             return self._err(str(e))
@@ -1975,8 +1972,8 @@ class WebApiMixin:
                 return self._err("缺少 expr")
             try:
                 from .expr_eval import eval_tiered_expr, validate_tiered_expr
-            except Exception:
-                return self._err("表达式引擎未就绪（P2 待实现）")
+            except Exception as e:
+                return self._err(f"表达式引擎导入失败：{type(e).__name__}: {e}")
             err = validate_tiered_expr(expr)
             if err:
                 return self._ok({"valid": False, "error": err, "samples": []})
@@ -2073,6 +2070,7 @@ class WebApiMixin:
                     data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
                     save_plugin_config(data_dir, next_cfg)
                     self.cfg = deep_merge(CONFIG_DEFAULTS, next_cfg)
+                    self._invalidate_runtime_pricing("provider_pricing_deleted")
                     pricing_deleted = True
 
             return self._ok(
@@ -2265,6 +2263,7 @@ class WebApiMixin:
                 return self._err(f"写入配置文件失败：{e}")
             # 2. 重建 self.cfg（热；merged 已含页面编辑值）
             self.cfg = deep_merge(CONFIG_DEFAULTS, merged)
+            self._invalidate_runtime_pricing("config_saved")
             # 3. 开关持久化到 <plugin>_config.json（self.config 仅含开关 → 无噪音）
             try:
                 self.config.save_config(switches_from_config(merged))
@@ -2303,6 +2302,7 @@ class WebApiMixin:
             cfg["exchange_rates"] = rates
             cfg["exchange_rates_updated_at"] = updated_at
             self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            self._invalidate_runtime_pricing("exchange_rates_synced")
             # 持久化到 config.json
             data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
             try:

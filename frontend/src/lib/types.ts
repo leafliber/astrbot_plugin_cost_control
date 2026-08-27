@@ -98,7 +98,8 @@ export interface RecordRow {
   cache_creation?: number;
   cache_read?: number;
   injection_total?: number | null;
-  cost?: number;
+  cost?: number | null;
+  cost_error?: string | null;
   cost_original?: number;
   currency_symbol?: string;
   created_at?: string;
