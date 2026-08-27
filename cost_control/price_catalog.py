@@ -31,6 +31,13 @@ CATALOG_VERSION = 1
 AUTO_APPLY_MIN_SCORE = 0.85
 CANDIDATE_MIN_SCORE = 0.55
 DEFAULT_LIMIT_PER_SOURCE = 8
+# 候选匹配缓存上限（超限整体清空重建，防止模型名维度无限增长）。
+_CANDIDATE_CACHE_MAX = 1024
+
+# 进程级目录缓存：data_dir → (mtime, size, PriceCatalog)。
+# 计费热路径每次 get_pricing 都会 load_catalog，读盘 + json 解析代价高；
+# 按 (mtime, size) 失效，save() 落盘后会主动刷新缓存戳。
+_catalog_cache: dict[str, tuple[float, int, PriceCatalog]] = {}
 
 
 @dataclass
@@ -139,10 +146,13 @@ class PriceCatalog:
     updated_at: str = ""
     sources: dict[str, SourceStatus] = field(default_factory=dict)
     prices: dict[str, CatalogPrice] = field(default_factory=dict)
-    # 候选匹配缓存：key=(model, frozenset(sources))；prices 变更时必须清空
-    _candidate_cache: dict[tuple[str, frozenset[str]], list[Candidate]] = field(
+    # 候选匹配缓存：key=(model, sources 集合或 None)；prices 变更时必须清空
+    _candidate_cache: dict[tuple[str, frozenset[str] | None], list[Candidate]] = field(
         default_factory=dict
     )
+    # price_key → to_dict() 扁平缓存：热路径（get_pricing）避免每次全量重建 dict
+    _flat_cache: dict[str, dict[str, Any]] | None = None
+
     # ---- 持久化 ----
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -186,6 +196,12 @@ class PriceCatalog:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2, default=str)
         os.replace(tmp, path)
+        # 落盘后刷新进程级缓存戳，避免同进程内 mtime 粒度不足导致读到旧目录。
+        try:
+            st = os.stat(path)
+            _catalog_cache[str(data_dir)] = (st.st_mtime, st.st_size, self)
+        except OSError:
+            _catalog_cache.pop(str(data_dir), None)
 
     # ---- 源状态维护 ----
     def upsert_source(self, status: SourceStatus) -> None:
@@ -195,12 +211,26 @@ class PriceCatalog:
         return self.sources.get(source)
 
     def replace_source_prices(self, source: str, prices: dict[str, CatalogPrice]) -> None:
-        """用一次同步结果整体替换某源的价格条目（其它源条目保持不变）。"""
+        """用一次同步结果整体替换某源的价格条目（其它源条目保持不变）。
+
+        无论入参 dict 用什么 key，条目一律按 ``price.price_key`` 归一存放，
+        与 :meth:`from_dict` / 进程级缓存实例保持一致口径。
+        """
         self.prices = {key: p for key, p in self.prices.items() if not _is_same_source(key, source)}
-        for key, price in prices.items():
-            self.prices[key] = price
+        for price in prices.values():
+            self.prices[price.price_key] = price
         self.updated_at = _now_iso()
         self._candidate_cache.clear()
+        self._flat_cache = None
+
+    def flat_prices(self) -> dict[str, dict[str, Any]]:
+        """``price_key → price.to_dict()`` 扁平视图（带缓存，prices 变更时失效）。
+
+        计费热路径（``get_pricing``）使用，避免每次调用全量重建 dict。
+        """
+        if self._flat_cache is None:
+            self._flat_cache = {key: p.to_dict() for key, p in self.prices.items()}
+        return self._flat_cache
 
     def prices_for_source(self, source: str) -> dict[str, CatalogPrice]:
         return {key: p for key, p in self.prices.items() if _is_same_source(key, source)}
@@ -227,7 +257,8 @@ class PriceCatalog:
         if not target_norm:
             return []
 
-        cache_key = (target_raw, frozenset(sources) if sources else frozenset())
+        # None = 不过滤（全部源）；空集 = 全部禁用。两者语义不同，不能归并同一缓存键。
+        cache_key = (target_raw, frozenset(sources) if sources is not None else None)
         cached = self._candidate_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -260,6 +291,8 @@ class PriceCatalog:
             cands.sort(key=_candidate_sort_key, reverse=True)
             result.extend(cands[:limit_per_source])
         result.sort(key=_candidate_sort_key, reverse=True)
+        if len(self._candidate_cache) >= _CANDIDATE_CACHE_MAX:
+            self._candidate_cache.clear()
         self._candidate_cache[cache_key] = result
         return result
 
@@ -273,14 +306,26 @@ def select_auto_candidate(candidates: list[Candidate]) -> Candidate | None:
 
 
 def load_catalog(data_dir: str) -> PriceCatalog:
-    """加载价格目录；文件不存在返回空目录，JSON 损坏则备份后返回空目录。"""
+    """加载价格目录（按 mtime+size 进程级缓存）；文件不存在返回空目录，损坏则备份。
+
+    返回**共享实例**：调用方对目录的修改（``replace_source_prices`` 等）对同进程
+    后续 ``load_catalog`` 可见；跨进程写盘由 (mtime, size) 变化检测。热路径
+    （预算检查 / 补充采集 / 聚合）因此不再每次读盘 + 全量 json 解析。
+    """
     path = _catalog_path(data_dir)
-    if not os.path.exists(path):
+    try:
+        st = os.stat(path)
+        stamp = (float(st.st_mtime), int(st.st_size))
+    except OSError:
+        _catalog_cache.pop(str(data_dir), None)
         return PriceCatalog()
+    cached = _catalog_cache.get(str(data_dir))
+    if cached is not None and (cached[0], cached[1]) == stamp:
+        return cached[2]
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return PriceCatalog.from_dict(data)
+        catalog = PriceCatalog.from_dict(data)
     except Exception:
         # 损坏不阻断：备份原文件，回退空目录（计费仍可用 DEFAULT_PRICING）。
         try:
@@ -288,7 +333,9 @@ def load_catalog(data_dir: str) -> PriceCatalog:
             shutil.copy2(path, backup)
         except Exception:
             pass
-        return PriceCatalog()
+        catalog = PriceCatalog()
+    _catalog_cache[str(data_dir)] = (stamp[0], stamp[1], catalog)
+    return catalog
 
 
 # ---- 内部工具 ----

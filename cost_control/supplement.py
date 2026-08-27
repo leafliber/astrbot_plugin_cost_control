@@ -249,6 +249,8 @@ class SupplementMixin:
             "cache_creation_1h": cc1h,
             "billing_context": billing_context,
             "created_at": created,
+            # 显式请求 _cost_tiered_expr 回填命中阶梯名（该函数不污染未请求的入参 dict）
+            "_capture_matched_tier": True,
         }
         try:
             raw_cost, cur = compute_cost_with_currency(

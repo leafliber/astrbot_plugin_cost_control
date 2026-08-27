@@ -225,3 +225,54 @@ def test_from_dict_skips_malformed_entries():
     }
     cat = PriceCatalog.from_dict(data)
     assert list(cat.prices.keys()) == ["modelsdev:ok"]
+
+
+# ===== 审计修复回归 =====
+
+
+def test_load_catalog_process_cache_by_mtime(tmp_path):
+    """load_catalog 按 (mtime,size) 进程级缓存：文件未变复用实例，变了重建。"""
+    from cost_control.price_catalog import load_catalog
+
+    cat = PriceCatalog()
+    p = CatalogPrice(source="modelsdev", source_model_id="m", prompt=1.0)
+    cat.replace_source_prices("modelsdev", {p.price_key: p})
+    cat.save(str(tmp_path))
+
+    first = load_catalog(str(tmp_path))
+    assert first is cat  # save 落盘后主动刷新缓存戳，直接复用共享实例
+    second = load_catalog(str(tmp_path))
+    assert second is first
+
+    # 落盘变更（size 变化）→ 重新解析
+    other = PriceCatalog()
+    q = CatalogPrice(source="litellm", source_model_id="n", prompt=2.0)
+    other.replace_source_prices("litellm", {q.price_key: q})
+    import time
+
+    time.sleep(0.01)
+    other.save(str(tmp_path))
+    third = load_catalog(str(tmp_path))
+    assert third is not first
+    assert "modelsdev:m" not in third.prices
+
+
+def test_find_candidates_cache_separates_none_and_empty_sources():
+    """sources=None（不过滤）与空集（全禁用）语义不同，不得共享缓存条目。"""
+    p = CatalogPrice(source="modelsdev", source_model_id="m", prompt=1.0)
+    cat = _catalog_with(p)
+    assert cat.find_candidates("m", sources=None) != []
+    assert cat.find_candidates("m", sources=set()) == []
+    # 再次调用命中各自的缓存条目（而非相互污染）
+    assert cat.find_candidates("m", sources=None) != []
+    assert cat.find_candidates("m", sources=set()) == []
+
+
+def test_flat_prices_cache_invalidated_on_replace():
+    p = CatalogPrice(source="modelsdev", source_model_id="m", prompt=1.0)
+    cat = _catalog_with(p)
+    flat = cat.flat_prices()
+    assert flat["modelsdev:m"]["prompt"] == pytest.approx(1.0)
+    q = CatalogPrice(source="modelsdev", source_model_id="m", prompt=3.0)
+    cat.replace_source_prices("modelsdev", {q.price_key: q})
+    assert cat.flat_prices()["modelsdev:m"]["prompt"] == pytest.approx(3.0)

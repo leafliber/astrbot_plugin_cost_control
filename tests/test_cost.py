@@ -1,5 +1,9 @@
 """成本计算单测：定价匹配、三种计费模式、provider_id 优先级（纯函数）。"""
 
+from __future__ import annotations
+
+import pytest
+
 from cost_control.config import DEFAULT_PRICING
 from cost_control.cost import (
     compute_cost_grouped,
@@ -458,10 +462,15 @@ def test_per_tier_row_aggregate():
 
 def test_tiered_expr_computation_and_tier_backfill():
     user = {"prov": {"mode": "tiered_expr", "expr": 'tier("std", p*1.5 + c*7.5)'}}
-    usage = {"token_input_other": 100000, "token_output": 5000}
+    # _matched_tier 仅在调用方显式请求时回填（不污染外来 dict，如聚合行）
+    usage = {"token_input_other": 100000, "token_output": 5000, "_capture_matched_tier": True}
     cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
     assert abs(cost - (100000 * 1.5 + 5000 * 7.5) / 1e6) < 1e-12
     assert usage["_matched_tier"] == "std"
+    # 未请求回填的 usage dict 不被写入
+    plain = {"token_input_other": 100000, "token_output": 5000}
+    compute_cost_value(plain, "prov", "m", pricing_full(user))
+    assert "_matched_tier" not in plain
 
 
 def test_tiered_expr_invalid_returns_zero():
@@ -536,3 +545,87 @@ def test_disabled_source_does_not_auto_apply_but_confirmed_selection_still_appli
     rule = resolve_pricing("prov", "private-model", pricing)
     assert rule is not None
     assert rule["input"] == 3.0
+
+
+# ===== 审计修复回归 =====
+
+
+def test_cluster_multiplier_applies_to_per_tier():
+    """聚类倍率须作用于 per_tier 的 base 与 context_tiers（命中层级统一套用）。"""
+    user = {
+        "prov": {
+            "mode": "per_tier",
+            "base": {"input": 2.0, "output": 4.0},
+            "context_tiers": [{"threshold_tokens": 1000, "input": 1.0}],
+        }
+    }
+    pricing = pricing_struct(user, multipliers={"c1": 2.0}, provider_clusters={"prov": "c1"})
+    rule = resolve_pricing("prov", "m", pricing)
+    assert rule["base"]["input"] == pytest.approx(4.0)
+    assert rule["base"]["output"] == pytest.approx(8.0)
+    assert rule["context_tiers"][0]["input"] == pytest.approx(2.0)
+
+
+def test_cluster_multiplier_applies_to_tiered_expr():
+    """聚类倍率须作用于 tiered_expr 的表达式输出整体。"""
+    user = {"prov": {"mode": "tiered_expr", "expr": "p * 2"}}
+    pricing = pricing_struct(user, multipliers={"c1": 2.0}, provider_clusters={"prov": "c1"})
+    usage = {"token_input_other": 1_000_000}
+    assert compute_cost_value(usage, "prov", "m", pricing) == pytest.approx(4.0)
+
+
+def test_auto_candidate_after_legacy_manual_price():
+    """未确认的自动候选不得覆盖存量 provider 级手工价；确认选择仍优先。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    price = CatalogPrice(source="modelsdev", source_model_id="m", prompt=10.0, completion=20.0)
+    cat = PriceCatalog()
+    cat.prices[price.price_key] = price
+    user = {"prov": {"mode": "per_token", "input": 1.0, "output": 1.0}}
+
+    pricing = pricing_full(user)
+    pricing["catalog"] = cat.flat_prices()
+    pricing["catalog_obj"] = cat
+    rule = resolve_pricing("prov", "m", pricing)
+    assert rule is not None and rule["input"] == pytest.approx(1.0)  # legacy 手工价胜出
+
+    pricing2 = pricing_full(user)
+    pricing2["catalog"] = cat.flat_prices()
+    pricing2["catalog_obj"] = cat
+    pricing2["selections"] = {"prov": {"m": {"price_key": price.price_key}}}
+    rule2 = resolve_pricing("prov", "m", pricing2)
+    assert rule2 is not None and rule2["input"] == pytest.approx(10.0)  # 确认选择最优先
+
+
+def test_auto_candidate_applies_when_no_manual_price():
+    """无手工价时自动候选（唯一高置信）仍生效。"""
+    from cost_control.price_catalog import CatalogPrice, PriceCatalog
+
+    price = CatalogPrice(source="modelsdev", source_model_id="m", prompt=10.0, completion=20.0)
+    cat = PriceCatalog()
+    cat.prices[price.price_key] = price
+    pricing = pricing_full({})
+    pricing["catalog"] = cat.flat_prices()
+    pricing["catalog_obj"] = cat
+    rule = resolve_pricing("prov", "m", pricing)
+    assert rule is not None and rule["input"] == pytest.approx(10.0)
+
+
+def test_tiered_expr_no_cc1h_double_billing():
+    """cc1h 是 cc 的子集，表达式 cc*x + cc1h*y 不得重复计费。"""
+    user = {"prov": {"mode": "tiered_expr", "expr": "cc * 1.25 + cc1h * 2"}}
+    usage = {"token_input_other": 0, "cache_creation": 1000, "cache_creation_1h": 1000}
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert cost == pytest.approx(1000 * 2 / 1e6)
+
+
+def test_tiered_expr_derives_cc1h_from_billing_context():
+    """DB 聚合路径不单列 cc1h：按 billing_context.cache_ttl_1h 从 cc 拆出。"""
+    user = {"prov": {"mode": "tiered_expr", "expr": "cc * 1.25 + cc1h * 2"}}
+    usage = {
+        "token_input_other": 0,
+        "cache_creation": 1000,
+        "billing_context": {"cache_ttl_1h": True},
+    }
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert cost == pytest.approx(1000 * 2 / 1e6)

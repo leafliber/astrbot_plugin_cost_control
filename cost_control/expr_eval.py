@@ -306,12 +306,31 @@ def _parse_tz(tz: Any) -> timezone:
 
 
 def _context_dt(context: dict[str, Any], tz: Any) -> datetime:
-    """从 context.created_at（epoch 秒）构造指定时区 datetime；缺失/异常回退当前 UTC。"""
+    """从 context.created_at 构造指定时区 datetime；缺失/异常回退当前 UTC。
+
+    ``created_at`` 接受三种形态：epoch 秒（float/int）、ISO 字符串、``datetime``
+    对象（生产调用方 supplement/store 传入）。datetime 缺 tzinfo 时按 UTC 解释
+    （库表 created_at 统一以 UTC 写入）。
+    """
+    raw = context.get("created_at")
+    tzinfo = _parse_tz(tz)
+    if isinstance(raw, datetime):
+        aware = raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+        try:
+            return aware.astimezone(tzinfo)
+        except Exception:
+            return datetime.now(tzinfo)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            aware = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+            return aware.astimezone(tzinfo)
+        except Exception:
+            return datetime.now(tzinfo)
     try:
-        ts = float(context.get("created_at") or 0)
+        ts = float(raw or 0)
     except Exception:
         ts = 0.0
-    tzinfo = _parse_tz(tz)
     if ts <= 0:
         return datetime.now(tzinfo)
     try:

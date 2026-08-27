@@ -199,3 +199,26 @@ def test_len_variable_no_builtin_clash():
     # len 是变量不是内置函数，可参与运算
     val, _ = ee.eval_tiered_expr("len * 2", {"len": 100, "p": 0})
     assert val == pytest.approx(200)
+
+
+def test_time_funcs_accept_datetime_created_at():
+    """生产调用方（supplement/store）传 datetime 对象：按请求时刻计价而非求值时刻。"""
+    from datetime import UTC, datetime
+
+    dt = datetime.fromtimestamp(1_700_000_000.0, tz=UTC)  # 2023-11-14 UTC
+    month, _ = ee.eval_tiered_expr("month()", {"p": 0}, {"created_at": dt})
+    assert month == 11
+    day, _ = ee.eval_tiered_expr("day()", {"p": 0}, {"created_at": dt})
+    assert day == 14
+    # naive datetime 按 UTC 解释（库表 created_at 统一以 UTC 写入）
+    naive = datetime(2023, 11, 14, 22, 13, 20)
+    m2, _ = ee.eval_tiered_expr("month()", {"p": 0}, {"created_at": naive})
+    assert m2 == 11
+    # 时区换算：+08:00 下已是 11-15
+    tz_day, _ = ee.eval_tiered_expr('day("+08:00")', {"p": 0}, {"created_at": dt})
+    assert tz_day == 15
+
+
+def test_time_funcs_accept_iso_string_created_at():
+    val, _ = ee.eval_tiered_expr("month()", {"p": 0}, {"created_at": "2023-11-14T22:13:20Z"})
+    assert val == 11
