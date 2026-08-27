@@ -402,12 +402,23 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       setSyncing(false);
     }
   };
+  // 串行化整段配置写：getConfig→改→POST 的读改写没有并发保护，快速连点两个
+  // 源开关时后写会用旧快照覆盖先写。所有整段写 config 的操作排队执行。
+  const configWriteChain = useRef<Promise<unknown>>(Promise.resolve());
+  const enqueueConfigWrite = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const next = configWriteChain.current.then(fn, fn);
+    configWriteChain.current = next.catch(() => {});
+    return next;
+  };
+
   const toggleAutoSync = async (enabled: boolean) => {
     try {
-      const cfg = await api.getConfig();
-      const priceSync = { ...((cfg.price_sync as Record<string, unknown>) ?? {}) };
-      priceSync.auto_enabled = enabled;
-      await api.postSaveConfig({ price_sync: priceSync });
+      await enqueueConfigWrite(async () => {
+        const cfg = await api.getConfig();
+        const priceSync = { ...((cfg.price_sync as Record<string, unknown>) ?? {}) };
+        priceSync.auto_enabled = enabled;
+        await api.postSaveConfig({ price_sync: priceSync });
+      });
       setAutoSync(enabled);
       setSyncMsg(enabled ? "已启用每日自动同步" : "已关闭每日自动同步");
     } catch (e) {
@@ -417,16 +428,18 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   // 源开关：读最新 config → 改 price_sources → 保存 → 启用时立即拉该源
   const toggleSource = async (sourceId: string, enabled: boolean) => {
     try {
-      const cfg = await api.getConfig();
-      const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
-      const entry = { ...((ps[sourceId] as Record<string, unknown>) ?? {}) };
-      entry.enabled = enabled;
-      if (sourceId.startsWith("newapi:") && !entry.provider_id) {
-        entry.provider_id = sourceId.slice(7);
-        entry.use_provider_key = true;
-      }
-      ps[sourceId] = entry;
-      await api.postSaveConfig({ price_sources: ps });
+      await enqueueConfigWrite(async () => {
+        const cfg = await api.getConfig();
+        const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
+        const entry = { ...((ps[sourceId] as Record<string, unknown>) ?? {}) };
+        entry.enabled = enabled;
+        if (sourceId.startsWith("newapi:") && !entry.provider_id) {
+          entry.provider_id = sourceId.slice(7);
+          entry.use_provider_key = true;
+        }
+        ps[sourceId] = entry;
+        await api.postSaveConfig({ price_sources: ps });
+      });
       if (enabled) {
         await doSync([sourceId]);
       } else {
@@ -446,24 +459,26 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
         setSyncMsg(`❌ ${pid} 未检测到 New API /api/pricing 接口`);
         return;
       }
-      const cfg = await api.getConfig();
-      const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
-      // URL 去重：同 base_url 只建一个源；首次以 provider 短名作默认名，可后续重命名
-      const sid = det.existing_source || `newapi:${shortName(pid)}`;
-      ps[sid] = {
-        ...(ps[sid] as Record<string, unknown> | undefined),
-        enabled: true,
-        provider_id: (ps[sid] as { provider_id?: string } | undefined)?.provider_id ?? pid,
-        base_url: det.base_url ?? "",
-        use_provider_key: true,
-      };
-      await api.postSaveConfig({ price_sources: ps });
-      setSyncMsg(
-        det.existing_source
-          ? `✅ ${pid} 复用已有源 ${sid}，正在拉取价格…`
-          : `✅ ${sid} 已启用为 New API 源，正在拉取价格…`,
-      );
-      await doSync([sid]);
+      await enqueueConfigWrite(async () => {
+        const cfg = await api.getConfig();
+        const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
+        // URL 去重：同 base_url 只建一个源；首次以 provider 短名作默认名，可后续重命名
+        const sid = det.existing_source || `newapi:${shortName(pid)}`;
+        ps[sid] = {
+          ...(ps[sid] as Record<string, unknown> | undefined),
+          enabled: true,
+          provider_id: (ps[sid] as { provider_id?: string } | undefined)?.provider_id ?? pid,
+          base_url: det.base_url ?? "",
+          use_provider_key: true,
+        };
+        await api.postSaveConfig({ price_sources: ps });
+        setSyncMsg(
+          det.existing_source
+            ? `✅ ${pid} 复用已有源 ${sid}，正在拉取价格…`
+            : `✅ ${sid} 已启用为 New API 源，正在拉取价格…`,
+        );
+        await doSync([sid]);
+      });
     } catch (e) {
       setSyncMsg(`❌ 探测失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {

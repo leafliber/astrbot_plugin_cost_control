@@ -362,6 +362,14 @@ export function ProviderPricingCard({
   const [deleteError, setDeleteError] = useState("");
   const deleteArmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // 卸载时清理删除确认的解除定时器，避免对已卸载组件 setState
+  useEffect(
+    () => () => {
+      if (deleteArmTimer.current) clearTimeout(deleteArmTimer.current);
+    },
+    [],
+  );
+
   // 外部跳转信号 → 滚动到视图 + 触发脉冲动画
   useEffect(() => {
     if (highlightSignal && highlightSignal > 0 && cardRef.current) {
@@ -390,32 +398,10 @@ export function ProviderPricingCard({
     return dv != null ? String(dv) : "";
   };
 
+  // 各计费模式字段互不重叠（per_turn/per_request 共用 price），切换只改 mode：
+  // 保留其它模式的草稿，切回时不丢失已填内容。
   const setMode = (mode: PricingMode) => {
-    if (mode === "per_token" || mode === "per_tier") {
-      onChange({ mode, price: "", expr: "" });
-    } else if (mode === "tiered_expr") {
-      onChange({
-        mode,
-        input: "",
-        input_cached: "",
-        output: "",
-        cache_creation: "",
-        price: "",
-        contextTiers: [],
-        serviceTiers: [],
-      });
-    } else {
-      onChange({
-        mode,
-        input: "",
-        input_cached: "",
-        output: "",
-        cache_creation: "",
-        expr: "",
-        contextTiers: [],
-        serviceTiers: [],
-      });
-    }
+    onChange({ mode });
   };
 
   const sourceModels = Array.from(
@@ -732,9 +718,7 @@ export function ProviderPricingCard({
           {draft.mode === "tiered_expr" ? (
             <TieredExprEditor
               expr={draft.expr}
-              lockedSource=""
               onChange={(expr) => onChange({ expr })}
-              onUnlock={() => {}}
             />
           ) : (
             <div className={`pricing-fields pf-${draft.mode}`}>

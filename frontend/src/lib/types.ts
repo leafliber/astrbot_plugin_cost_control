@@ -329,8 +329,6 @@ export interface TieredExprEntry {
   mode: "tiered_expr";
   currency?: string;
   expr: string;
-  // 来自 New API 候选时只读锁定（8.6），可解锁编辑
-  locked_source?: string;
 }
 
 export type UserPricingEntry =

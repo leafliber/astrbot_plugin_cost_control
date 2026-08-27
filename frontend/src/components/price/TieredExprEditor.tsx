@@ -4,7 +4,8 @@ import type { ExprValidateResult } from "../../lib/types";
 import { Button } from "../Button";
 
 // New API 兼容表达式编辑器（F3 tiered_expr）：
-// 多行输入 + 变量说明 + 后端验证 + 示例试算预览；来自 New API 候选时只读，可解锁。
+// 多行输入 + 变量说明 + 后端验证 + 示例试算预览。
+// 源候选价不经草稿（服务端 selections 生效），此处编辑的始终是用户手工表达式。
 
 const VAR_LEGEND: { name: string; desc: string }[] = [
   { name: "p", desc: "非缓存输入 token" },
@@ -19,18 +20,13 @@ const VAR_LEGEND: { name: string; desc: string }[] = [
 
 export function TieredExprEditor({
   expr,
-  lockedSource,
   onChange,
-  onUnlock,
 }: {
   expr: string;
-  lockedSource: string; // 非空 = 来自该 New API 源，只读
   onChange: (expr: string) => void;
-  onUnlock: () => void;
 }) {
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<ExprValidateResult | null>(null);
-  const locked = !!lockedSource;
 
   const validate = async () => {
     setChecking(true);
@@ -49,21 +45,10 @@ export function TieredExprEditor({
 
   return (
     <div className="expr-editor">
-      {locked && (
-        <div className="expr-locked-bar">
-          <span className="pricing-badge pricing-badge--blue">
-            来自 {lockedSource}，只读
-          </span>
-          <button type="button" className="btn" onClick={onUnlock}>
-            解锁编辑
-          </button>
-        </div>
-      )}
       <textarea
         className="budget-input expr-input"
         rows={4}
         value={expr}
-        readOnly={locked}
         placeholder={
           'p <= 200000 ? tier("standard", p * 1.5 + c * 7.5) : tier("long_context", p * 3.0 + c * 11.25)'
         }
@@ -80,21 +65,19 @@ export function TieredExprEditor({
           </span>
         ))}
       </div>
-      {!locked && (
-        <div className="row" style={{ gap: 8, alignItems: "center" }}>
-          <Button onClick={validate} disabled={checking || !expr.trim()}>
-            {checking ? "验证中…" : "验证并试算"}
-          </Button>
-          {result &&
-            (result.valid ? (
-              <span className="pricing-badge pricing-badge--blue">✓ 表达式有效</span>
-            ) : (
-              <span className="pricing-badge pricing-badge--red">
-                ✗ {result.error || "无效"}
-              </span>
-            ))}
-        </div>
-      )}
+      <div className="row" style={{ gap: 8, alignItems: "center" }}>
+        <Button onClick={validate} disabled={checking || !expr.trim()}>
+          {checking ? "验证中…" : "验证并试算"}
+        </Button>
+        {result &&
+          (result.valid ? (
+            <span className="pricing-badge pricing-badge--blue">✓ 表达式有效</span>
+          ) : (
+            <span className="pricing-badge pricing-badge--red">
+              ✗ {result.error || "无效"}
+            </span>
+          ))}
+      </div>
       {result?.valid && (result.samples?.length ?? 0) > 0 && (
         <div className="muted small expr-samples">
           试算：

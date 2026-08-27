@@ -2679,13 +2679,6 @@ tr:hover td {
   line-height: 1.45;
 }
 
- .expr-locked-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
  .expr-legend,
  .expr-samples {
   display: flex;
