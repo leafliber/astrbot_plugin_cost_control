@@ -11,8 +11,6 @@
 - **本地优先**：汇率存在插件 ``config.json``（由 ``config.py`` 持久化），
   仅在用户于设置页点「立即同步」时联网刷新；无网时用内置静态表兜底，不阻断。
 - **纯函数换算**：:func:`convert` 不依赖任何 IO，便于单测。
-
-阶段一实现。
 """
 
 from __future__ import annotations

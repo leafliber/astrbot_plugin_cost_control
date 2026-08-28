@@ -6,8 +6,6 @@
 可测性设计：窗口边界计算抽成模块级纯函数 ``report_window_start``（不依赖
 astrbot / DB，可单测）；DB 查询在 ``AnalyticsMixin.build_report`` 内复用
 ``UsageQueryMixin`` / ``StoreMixin`` 的方法。
-
-阶段 4 实现。
 """
 
 from __future__ import annotations

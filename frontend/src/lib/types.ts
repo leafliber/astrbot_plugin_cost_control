@@ -98,7 +98,8 @@ export interface RecordRow {
   cache_creation?: number;
   cache_read?: number;
   injection_total?: number | null;
-  cost?: number;
+  cost?: number | null;
+  cost_error?: string | null;
   cost_original?: number;
   currency_symbol?: string;
   created_at?: string;
@@ -269,14 +270,19 @@ export interface PriceEntry {
   cache_creation?: number;
 }
 
-export type PricingMode = "per_token" | "per_turn" | "per_request";
+export type PricingMode =
+  | "per_token"
+  | "per_turn"
+  | "per_request"
+  | "per_tier"
+  | "tiered_expr";
 
 // 用户自定义定价 entry（key=provider_id），按 mode 区分字段
 export interface PerTokenEntry {
   mode: "per_token";
-  input: number;
-  input_cached: number;
-  output: number;
+  input?: number | null;
+  input_cached?: number | null;
+  output?: number | null;
   cache_creation?: number | null;
   currency?: string;
 }
@@ -290,8 +296,50 @@ export interface PerRequestEntry {
   price: number;
   currency?: string;
 }
-export type UserPricingEntry = PerTokenEntry | PerTurnEntry | PerRequestEntry;
 
+// 结构化阶梯价：base + 可选 context_tier / service_tier（F3）
+export interface ContextTierRule {
+  threshold_tokens: number;
+  input?: number | null;
+  input_cached?: number | null;
+  output?: number | null;
+  cache_creation?: number | null;
+}
+export interface ServiceTierRule {
+  match: string; // 匹配的 service_tier 值，如 priority / flex
+  input_multiplier?: number;
+  input_cached_multiplier?: number;
+  output_multiplier?: number;
+  cache_creation_multiplier?: number;
+}
+export interface PerTierEntry {
+  mode: "per_tier";
+  currency?: string;
+  base: {
+    input?: number | null;
+    input_cached?: number | null;
+    output?: number | null;
+    cache_creation?: number | null;
+  };
+  context_tiers: ContextTierRule[];
+  service_tiers: ServiceTierRule[];
+}
+
+// New API 兼容表达式动态计费（F3）
+export interface TieredExprEntry {
+  mode: "tiered_expr";
+  currency?: string;
+  expr: string;
+  // 来自 New API 候选时只读锁定（8.6），可解锁编辑
+  locked_source?: string;
+}
+
+export type UserPricingEntry =
+  | PerTokenEntry
+  | PerTurnEntry
+  | PerRequestEntry
+  | PerTierEntry
+  | TieredExprEntry;
 // provider 实际匹配到的内置默认（主模型经 _best_match_key 模糊匹配，与后端计费同口径）
 export interface MatchedDefault {
   model: string;
@@ -309,13 +357,7 @@ export interface ProviderModelInfo {
   matched_default?: MatchedDefault | null;
 }
 
-export interface PricingUnpriced {
-  provider_id?: string;
-  model: string;
-  tokens: number;
-  count: number;
-}
-
+// 已从 AstrBot 配置删除、但仍有历史用量或自定义定价的 Provider 残留
 export interface DeletedProviderInfo {
   provider_id: string;
   tokens: number;
@@ -325,10 +367,137 @@ export interface DeletedProviderInfo {
   matched_default?: MatchedDefault | null;
 }
 
+// 按 provider_source_id 聚类的供应商目录（上游聚类布局）
 export interface PricingCluster {
   id: string;
   name: string;
   provider_ids: string[];
+}
+
+// POST /actions/delete_provider_data 结果
+export interface DeleteProviderDataResult {
+  provider_id: string;
+  usage_deleted: number;
+  supplements_deleted: number;
+  pricing_deleted: boolean;
+}
+
+export interface PricingUnpriced {
+  provider_id?: string;
+  model: string;
+  tokens: number;
+  count: number;
+}
+
+// ===== 多源价格目录（F1/F2）=====
+
+// 目录中一条标准化价格（$ / 1M tokens，或 per_turn 时 $ / 次）
+export interface CatalogPrice {
+  source: string;
+  source_model_id: string;
+  mode: PricingMode;
+  prompt?: number | null;
+  completion?: number | null;
+  cache?: number | null;
+  cache_read?: number | null;
+  cache_creation?: number | null;
+  price?: number | null;
+  configured?: Record<string, boolean>;
+  context_tiers?: Record<string, unknown>[];
+  service_tiers?: Record<string, unknown>[];
+  expr?: string | null;
+  fetched_at?: string;
+}
+
+// 单个源的同步状态
+export interface SourceStatus {
+  source: string;
+  enabled: boolean;
+  status: "ok" | "error" | "pending";
+  updated_at?: string;
+  models: number;
+  skipped?: number;
+  error?: string;
+  etag?: string;
+  provider_id?: string | null;
+  base_url?: string | null;
+}
+
+// 候选条目（后端 _candidate_brief 的紧凑形状）
+export interface CandidateBrief {
+  price_key: string;
+  source: string;
+  source_model_id: string;
+  score: number;
+  reason: string;
+  mode: PricingMode;
+  prompt?: number | null;
+  completion?: number | null;
+  cache_read?: number | null;
+  cache_creation?: number | null;
+  price?: number | null;
+  context_tiers: number; // tier 数量（brief 只给计数）
+  service_tiers: number;
+  expr?: string;
+}
+
+// 用户对某 (provider, model) 的已确认/自动选择
+export interface PriceSelection {
+  price_key: string;
+  source: string;
+  source_model_id: string;
+  confirmed: boolean;
+  auto: boolean;
+  score: number;
+  reason: string;
+  /** 生效价格摘要（后端从 catalog 附带），供输入框回显 */
+  price?: {
+    input: number | null;
+    input_cached: number | null;
+    output: number | null;
+    cache_creation: number | null;
+  };
+}
+
+// POST /pricing/sync 报告
+export interface SyncSourceResult {
+  source: string;
+  status: "ok" | "error";
+  models: number;
+  skipped: number;
+  error?: string;
+  not_modified: boolean;
+}
+
+export interface SyncReport {
+  ok: boolean;
+  updated_at?: string;
+  results: SyncSourceResult[];
+}
+
+// POST /pricing/sources/detect 结果
+export interface DetectResult {
+  provider_id: string;
+  base_url: string;
+  is_newapi: boolean;
+  models: number;
+  needs_key: boolean;
+  error?: string;
+  /** 同 base_url 已有的源 id（URL 去重判据），前端直接复用 */
+  existing_source?: string | null;
+}
+
+// POST /pricing/expr/validate 结果
+export interface ExprSample {
+  p: number;
+  c: number;
+  usd: number;
+  tier: string;
+}
+export interface ExprValidateResult {
+  valid: boolean;
+  error?: string;
+  samples?: ExprSample[];
 }
 
 export interface PricingResponse {
@@ -342,13 +511,11 @@ export interface PricingResponse {
   currency_symbol?: string;
   exchange_rates?: Record<string, number>;
   exchange_rates_updated_at?: string;
-}
-
-export interface DeleteProviderDataResult {
-  provider_id: string;
-  usage_deleted: number;
-  supplements_deleted: number;
-  pricing_deleted: boolean;
+  // 多源目录（F1/F2）
+  sources?: Record<string, SourceStatus>;
+  selections?: Record<string, Record<string, PriceSelection>>;
+  candidates?: Record<string, Record<string, CandidateBrief[]>>;
+  auto_selected?: Record<string, Record<string, string>>; // model → price_key
 }
 
 // ===== AI 诊断 =====

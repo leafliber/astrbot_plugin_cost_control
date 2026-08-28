@@ -4,17 +4,21 @@
 ``{"defaults", "user", "multipliers"}``，运行时再附加 ``provider_clusters``）把
 token 用量 / 调用次数 / 请求数换算为 USD 成本。
 
-支持三种计费模式（``mode``）：
-
+支持五种计费模式（``mode``）：
 - ``per_token``：按 input / input_cached / output（+cache_creation）token 计费，
   USD / 百万 token。内置 ``DEFAULT_PRICING`` 即此模式（按模型名匹配）。
 - ``per_turn``：每次 LLM 调用（每条 ProviderStat / CostSupplement 记录）固定 USD/次，
   仅计 LLM 调用次数（不含非 LLM tool 执行）。
 - ``per_request``：每次用户请求固定 USD/次；一次请求可能含多次 function-calling LLM
   调用，按 distinct ``request_id`` 计数。
+- ``per_tier``：基础价 + context tier（按上下文长度阶梯覆盖）+ service tier（倍率）。
+- ``tiered_expr``：New API 兼容表达式动态计费（:mod:`cost_control.expr_eval`）。
 
-匹配优先级（:func:`resolve_pricing`）：用户定价按 ``provider_id`` 命中 → 内置默认按
-模型名匹配（per_token）→ 未定价（成本 0）。
+匹配优先级（:func:`resolve_pricing`）：模型级手工价 ``provider_id|model`` → 用户确认/
+保存过的候选选择（price_catalog）→ 旧 provider 级手工价（模糊）→ 自动匹配的唯一
+高置信候选（低于一切手工价）→ 内置默认按模型名匹配（per_token）→ 未定价（成本 0）。
+目录导入的 ``tiered_expr`` 规则在转换前先过本地求值器预检，静态非法者被禁用并
+回落到后续优先级，避免静默零成本。
 
 核心计算逻辑抽成模块级纯函数（``resolve_pricing`` / ``compute_cost_value``），便于
 单元测试；``CostMixin`` 仅做配置读取与委托。
@@ -26,11 +30,19 @@ token 用量 / 调用次数 / 请求数换算为 USD 成本。
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
-from .config import get_pricing
+from .config import get_enabled_price_sources, get_pricing
+
+# 生产环境经 root logger 汇入 astrbot/loguru；测试经 caplog 可捕获。
+logger = logging.getLogger("cost_control.cost")
+
+
+class TieredExprEvaluationError(ValueError):
+    """tiered_expr 无法可靠求值；调用方不得把它当作零成本。"""
 
 
 @lru_cache(maxsize=4096)
@@ -117,41 +129,61 @@ def match_pricing(
     return pricing[key] if key is not None else None
 
 
+_PER_TOKEN_FIELDS: tuple[str, ...] = ("input", "input_cached", "output", "cache_creation")
+
+
 def resolve_pricing(
     provider_id: str | None,
     model: str | None,
     pricing: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """解析生效的计费规则（优先级：provider_id 用户定价 > 模型名默认 > 未定价）。
+    """解析生效的计费规则（六级优先级，见模块 docstring）。
 
-    **provider_id 模糊匹配**：用户定价 dict 的 key 不必与 provider_id 精确相等，
-    走 :func:`_best_match_key` 三级算法（精确 > 前缀 > 子串，最长优先）——
-    故用户把 ``deepseek`` 配为 key 即可命中实际 provider_id
-    ``deepseek-official-01``（子串）；最长优先保证 ``gpt-4`` 优先于 ``gpt``
-    命中 ``gpt-4o-mini``。仅做「key 是 provider_id 的子串 / 前缀」方向匹配。
+    1. 模型级手工价 ``user["provider_id|model"]``（精确，不参与模糊匹配）。
+    2. 持久化的价格选择（``selections`` → ``catalog``，用户在定价页确认过）。
+    3. 旧 provider 级手工价 ``user[provider_id]`` 模糊匹配（精确 > 前缀 > 子串，最长优先）。
+    4. 自动匹配的目录候选（唯一高置信、不落盘；低于一切手工价）。
+    5. 内置默认表按模型名匹配（per_token）。
+    6. 未定价 → None（成本 0）。
 
-    Args:
-        provider_id: Provider ID（用户定价模糊匹配）。
-        model: 模型名（默认表匹配）。
-        pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。
+    ``pricing`` 通过注入 ``catalog`` / ``selections`` 键携带价格目录与选择（缺省为空）。
+    用户 per_token 未配置字段经 :func:`_inherit_per_token` 从候选/默认价继承（AC7）。
 
     Returns:
-        规范化规则 dict，或 ``None``（未定价，成本 0）：
-
-        - ``{"mode":"per_token","input","input_cached","output","cache_creation"?}``
-        - ``{"mode":"per_turn","price"}``
-        - ``{"mode":"per_request","price"}``
+        规范化规则 dict（``per_token``/``per_turn``/``per_request``/``per_tier``/
+        ``tiered_expr``），或 ``None``。
     """
     user = pricing.get("user") if isinstance(pricing, dict) else None
+    user = user if isinstance(user, dict) else {}
     rule: dict[str, Any] | None = None
-    if isinstance(user, dict) and provider_id:
-        key = _best_match_key(provider_id, user)
+    if provider_id and model:
+        # 1. 模型级手工价（精确 key）
+        exact = user.get(f"{provider_id}|{model}")
+        if isinstance(exact, dict) and exact.get("mode"):
+            return _apply_cluster_multiplier(
+                _inherit_per_token(exact, provider_id, model, pricing), provider_id, pricing
+            )
+    # 2. 持久化的价格选择（用户在定价页确认/保存过的候选，始终视为显式覆盖）
+    if provider_id:
+        sel = _persisted_selection(provider_id, model, pricing)
+        if sel is not None:
+            return _apply_cluster_multiplier(sel, provider_id, pricing)
+    # 3. 旧 provider 级手工价（模糊，排除模型级 key）——优先于未确认的自动候选
+    if provider_id:
+        legacy = {k: v for k, v in user.items() if "|" not in k}
+        key = _best_match_key(provider_id, legacy)
         if key is not None:
             candidate = user[key]
             if isinstance(candidate, dict) and candidate.get("mode"):
-                rule = candidate
+                rule = _inherit_per_token(candidate, provider_id, model, pricing)
     if rule is not None:
         return _apply_cluster_multiplier(rule, provider_id, pricing)
+    # 4. 自动匹配的目录候选（唯一高置信、不落盘）——低于一切手工价
+    if provider_id:
+        auto = _auto_selection(provider_id, model, pricing)
+        if auto is not None:
+            return _apply_cluster_multiplier(auto, provider_id, pricing)
+    # 5. 内置默认表
     defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
     matched_model: str | None = None
     if isinstance(defaults, dict):
@@ -190,14 +222,276 @@ def _apply_cluster_multiplier(
         return rule
 
     out = dict(rule)
-    if out.get("mode", "per_token") == "per_token":
+    mode = str(out.get("mode", "per_token") or "per_token")
+    if mode == "per_token":
         for field in ("input", "input_cached", "output", "cache_creation"):
             value = out.get(field)
             if value is not None:
                 out[field] = float(value or 0.0) * multiplier
-    elif out.get("price") is not None:
-        out["price"] = float(out.get("price", 0.0) or 0.0) * multiplier
+        return out
+    if mode in ("per_turn", "per_request"):
+        if out.get("price") is not None:
+            out["price"] = float(out.get("price", 0.0) or 0.0) * multiplier
+        return out
+    if mode == "per_tier":
+        # 结构化深拷贝缩放，绝不修改持久化的 base/context_tiers/service_tiers。
+        # 只缩放绝对单价（base / context tier）；service tier 的字段倍率是规则内部的
+        # 相对系数，对已缩放价格再做倍乘会双重套用聚类倍率，故原样拷贝。
+        out["base"] = _scaled_price_map(rule.get("base"), multiplier)
+        out["context_tiers"] = [
+            _scaled_price_map(t, multiplier) if isinstance(t, dict) else t
+            for t in rule.get("context_tiers") or []
+        ]
+        out["service_tiers"] = [
+            dict(t) if isinstance(t, dict) else t for t in rule.get("service_tiers") or []
+        ]
+        return out
+    if mode == "tiered_expr":
+        # 表达式语义不在单价层套倍率，改为在成本结果层乘回（见 _cost_tiered_expr）。
+        out["cluster_multiplier"] = multiplier
     return out
+
+
+def _scaled_price_map(prices: Any, multiplier: float) -> dict[str, Any]:
+    """复制并缩放一组价格字段；非数值/None 字段原样保留。"""
+    src = prices if isinstance(prices, dict) else {}
+    out: dict[str, Any] = dict(src)
+    for field in _PER_TOKEN_FIELDS:
+        value = src.get(field)
+        if value is not None:
+            try:
+                out[field] = float(value) * multiplier
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _persisted_selection(
+    provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any] | None:
+    """解析持久化的价格选择（定价页确认/保存过），始终视为用户的显式覆盖。"""
+    if not provider_id or not model or not isinstance(pricing, dict):
+        return None
+    selections = pricing.get("selections")
+    catalog = pricing.get("catalog")
+    if not (isinstance(selections, dict) and isinstance(catalog, dict)):
+        return None
+    per_model = selections.get(provider_id)
+    if not isinstance(per_model, dict):
+        return None
+    sel = per_model.get(model)
+    if not isinstance(sel, dict):
+        return None
+    price_key = sel.get("price_key")
+    price = catalog.get(price_key) if price_key else None
+    if isinstance(price, dict):
+        return _catalog_price_to_rule(price)
+    return None
+
+
+def _auto_selection(
+    provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any] | None:
+    """解析自动匹配的目录候选（唯一高置信、不落盘）；优先级低于手工价。
+
+    先查 get_pricing 预算的 ``auto_selected`` 热路径表，未命中才回退实时
+    :func:`select_auto_candidate` 匹配。
+    """
+    if not provider_id or not model or not isinstance(pricing, dict):
+        return None
+    catalog_obj = pricing.get("catalog_obj")
+    if catalog_obj is None:
+        return None
+    try:
+        from .price_catalog import select_auto_candidate
+
+        enabled_sources = pricing.get("enabled_sources")
+        source_filter = (
+            set(enabled_sources) if isinstance(enabled_sources, (list, set, tuple)) else None
+        )
+        # get_pricing 已按 (provider, model) 预算自动匹配，热路径直接查表；
+        # 未命中才回退实时匹配（走 find_candidates 缓存）。
+        auto_selected = pricing.get("auto_selected")
+        if isinstance(auto_selected, dict):
+            per_model = auto_selected.get(provider_id)
+            if isinstance(per_model, dict):
+                price_key = per_model.get(model)
+                entry = pricing.get("catalog", {}).get(price_key) if price_key else None
+                if isinstance(entry, dict):
+                    return _catalog_price_to_rule(entry)
+        auto = select_auto_candidate(catalog_obj.find_candidates(model, sources=source_filter))
+        if auto is not None:
+            return _catalog_price_to_rule(auto.price.to_dict())
+    except Exception as e:
+        logger.debug(
+            "[cost_control] 自动价格候选解析失败 provider=%s model=%s class=%s",
+            provider_id or "-",
+            model or "-",
+            type(e).__name__,
+            exc_info=True,
+        )
+        pass
+    return None
+
+
+def catalog_field_values(price: dict[str, Any]) -> dict[str, Any]:
+    """把目录的 prompt/completion 字段映射为计费规则的 input/output 字段。"""
+    output = price.get("output")
+    if output is None:
+        output = price.get("completion")
+    return {
+        "input": price.get("input") if price.get("input") is not None else price.get("prompt"),
+        "input_cached": (
+            price.get("input_cached")
+            if price.get("input_cached") is not None
+            else (
+                price.get("cache_read")
+                if price.get("cache_read") is not None
+                else price.get("cache")
+            )
+        ),
+        "output": output,
+        "cache_creation": price.get("cache_creation"),
+    }
+
+
+def _catalog_context_tier_to_rule(tier: dict[str, Any]) -> dict[str, Any] | None:
+    """将 catalog context tier 转为 per_tier 的用户规则字段。"""
+    try:
+        threshold = int(tier.get("threshold_tokens"))
+    except (TypeError, ValueError):
+        return None
+    return {"threshold_tokens": threshold, **catalog_field_values(tier)}
+
+
+def _catalog_service_tier_to_rule(
+    tier: dict[str, Any], base: dict[str, Any]
+) -> dict[str, Any] | None:
+    """将 catalog service tier 的绝对单价换算为 per_tier 的字段倍率。"""
+    match = str(tier.get("match") or tier.get("service_tier") or "").strip()
+    if not match:
+        return None
+    out: dict[str, Any] = {"match": match}
+    absolute = catalog_field_values(tier)
+    for field in _PER_TOKEN_FIELDS:
+        multiplier_key = f"{field}_multiplier"
+        if tier.get(multiplier_key) is not None:
+            out[multiplier_key] = tier[multiplier_key]
+            continue
+        value = absolute.get(field)
+        base_value = base.get(field)
+        if value is None or base_value in (None, 0):
+            continue
+        try:
+            out[multiplier_key] = float(value) / float(base_value)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+    return out if len(out) > 1 else None
+
+
+@lru_cache(maxsize=512)
+def _expr_validate_error(expr: str) -> str | None:
+    """表达式本地校验错误文本（合法返回 None）。
+
+    同时服务两个需求：目录导入/解析预检的合法性判定（避免热路径反复跑验证向量），
+    以及 debug 日志的安全可诊断信息。返回值可能含表达式的片段——计费公式本身非敏感，
+    但绝不含凭据/请求体；截断至 80 字符防日志膨胀。
+    """
+    from .expr_eval import validate_tiered_expr
+
+    try:
+        err = validate_tiered_expr(expr)
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"[:120]
+    return (err or None) if err is None else err.replace("\n", " ")[:80]
+
+
+def _catalog_price_to_rule(price: dict[str, Any]) -> dict[str, Any] | None:
+    """把目录价格条目转为内部计费规则，兼容 catalog 与用户规则的不同字段名。
+
+    ``tiered_expr`` 条目在转换前做本地求值器预检：上游目录中历史导入的非法表达式
+    在此被直接禁用（返回 None，优先级链继续向后回落），绝不落入“运行时失败→0 成本”
+    的静默路径。合法性结果带 lru_cache，热路径零额外解析开销。
+    """
+    mode = str(price.get("mode") or "per_token")
+    if mode == "tiered_expr":
+        expr = str(price.get("expr") or "")
+        err = _expr_validate_error(expr)
+        if err is not None:
+            logger.debug("[cost_control] 目录 tiered_expr 预检失败，规则禁用 reason=%s", err)
+            return None
+    cur = str(price.get("currency") or "USD").strip().upper() or "USD"
+    if mode == "per_token":
+        return {"mode": "per_token", "currency": cur, **catalog_field_values(price)}
+    if mode == "per_tier":
+        base = catalog_field_values(price)
+        context_tiers = [
+            converted
+            for raw in (price.get("context_tiers") or [])
+            if isinstance(raw, dict)
+            if (converted := _catalog_context_tier_to_rule(raw)) is not None
+        ]
+        service_tiers = [
+            converted
+            for raw in (price.get("service_tiers") or [])
+            if isinstance(raw, dict)
+            if (converted := _catalog_service_tier_to_rule(raw, base)) is not None
+        ]
+        return {
+            "mode": "per_tier",
+            "currency": cur,
+            "base": base,
+            "context_tiers": context_tiers,
+            "service_tiers": service_tiers,
+        }
+    if mode == "tiered_expr":
+        return {"mode": "tiered_expr", "expr": price.get("expr"), "currency": cur}
+    if mode in ("per_turn", "per_request"):
+        return {"mode": mode, "price": price.get("price", 0.0), "currency": cur}
+    return None
+
+
+def _inherit_per_token(
+    rule: dict[str, Any], provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any]:
+    """用户 per_token 未配置字段从候选/默认价继承；无回落时缺省字段按 0。
+
+    仅作用于带 ``configured`` 标志的用户 per_token 规则；defaults/catalog 规则字段完整
+    （无 ``configured``），直接返回。
+    """
+    if rule.get("mode") != "per_token":
+        return rule
+    configured = rule.get("configured")
+    if not isinstance(configured, dict):
+        return rule
+    fallback = _fallback_per_token(provider_id, model, pricing)
+    out = dict(rule)
+    for f in _PER_TOKEN_FIELDS:
+        if configured.get(f) and out.get(f) is not None:
+            continue  # 用户显式提供
+        fb = fallback.get(f) if isinstance(fallback, dict) else None
+        if fb is not None:
+            out[f] = fb
+        elif f != "cache_creation":
+            out[f] = 0.0  # cache_creation 留 None，由 _cost_per_token 回退 input
+    return out
+
+
+def _fallback_per_token(
+    provider_id: str | None, model: str | None, pricing: dict[str, Any]
+) -> dict[str, Any] | None:
+    """per_token 继承的回落价：候选（持久化选择或自动候选的 per_token）优先，其次内置默认表。"""
+    sel = _persisted_selection(provider_id, model, pricing)
+    if sel is None and provider_id:
+        sel = _auto_selection(provider_id, model, pricing)
+    if sel is not None and sel.get("mode") == "per_token":
+        return sel
+    defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
+    if isinstance(defaults, dict):
+        d = match_pricing(model, defaults)
+        if d:
+            return {"mode": "per_token", **d}
+    return None
 
 
 def _cost_per_token(usage: dict[str, Any], rule: dict[str, Any]) -> float:
@@ -214,6 +508,149 @@ def _cost_per_token(usage: dict[str, Any], rule: dict[str, Any]) -> float:
         + int(usage.get("cache_creation") or 0) * creation_price
     ) / 1_000_000.0
     return float(cost)
+
+
+def _tier_field_prices(usage: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
+    """per_tier 当前生效字段价：base ⊕ context tier（阈值升序取最后 ``len > threshold``）。"""
+    base = rule.get("base") if isinstance(rule.get("base"), dict) else {}
+    prices: dict[str, Any] = dict(base)
+    total_in = (
+        int(usage.get("token_input_other", 0) or 0)
+        + int(usage.get("token_input_cached", 0) or 0)
+        + int(usage.get("cache_creation") or 0)
+    )
+    tiers = (x for x in (rule.get("context_tiers") or []) if isinstance(x, dict))
+    for t in sorted(tiers, key=lambda x: int(x.get("threshold_tokens", 0) or 0)):
+        try:
+            thr = int(t.get("threshold_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if total_in > thr:
+            for f in _PER_TOKEN_FIELDS:
+                if t.get(f) is not None:
+                    prices[f] = t[f]
+    return prices
+
+
+def _cost_per_tier(usage: dict[str, Any], rule: dict[str, Any]) -> float:
+    """per_tier 模式成本（USD）：context tier 覆盖 + service tier 倍率，再四类 token 计价。"""
+    prices = _tier_field_prices(usage, rule)
+    # service tier 倍率：兼容旧扁平 billing_context.service_tier 与新 params 嵌套形态。
+    ctx = usage.get("billing_context")
+    ctx_params = (
+        ctx.get("params") if isinstance(ctx, dict) and isinstance(ctx.get("params"), dict) else {}
+    )
+    svc = (
+        ctx_params.get("service_tier")
+        or (ctx.get("service_tier") if isinstance(ctx, dict) else None)
+        or usage.get("service_tier")
+    )
+    if svc:
+        for s in rule.get("service_tiers") or []:
+            if not isinstance(s, dict):
+                continue
+            if str(s.get("match", "")).lower() != str(svc).lower():
+                continue
+            for f in _PER_TOKEN_FIELDS:
+                m = s.get(f + "_multiplier")
+                if m is not None and prices.get(f) is not None:
+                    prices[f] = float(prices[f]) * float(m)
+    input_price = float(prices.get("input") or 0.0)
+    cached_price = float(prices.get("input_cached") or 0.0)
+    output_price = float(prices.get("output") or 0.0)
+    creation_price = float(prices.get("cache_creation") or input_price)
+    cost = (
+        int(usage.get("token_input_other", 0) or 0) * input_price
+        + int(usage.get("token_input_cached", 0) or 0) * cached_price
+        + int(usage.get("token_output", 0) or 0) * output_price
+        + int(usage.get("cache_creation") or 0) * creation_price
+    ) / 1_000_000.0
+    return float(cost)
+
+
+# New API 变量 opt-in 归一化：默认 p 吞并缓存读（cr）、5m 缓存写（cc）、1h 缓存写
+# （cc1h）各细分桶；表达式一旦显式引用某个细分变量，对应桶才从 p 中拆出单独计费，
+# 避免同一段 token 被 p 与细分变量双重计费。
+def _expr_variables(usage: dict[str, Any], referenced: frozenset[str]) -> dict[str, float]:
+    """按 opt-in 规则从 usage 构造表达式变量字典（纯函数）。"""
+    other = int(usage.get("token_input_other", 0) or 0)
+    cached = int(usage.get("token_input_cached", 0) or 0)
+    output = int(usage.get("token_output", 0) or 0)
+    creation_total = int(usage.get("cache_creation") or 0)
+    creation_1h = min(int(usage.get("cache_creation_1h") or 0), creation_total)
+    # 5 分钟创建只在 cc，1 小时创建只在 cc1h，不重复计入。
+    cc_5m = creation_total - creation_1h
+    p = float(other)
+    if "cr" not in referenced:
+        p += cached
+    if "cc" not in referenced:
+        p += cc_5m
+    if "cc1h" not in referenced:
+        p += creation_1h
+    return {
+        "p": p,
+        "c": float(output),
+        "len": float(other + cached + creation_total),
+        "cr": float(cached),
+        "cc": float(cc_5m),
+        "cc1h": float(creation_1h),
+        "img": 0.0,
+        "img_o": 0.0,
+        "ai": 0.0,
+        "ao": 0.0,
+    }
+
+
+def _cost_tiered_expr(usage: dict[str, Any], rule: dict[str, Any]) -> float:
+    """tiered_expr 模式成本（USD）：表达式原始输出 ``/1_000_000``，回填 ``_matched_tier``。
+
+    失败路径（缺表达式 / 运行时异常）写入 debug 日志和 ``_expr_error``，随后抛出
+    :class:`TieredExprEvaluationError`。调用方应保留 NULL/返回显式错误，不得写入假零成本。
+    """
+    from .expr_eval import eval_tiered_expr, referenced_variables
+
+    expr = str(rule.get("expr") or "")
+    if not expr:
+        logger.debug(
+            "[cost_control] tiered_expr 规则缺表达式 class=missing_expr provider=%s model=%s",
+            usage.get("provider_id") or "-",
+            usage.get("provider_model") or "-",
+        )
+        usage["_expr_error"] = "missing_expr"
+        raise TieredExprEvaluationError("missing_expr")
+    referenced = referenced_variables(expr)
+    variables = _expr_variables(usage, referenced)
+    ctx = usage.get("billing_context")
+    context: dict[str, Any] = dict(ctx) if isinstance(ctx, dict) else {}
+    if "created_at" not in context and usage.get("created_at") is not None:
+        context["created_at"] = usage.get("created_at")
+    try:
+        raw, matched = eval_tiered_expr(expr, variables, context)
+    except Exception as e:
+        logger.debug(
+            "[cost_control] tiered_expr 求值失败 class=%s len=%d provider=%s model=%s",
+            type(e).__name__,
+            len(expr),
+            usage.get("provider_id") or "-",
+            usage.get("provider_model") or "-",
+        )
+        usage["_expr_error"] = type(e).__name__
+        raise TieredExprEvaluationError(type(e).__name__) from e
+    logger.debug(
+        "[cost_control] tiered_expr 归一化变量 categories=%s matched_tier=%s len=%d",
+        {
+            "p_includes_cached": "cr" not in referenced,
+            "p_includes_cc5m": "cc" not in referenced,
+            "p_includes_cc1h": "cc1h" not in referenced,
+            "referenced": sorted(referenced),
+        },
+        matched or "-",
+        len(expr),
+    )
+    usage["_matched_tier"] = matched  # 供持久化回填
+    cost = float(raw) / 1_000_000.0
+    multiplier = float(rule.get("cluster_multiplier", 1.0) or 1.0)
+    return cost * multiplier
 
 
 def compute_cost_value(
@@ -255,6 +692,10 @@ def compute_cost_value(
         return _cost_per_token(usage, rule)
     if mode == "per_turn":
         return float(rule.get("price", 0.0) or 0.0)
+    if mode == "per_tier":
+        return _cost_per_tier(usage, rule)
+    if mode == "tiered_expr":
+        return _cost_tiered_expr(usage, rule)
     # per_request：单条无法独立计费，聚合在调用方处理
     return 0.0
 
@@ -289,6 +730,10 @@ def compute_cost_with_currency(
         return _cost_per_token(usage, rule), cur
     if mode == "per_turn":
         return float(rule.get("price", 0.0) or 0.0), cur
+    if mode == "per_tier":
+        return _cost_per_tier(usage, rule), cur
+    if mode == "tiered_expr":
+        return _cost_tiered_expr(usage, rule), cur
     # per_request：单条无法独立计费
     return 0.0, cur
 
@@ -344,7 +789,14 @@ def compute_row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
         mode = rule.get("mode", "per_token")
         if mode == "per_token":
             return _cost_per_token(row, rule)
+        if mode == "per_tier":
+            # 聚合近似：tier 按聚合 len 选择，无 per-record service_tier
+            return _cost_per_tier(row, rule)
+        if mode == "tiered_expr":
+            return _cost_tiered_expr(row, rule)  # 聚合近似
         return int(row.get("count", 0) or 0) * float(rule.get("price", 0.0) or 0.0)
+    except TieredExprEvaluationError:
+        raise
     except Exception:
         return 0.0
 
@@ -372,9 +824,15 @@ def compute_row_cost_in_main(
         mode = rule.get("mode", "per_token")
         if mode == "per_token":
             raw = _cost_per_token(row, rule)
+        elif mode == "per_tier":
+            raw = _cost_per_tier(row, rule)  # 聚合近似
+        elif mode == "tiered_expr":
+            raw = _cost_tiered_expr(row, rule)  # 聚合近似
         else:
             raw = int(row.get("count", 0) or 0) * float(rule.get("price", 0.0) or 0.0)
         return round(convert(raw, cur, main_currency, rates), 6)
+    except TieredExprEvaluationError:
+        raise
     except Exception:
         return 0.0
 
@@ -413,17 +871,134 @@ def compute_cost_grouped_in_main(
 class CostMixin:
     """按生效定价计算 USD 成本的 Mixin。"""
 
+    def invalidate_pricing_cache(self, reason: str = "unspecified") -> None:
+        """使运行时定价快照失效；同步和配置写入路径必须调用。"""
+        self._pricing_runtime_cache = None
+        logger.debug("[cost_control] 运行时定价缓存失效 reason=%s", reason)
+
     def get_pricing(self) -> dict[str, Any]:
-        """返回生效定价，并附 AstrBot Provider 到供应商聚类的精确映射。"""
-        pricing = get_pricing(getattr(self, "cfg", None))
+        """返回当前生效的定价结构，并注入价格目录、候选选择与供应商聚类映射。
+
+        ``catalog``/``selections`` 供 :func:`resolve_pricing` 做候选价格解析；
+        ``provider_clusters`` 供 :func:`_apply_cluster_multiplier` 套用聚类倍率；
+        目录不可用或损坏时降级为空（仅靠 defaults/user），保证成本计算永不被打断。
+        """
+        cached = getattr(self, "_pricing_runtime_cache", None)
+        if isinstance(cached, dict):
+            logger.debug("[cost_control] 运行时定价缓存命中")
+            return cached
+
+        cfg = getattr(self, "cfg", None)
+        pricing = get_pricing(cfg)
+        pricing["enabled_sources"] = get_enabled_price_sources(cfg)
         try:
+            from .config import get_price_selections
+            from .price_catalog import load_catalog
             from .pricing_clusters import provider_cluster_map_from_config
 
+            pricing["selections"] = get_price_selections(cfg)
             astrbot_config = self.context.get_config() or {}
             pricing["provider_clusters"] = provider_cluster_map_from_config(astrbot_config)
-        except Exception:
-            pricing["provider_clusters"] = {}
+            data_dir = getattr(self, "_data_dir", None)
+            if not data_dir:
+                get_data_dir = getattr(self, "get_data_dir", None)
+                data_dir = str(get_data_dir()) if callable(get_data_dir) else None
+            if data_dir:
+                catalog = load_catalog(str(data_dir))
+                pricing["catalog"] = {
+                    price_key: price.to_dict() for price_key, price in catalog.prices.items()
+                }
+                pricing["catalog_obj"] = catalog
+                pricing["auto_selected"] = self._compute_auto_selected(
+                    astrbot_config, catalog, pricing
+                )
+        except Exception as e:
+            pricing.setdefault("provider_clusters", {})
+            logger.debug(
+                "[cost_control] 运行时定价目录加载失败 class=%s",
+                type(e).__name__,
+                exc_info=True,
+            )
+            pass
+        self._pricing_runtime_cache = pricing
+        logger.debug(
+            "[cost_control] 运行时定价缓存重建 catalog_models=%s selections=%s",
+            len(pricing.get("catalog", {})),
+            sum(
+                len(models)
+                for models in pricing.get("selections", {}).values()
+                if isinstance(models, dict)
+            ),
+        )
         return pricing
+
+    def _compute_auto_selected(
+        self,
+        astrbot_config: dict[str, Any],
+        catalog: Any,
+        pricing: dict[str, Any],
+    ) -> dict[str, dict[str, str]]:
+        """按 (provider_id, model) 预算自动匹配价格键，供热路径查表。
+
+        与 /pricing 端点的实时计算同口径：主模型 + model_list 启用项，跳过已确认选择。
+        """
+        from .price_catalog import select_auto_candidate
+
+        result: dict[str, dict[str, str]] = {}
+        selections = pricing.get("selections") or {}
+        enabled_sources = pricing.get("enabled_sources")
+        source_filter = (
+            set(enabled_sources) if isinstance(enabled_sources, (list, set, tuple)) else None
+        )
+        prov_list = astrbot_config.get("provider") if isinstance(astrbot_config, dict) else None
+        if not isinstance(prov_list, list):
+            return result
+        for p in prov_list:
+            try:
+                if not isinstance(p, dict):
+                    continue
+                pid = str(p.get("id") or "").strip()
+                if not pid:
+                    continue
+                models: list[str] = []
+                main_model = str(p.get("model") or "").strip()
+                if main_model:
+                    models.append(main_model)
+                model_list = p.get("model_list")
+                if isinstance(model_list, list):
+                    for item in model_list:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("enable") is False:
+                            continue
+                        name = str(item.get("model_name") or item.get("model") or "").strip()
+                        legacy_cfg = item.get("model_config")
+                        if not name and isinstance(legacy_cfg, dict):
+                            name = str(legacy_cfg.get("model") or "").strip()
+                        if name and name not in models:
+                            models.append(name)
+                legacy_model_config = p.get("model_config")
+                if isinstance(legacy_model_config, dict):
+                    name = str(legacy_model_config.get("model") or "").strip()
+                    if name and name not in models:
+                        models.append(name)
+                per_provider = selections.get(pid) if isinstance(selections, dict) else None
+                confirmed = {
+                    m
+                    for m, sel in (per_provider.items() if isinstance(per_provider, dict) else [])
+                    if isinstance(sel, dict) and sel.get("confirmed")
+                }
+                for model in models:
+                    if model in confirmed:
+                        continue
+                    auto = select_auto_candidate(
+                        catalog.find_candidates(model, sources=source_filter)
+                    )
+                    if auto is not None:
+                        result.setdefault(pid, {})[model] = auto.price_key
+            except Exception:
+                continue
+        return result
 
     def get_main_currency(self) -> str:
         """返回当前主货币代码（默认 ``"$"``）。"""

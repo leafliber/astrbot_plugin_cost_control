@@ -10,8 +10,6 @@ import astrbot 的 ``MessageChain``，保持本模块顶层零 astrbot 硬依赖
 推送通道（已核对 astrbot 源码）：
 - 有 event 时（钩子 / 命令）：``await event.send(MessageChain().message(text))``。
 - 无 event 时（CronJob 回调）：``await context.send_message(umo, chain)``。
-
-阶段 2 实现。
 """
 
 from __future__ import annotations

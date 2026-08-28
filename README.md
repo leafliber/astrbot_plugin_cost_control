@@ -13,7 +13,7 @@
 - **超限不只是告警** —— 三种动作可选:**硬拦截**、**自动切换备用 Provider**(便宜模型兜底)、**仅警告**。局部规则可覆盖全局策略。
 - **缓存破坏诊断** —— 自动识别 4 类让 prompt cache 失效的元凶:上下文重置、system prompt 变更、工具定义变更、消息顺序漂移。命中率掉了立刻知道为什么。
 - **成本归因** —— 每轮请求拆解 system / tools / history / user 各占多少 token,找出谁在悄悄吃掉预算。
-- **内置 1000+ 模型定价** —— OpenRouter 全量同步,开箱即用;也支持自定义 per_token / per_turn / per_request 三种计费。
+- **多源模型定价** —— 可同步 models.dev、LiteLLM、OpenRouter 与已配置的 New API Provider，按模型比较候选价格后选用；也支持自定义 `per_token` / `per_turn` / `per_request` / `per_tier` / `tiered_expr` 计费。
 - **全数据可视化面板** —— AstrBot WebUI 内嵌 7 页仪表盘,所见即所得地编辑预算、定价、备用库,改完自动保存、热生效。
 - **零额外依赖** —— 复用 AstrBot 自带栈,装上即跑。
 
@@ -55,7 +55,7 @@ WebUI 内嵌 7 个页面,配置改动**自动保存、热生效**,无需重载�
 | **预算** | 5 维 token + 花费双限额、局部阈值、备用 Provider 库、全局默认处理动作 |
 | **缓存** | 命中率趋势、4 类破坏诊断事件、system/tools 差异 diff |
 | **上下文** | 每轮请求的 system / tools / history / user 注入量分解 |
-| **定价** | 按 AstrBot Provider Source 聚类现有模型、设置供应商倍率并直接编辑 provider 单价 |
+| **定价** | 按 AstrBot Provider Source 聚类现有模型、设置供应商倍率，并支持多源价格同步、候选比价与自定义 provider 单价（含 `per_tier` / `tiered_expr`） |
 | **设置** | 功能开关、刷新时刻、缓存告警阈值、定时日报、归因采样率等 |
 
 ---
@@ -166,6 +166,9 @@ WebUI 内嵌 7 个页面,配置改动**自动保存、热生效**,无需重载�
 | `default_on_exceeded` | `"stop"` | 全局默认超限处理 |
 | `refresh_time` | `"00:00"` | 每日预算重置时刻(本地时区) |
 | `pricing` | `{}` | 自定义 provider 单价(覆盖内置表) |
+| `price_sources` | 三个公共源启用 | 价格目录源开关；`newapi:<provider_id>` 可绑定已配置的 New API Provider |
+| `price_selections` | `{}` | 用户确认的 `(provider_id, model)` 目录价格选择 |
+| `price_sync` | `{"auto_enabled": false, "cron": "0 4 * * *"}` | 价格同步的定时开关与 Cron 表达式 |
 | `pricing_multipliers` | `{}` | AstrBot Provider Source 供应商倍率(0.01–100,缺省 1 倍) |
 | `cache_diag` | 见下 | 缓存诊断开关与告警阈值 |
 | `alerts` | 见下 | 告警推送、冷却、日报 |

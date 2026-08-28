@@ -11,13 +11,19 @@ import type {
   Bucket,
   BudgetResponse,
   CacheResponse,
-  CompareResult,
+  CatalogPrice,
   DeleteProviderDataResult,
+  CompareResult,
+  DetectResult,
+  ExprValidateResult,
   OverviewReport,
+  PriceSelection,
   PricingResponse,
   Provider,
   RecordRow,
   RecordsAggregate,
+  SourceStatus,
+  SyncReport,
   TimelineResponse,
   Window,
 } from "./types";
@@ -100,6 +106,26 @@ export const api = {
       exchange_rates_updated_at: string;
       count: number;
     }>("actions/sync_rates"),
+  // 多源价格目录（F1/F2/F3）
+  postPricingSync: (sources?: string[]) =>
+    post<SyncReport>("pricing/sync", sources ? { sources } : {}),
+  getPricingCatalog: () =>
+    get<{
+      updated_at?: string;
+      sources?: Record<string, SourceStatus>;
+      prices?: Record<string, CatalogPrice>;
+    }>("pricing/catalog"),
+  postPricingSelect: (body: {
+    provider_id: string;
+    model: string;
+    price_key: string;
+  }) => post<{ selected: PriceSelection }>("pricing/select", body),
+  postPricingSelectReset: (body: { provider_id: string; model?: string }) =>
+    post<{ removed: number }>("pricing/select/reset", body),
+  postPricingDetect: (provider_id: string) =>
+    post<DetectResult>("pricing/sources/detect", { provider_id }),
+  postPricingExprValidate: (expr: string) =>
+    post<ExprValidateResult>("pricing/expr/validate", { expr }),
 
   // AI 诊断
   getAiProvider: () => get<AiProviderInfo>("ai_provider"),

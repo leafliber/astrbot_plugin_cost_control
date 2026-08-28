@@ -4,11 +4,15 @@ import { useApi } from "../hooks/useApi";
 import { useAutoSave } from "../hooks/useAutoSave";
 import { fmtNum } from "../lib/format";
 import type {
+  CandidateBrief,
   DeletedProviderInfo,
   MatchedDefault,
+  PriceEntry,
   PricingCluster,
   PricingUnpriced,
+  PriceSelection,
   ProviderModelInfo,
+  SourceStatus,
   UserPricingEntry,
 } from "../lib/types";
 import { Panel } from "../components/Panel";
@@ -24,6 +28,7 @@ import {
   isDraftEmpty,
   normalizeDefaultCurrency,
 } from "../components/ProviderPricingCard";
+import { SourceStatusBar } from "../components/price/SourceStatusBar";
 
 interface PricingDisplayProvider {
   id: string;
@@ -49,10 +54,38 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const [highlightTarget, setHighlightTarget] = useState<string | null>(null);
   const [highlightSignal, setHighlightSignal] = useState(0);
   const [selectedClusterId, setSelectedClusterId] = useState("");
+  // 卡片展开态记忆（providerId 粒度），过滤/切聚类重挂载不丢
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleExpandedProvider = (pid: string, v: boolean) => {
+    setExpandedProviders((prev) => {
+      const next = new Set(prev);
+      if (v) next.add(pid);
+      else next.delete(pid);
+      return next;
+    });
+  };
   // 局部未定价告警覆盖：保存后单独刷新，避免整页 refetch 导致闪烁
   const [unpricedOverride, setUnpricedOverride] = useState<
     PricingUnpriced[] | null
   >(null);
+  // 多源：同步/选取状态
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
+  const [autoSync, setAutoSync] = useState(false);
+  // 乐观更新覆盖：选取/取消后即时更新，避免整页 refetch 导致"等半天"
+  const [selectionsOverride, setSelectionsOverride] = useState<
+    Record<string, Record<string, PriceSelection>> | null
+  >(null);
+  const [candidatesOverride, setCandidatesOverride] = useState<
+    Record<string, Record<string, CandidateBrief[]>> | null
+  >(null);
+  const [autoSelectedOverride, setAutoSelectedOverride] = useState<
+    Record<string, Record<string, string>> | null
+  >(null);
+  // 正在选取/取消的 (provider|model) 键，按模型级 loading
+  const [selectingKey, setSelectingKey] = useState<string | null>(null);
 
   // 新建草稿的默认计价货币：跟随主货币（后端 /pricing 已返回 currency_symbol）
   const defaultCurrency = normalizeDefaultCurrency(data?.currency_symbol);
@@ -80,10 +113,43 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     setMultiplierDrafts(nextMultipliers);
     setReady(true);
     setUnpricedOverride(null); // 新数据到达时清除覆盖
+    setSelectionsOverride(null);
+    setCandidatesOverride(null);
+    setAutoSelectedOverride(null);
   }, [data, defaultCurrency]);
 
+  // 读取 auto_sync 配置
+  useEffect(() => {
+    let mounted = true;
+    void api
+      .getConfig()
+      .then((config) => {
+        const priceSync = config.price_sync;
+        const enabled =
+          typeof priceSync === "object" &&
+          priceSync !== null &&
+          (priceSync as Record<string, unknown>).auto_enabled === true;
+        if (mounted) setAutoSync(enabled);
+      })
+      .catch(() => {
+        // 读取失败时保持默认关闭；不影响手动同步。
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [refreshNonce]);
+
   const providerModels: ProviderModelInfo[] = data?.provider_models || [];
+  const defaults: Record<string, PriceEntry> = data?.defaults || {};
   const unpriced = unpricedOverride ?? data?.unpriced ?? [];
+  const sources: Record<string, SourceStatus> = data?.sources || {};
+  // 乐观更新：override 优先于 data
+  const selections: Record<string, Record<string, PriceSelection>> =
+    selectionsOverride ?? data?.selections ?? {};
+  const candidateMap: Record<string, Record<string, CandidateBrief[]>> =
+    candidatesOverride ?? data?.candidates ?? {};
+  const autoSelected: Record<string, Record<string, string>> =
+    autoSelectedOverride ?? data?.auto_selected ?? {};
 
   // 当前配置中的 provider ID 集合
   const configIds = useMemo(
@@ -319,6 +385,175 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   if (res.loading && !data) return <Loading />;
   if (res.error) return <ErrorBox message={`加载定价失败：${res.error}`} />;
 
+  // 多源：同步
+  const doSync = async (sourceIds?: string[]) => {
+    setSyncing(true);
+    setSyncMsg("同步中…");
+    try {
+      const r = await api.postPricingSync(sourceIds);
+      const failed = r.results.filter((s) => s.status === "error");
+      const updated = r.results.reduce((sum, s) => sum + s.models, 0);
+      const tail = failed.length > 0 ? `；${failed.length} 个源失败` : "";
+      setSyncMsg(`✅ 已同步 ${updated} 个模型${tail}`);
+      res.refetch();
+    } catch (e) {
+      setSyncMsg(`❌ 同步失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const toggleAutoSync = async (enabled: boolean) => {
+    try {
+      const cfg = await api.getConfig();
+      const priceSync = { ...((cfg.price_sync as Record<string, unknown>) ?? {}) };
+      priceSync.auto_enabled = enabled;
+      await api.postSaveConfig({ price_sync: priceSync });
+      setAutoSync(enabled);
+      setSyncMsg(enabled ? "已启用每日自动同步" : "已关闭每日自动同步");
+    } catch (e) {
+      setSyncMsg(`❌ 更新自动同步失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  // 源开关：读最新 config → 改 price_sources → 保存 → 启用时立即拉该源
+  const toggleSource = async (sourceId: string, enabled: boolean) => {
+    try {
+      const cfg = await api.getConfig();
+      const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
+      const entry = { ...((ps[sourceId] as Record<string, unknown>) ?? {}) };
+      entry.enabled = enabled;
+      if (sourceId.startsWith("newapi:") && !entry.provider_id) {
+        entry.provider_id = sourceId.slice(7);
+        entry.use_provider_key = true;
+      }
+      ps[sourceId] = entry;
+      await api.postSaveConfig({ price_sources: ps });
+      if (enabled) {
+        await doSync([sourceId]);
+      } else {
+        res.refetch();
+      }
+    } catch (e) {
+      setSyncMsg(`❌ 更新价格源失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  // 探测并启用 New API 源（F1.2/F6.2）
+  const enableNewApiSource = async (pid: string) => {
+    setSelectingKey(`${pid}|`);
+    setSyncMsg(`探测 ${pid} …`);
+    try {
+      const det = await api.postPricingDetect(pid);
+      if (!det.is_newapi) {
+        setSyncMsg(`❌ ${pid} 未检测到 New API /api/pricing 接口`);
+        return;
+      }
+      const cfg = await api.getConfig();
+      const ps = { ...((cfg.price_sources as Record<string, unknown>) ?? {}) };
+      // URL 去重：同 base_url 只建一个源；首次以 provider 短名作默认名，可后续重命名
+      const sid = det.existing_source || `newapi:${shortName(pid)}`;
+      ps[sid] = {
+        ...(ps[sid] as Record<string, unknown> | undefined),
+        enabled: true,
+        provider_id: (ps[sid] as { provider_id?: string } | undefined)?.provider_id ?? pid,
+        base_url: det.base_url ?? "",
+        use_provider_key: true,
+      };
+      await api.postSaveConfig({ price_sources: ps });
+      setSyncMsg(
+        det.existing_source
+          ? `✅ ${pid} 复用已有源 ${sid}，正在拉取价格…`
+          : `✅ ${sid} 已启用为 New API 源，正在拉取价格…`,
+      );
+      await doSync([sid]);
+    } catch (e) {
+      setSyncMsg(`❌ 探测失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSelectingKey(null);
+    }
+  };
+  const disableNewApiSource = async (pid: string) => {
+    const src = newApiSourceFor(pid);
+    if (!src) return;
+    await toggleSource(src.sourceId, false);
+    setSyncMsg(`已停用源 ${src.sourceId}（已确认的选择不受影响）`);
+  };
+
+  // 乐观更新：选取后用返回值即时更新本地 override，不调 res.refetch()
+  const selectCandidate = async (
+    pid: string,
+    model: string,
+    priceKey: string,
+  ) => {
+    const key = `${pid}|${model}`;
+    setSelectingKey(key);
+    try {
+      const { selected } = await api.postPricingSelect({
+        provider_id: pid,
+        model,
+        price_key: priceKey,
+      });
+      // 即时更新 override
+      setSelectionsOverride((prev) => ({
+        ...(prev ?? data?.selections ?? {}),
+        [pid]: { ...((prev ?? data?.selections ?? {})[pid] ?? {}), [model]: selected },
+      }));
+      // 候选/自动匹配移除该 model
+      setCandidatesOverride((prev) => {
+        const base = prev ?? data?.candidates ?? {};
+        const forPid = { ...(base[pid] ?? {}) };
+        delete forPid[model];
+        return { ...base, [pid]: forPid };
+      });
+      setAutoSelectedOverride((prev) => {
+        const base = prev ?? data?.auto_selected ?? {};
+        const forPid = { ...(base[pid] ?? {}) };
+        delete forPid[model];
+        return { ...base, [pid]: forPid };
+      });
+      // 后台静默对齐一次全量数据（聚合计数/未定价等由服务端重算），不阻塞交互
+      res.refetch();
+    } catch (e) {
+      setSyncMsg(`❌ 选用失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSelectingKey(null);
+    }
+  };
+  // 乐观更新：取消选择，用返回值即时移除
+  const resetSelection = async (pid: string, model: string) => {
+    const key = `${pid}|${model}`;
+    setSelectingKey(key);
+    try {
+      await api.postPricingSelectReset({ provider_id: pid, model });
+      setSelectionsOverride((prev) => {
+        const base = prev ?? data?.selections ?? {};
+        const forPid = { ...(base[pid] ?? {}) };
+        delete forPid[model];
+        return { ...base, [pid]: forPid };
+      });
+      // 取消后该 model 回到无选择状态；候选/自动匹配需 refetch 才能恢复，
+      // 但为避免"等半天"，触发一次后台静默 refetch 对齐数据（不阻塞 UI）
+      res.refetch();
+    } catch (e) {
+      setSyncMsg(`❌ 清除失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSelectingKey(null);
+    }
+  };
+
+  // provider 对应的 New API 源状态（URL 去重后源 id 不再等于 newapi:<pid>，
+  // 按 记录的 provider_id 或默认短名 双路匹配）
+  const newApiSourceFor = (pid: string) => {
+    for (const sid of [`newapi:${shortName(pid)}`, `newapi:${pid}`]) {
+      const st = sources[sid];
+      if (st) return { sourceId: sid, enabled: !!st.enabled };
+    }
+    for (const [sid, st] of Object.entries(sources)) {
+      if (sid.startsWith("newapi:") && st.provider_id === pid) {
+        return { sourceId: sid, enabled: !!st.enabled };
+      }
+    }
+    return undefined;
+  };
+
   const reset = async () => {
     // 两段式确认：首次点击武装，4 秒内再次点击执行（替代 confirm，兼容嵌入式 webview）
     if (!resetArmed) {
@@ -335,7 +570,12 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     setResetArmed(false);
     setResetResult("重置中…");
     try {
-      await api.postSaveConfig({ pricing: {}, pricing_multipliers: {} });
+      await api.postSaveConfig({
+        pricing: {},
+        pricing_multipliers: {},
+        price_selections: {},
+      });
+      setSelectionsOverride({});
       setResetResult("✅ 已重置，立即生效");
       res.refetch();
     } catch (e) {
@@ -350,6 +590,8 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     setHighlightTarget(pid);
     setHighlightSignal((s) => s + 1);
   };
+
+  const defaultKeys = Object.keys(defaults).sort();
 
   // 统计概要数字
   const totalProviders = currentDisplayList.length;
@@ -369,6 +611,21 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       isDeletedResidue={p.isDeletedResidue}
       hasUsage={hasUnpricedUsage(p.id)}
       highlightSignal={highlightTarget === p.id ? highlightSignal : undefined}
+      selections={selections[p.id]}
+      autoPriceKeys={autoSelected[p.id]}
+      priceCandidatesByModel={candidateMap[p.id]}
+      newApiSource={p.isDeletedResidue ? undefined : newApiSourceFor(p.id)}
+      selectingKey={selectingKey ?? undefined}
+      expanded={expandedProviders.has(p.id)}
+      onExpandedChange={(v) => toggleExpandedProvider(p.id, v)}
+      onSelectCandidate={(m, pk) => selectCandidate(p.id, m, pk)}
+      onResetSelection={(m) => resetSelection(p.id, m)}
+      onEnableNewApiSource={
+        p.isDeletedResidue ? undefined : () => enableNewApiSource(p.id)
+      }
+      onDisableNewApiSource={
+        p.isDeletedResidue ? undefined : () => disableNewApiSource(p.id)
+      }
       onChange={(patch) => updateDraft(p.id, patch)}
       onClear={() => clearDraft(p.id)}
       onDeleteData={
@@ -379,6 +636,19 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
 
   return (
     <div>
+      <Panel className="source-panel">
+        <h2>价格源</h2>
+        <SourceStatusBar
+          sources={sources}
+          syncing={syncing}
+          onSync={() => void doSync()}
+          onToggleSource={(sid, en) => void toggleSource(sid, en)}
+          autoSync={autoSync}
+          onToggleAutoSync={(enabled) => void toggleAutoSync(enabled)}
+        />
+        {syncMsg && <div className="muted small source-sync-msg">{syncMsg}</div>}
+      </Panel>
+
       {unpriced.length > 0 && (
         <Panel className="alert-panel">
           <h2>未定价告警（{unpricedByProvider.length} 个 Provider）</h2>
@@ -479,6 +749,42 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
             {deletedDisplayList.map(renderProviderCard)}
           </div>
         </Panel>
+      )}
+
+      {defaultKeys.length > 0 && (
+        <details className="panel">
+          <summary>
+            内置默认单价（参考 OpenRouter，共 {defaultKeys.length} 个模型，per_token，只读）
+          </summary>
+          <div className="muted small" style={{ margin: "6px 0" }}>
+            随插件版本更新；按模型名模糊匹配（前缀 / 子串），作为未设置 provider 定价时的回退基准。
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th>输入</th>
+                <th>缓存命中</th>
+                <th>输出</th>
+                <th>缓存写入</th>
+              </tr>
+            </thead>
+            <tbody>
+              {defaultKeys.map((k) => {
+                const p = defaults[k] || {};
+                return (
+                  <tr key={k}>
+                    <td className="mono">{k}</td>
+                    <td>{p.input != null ? p.input : "-"}</td>
+                    <td>{p.input_cached != null ? p.input_cached : "-"}</td>
+                    <td>{p.output != null ? p.output : "-"}</td>
+                    <td>{p.cache_creation != null ? p.cache_creation : "-"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </details>
       )}
 
       <SaveToast status={status} error={error} />

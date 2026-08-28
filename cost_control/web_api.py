@@ -28,8 +28,6 @@
 标准的 ``{success, data}`` 信封后，父级不识别 ``status`` 字段即**原样透传**，
 前端再自行 ``extractData``（见 ``pages/dashboard/app.js``），与 message_recorder
 完全一致、跨版本稳定。
-
-阶段 4 实现。
 """
 
 from __future__ import annotations
@@ -50,6 +48,7 @@ from .config import (
     switches_from_config,
 )
 from .default_pricing import DEFAULT_PRICING
+from .price_sources import merged_provider_config
 from .pricing_clusters import (
     build_provider_pricing_clusters,
     normalize_pricing_multipliers,
@@ -77,6 +76,33 @@ def _iso_utc(dt: datetime | None) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.isoformat()
+
+
+def _attach_selection_price(sel: dict[str, Any], catalog: Any) -> None:
+    """给单个 selection 条目附生效价格摘要（prompt/completion → input/output 映射）。"""
+    from .cost import catalog_field_values
+
+    entry = catalog.prices.get(str(sel.get("price_key") or ""))
+    if entry is not None:
+        sel["price"] = catalog_field_values(entry.to_dict())
+
+
+def _find_newapi_source_by_url(cfg: dict[str, Any], root: str) -> str | None:
+    """按归一化 base_url 在 price_sources 中查找已有的 New API 源（URL 去重判据）。"""
+    norm = lambda u: str(u or "").strip().rstrip("/").lower()  # noqa: E731
+
+    target = norm(root)
+    if not target:
+        return None
+    raw = cfg.get("price_sources") if isinstance(cfg, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    for sid, sc in raw.items():
+        if not isinstance(sid, str) or not sid.startswith("newapi:"):
+            continue
+        if isinstance(sc, dict) and norm(sc.get("base_url")) == target:
+            return sid
+    return None
 
 
 def _deleted_provider_residues(
@@ -112,6 +138,10 @@ def _deleted_provider_residues(
 class WebApiMixin:
     """注册 REST Web API 路由的 Mixin。"""
 
+    # 配置写端点在读取 request 后，从 self.cfg 快照到 save_plugin_config 的读改写
+    # 区间均为无 await 的同步段，因此单进程 Quart 事件循环内不会交错。若未来启用
+    # 多 worker/多进程写同一 data_dir，必须把这里升级为进程间文件锁。
+
     # 由 ``Main`` 宿主提供（Mixin 不定义 ``__init__``）。
     context: Any
     config: Any
@@ -141,6 +171,11 @@ class WebApiMixin:
     get_data_dir: Any
     register_cron: Any
     daily_report: Any
+
+    def _invalidate_runtime_pricing(self, reason: str) -> None:
+        invalidate = getattr(self, "invalidate_pricing_cache", None)
+        if callable(invalidate):
+            invalidate(reason)
 
     def register_routes(self) -> None:
         """注册所有 Web API 路由（在 ``Main.initialize`` 中调用，幂等）。
@@ -213,6 +248,42 @@ class WebApiMixin:
                     self.api_ai_diag_last,
                     ["GET"],
                     "上次 AI 诊断缓存结果",
+                ),
+                (
+                    f"{prefix}/pricing/sync",
+                    self.api_pricing_sync,
+                    ["POST"],
+                    "拉取价格源并更新价格目录",
+                ),
+                (
+                    f"{prefix}/pricing/catalog",
+                    self.api_pricing_catalog,
+                    ["GET"],
+                    "价格目录（源状态+条目，不含 raw）",
+                ),
+                (
+                    f"{prefix}/pricing/sources/detect",
+                    self.api_pricing_detect,
+                    ["POST"],
+                    "探测 provider 是否为 New API 价格源",
+                ),
+                (
+                    f"{prefix}/pricing/select",
+                    self.api_pricing_select,
+                    ["POST"],
+                    "保存用户选定的价格源",
+                ),
+                (
+                    f"{prefix}/pricing/select/reset",
+                    self.api_pricing_select_reset,
+                    ["POST"],
+                    "清除用户价格源选择",
+                ),
+                (
+                    f"{prefix}/pricing/expr/validate",
+                    self.api_pricing_expr_validate,
+                    ["POST"],
+                    "校验 tiered_expr 计费表达式",
                 ),
             ]
             for route, handler, methods, desc in routes:
@@ -295,7 +366,7 @@ class WebApiMixin:
         从固化的原始货币换算到主货币 ``main_cur``，``cost_original`` 保留原始金额；
         否则 ``cost`` 由 pricing 即时算出（回退，用于历史未回填行）。
         """
-        from .cost import compute_cost_in_main
+        from .cost import TieredExprEvaluationError, compute_cost_in_main
         from .exchange_rates import convert
 
         created = getattr(s, "created_at", None)
@@ -307,31 +378,38 @@ class WebApiMixin:
         cost_amount = getattr(s, "cost_amount", None)
         currency_symbol = getattr(s, "currency_symbol", None)
 
-        cost = 0.0
+        cost: float | None = 0.0
         cost_original = None
+        cost_error = None
         if cost_amount is not None:
             # 有固化金额 → 按当前汇率换算到主货币
             cost_original = round(float(cost_amount), 6)
             cur = str(currency_symbol or "USD")
             cost = round(convert(cost_original, cur, main_cur, rates or {}), 6)
         elif pricing is not None:
-            # 回退：无固化金额，按定价即时算并换算到主货币
-            cost = round(
-                compute_cost_in_main(
-                    {
-                        "token_input_other": token_input_other,
-                        "token_input_cached": token_input_cached,
-                        "token_output": token_output,
-                        "cache_creation": cache_creation,
-                    },
-                    getattr(s, "provider_id", None) or None,
-                    getattr(s, "provider_model", None),
-                    pricing,
-                    main_cur,
-                    rates or {},
-                ),
-                6,
-            )
+            # 回退：无固化金额，按定价即时算并换算到主货币；expr 失败置 None 而非打挂接口
+            try:
+                cost = round(
+                    compute_cost_in_main(
+                        {
+                            "token_input_other": token_input_other,
+                            "token_input_cached": token_input_cached,
+                            "token_output": token_output,
+                            "cache_creation": cache_creation,
+                            "billing_context": getattr(s, "billing_context", None),
+                            "created_at": created,
+                        },
+                        getattr(s, "provider_id", None) or None,
+                        getattr(s, "provider_model", None),
+                        pricing,
+                        main_cur,
+                        rates or {},
+                    ),
+                    6,
+                )
+            except TieredExprEvaluationError as e:
+                cost = None
+                cost_error = str(e)
 
         return {
             "umo": getattr(s, "umo", "") or "",
@@ -346,6 +424,7 @@ class WebApiMixin:
             "injection_total": getattr(s, "injection_total", None),
             "attribution": getattr(s, "attribution", None),
             "cost": cost,
+            "cost_error": cost_error,
             "cost_original": cost_original,
             "currency_symbol": currency_symbol,
             "created_at": _iso_utc(created),
@@ -559,7 +638,8 @@ class WebApiMixin:
 
             # 将各维度 cost 限额换算到主货币（budgets_cost_currency 可能设了独立货币）
             from .config import get_budgets_cost_currency
-            from .exchange_rates import convert as _conv_alert, get_main_currency, get_rates
+            from .exchange_rates import convert as _conv_alert
+            from .exchange_rates import get_main_currency, get_rates
 
             _alert_bcc = get_budgets_cost_currency(cfg)
             _alert_main = get_main_currency(cfg)
@@ -641,7 +721,6 @@ class WebApiMixin:
 
             from .analytics import compare_windows
             from .budget import total_tokens
-            from .cost import compute_cost_grouped
 
             window = self._param("window", "daily") or "daily"
             now = datetime.now(UTC)
@@ -804,8 +883,6 @@ class WebApiMixin:
         （可选）、``start`` / ``end``（ISO）。返回每组的 token 三类、条数、成本、占比。
         """
         try:
-            from .cost import compute_row_cost
-
             by = self._param("by", "model") or "model"
             if by not in ("model", "provider", "umo"):
                 by = "model"
@@ -1575,6 +1652,72 @@ class WebApiMixin:
             from .exchange_rates import get_rate_updated_at, get_rates
 
             _pcfg = getattr(self, "cfg", None)
+            # 多源价格目录：源状态/用户选择/候选/自动匹配（失败不阻断基础字段）。
+            sources_status: dict[str, Any] = {}
+            selections: dict[str, Any] = {}
+            candidates: dict[str, Any] = {}
+            auto_selected: dict[str, Any] = {}
+            try:
+                from .config import get_price_selections, get_price_sources
+                from .price_catalog import select_auto_candidate
+
+                cat = self._load_catalog()
+                configured_sources = get_price_sources(_pcfg)
+                enabled_sources = {
+                    sid for sid, config in configured_sources.items() if config.get("enabled")
+                }
+                sources_status = {sid: s.to_dict() for sid, s in cat.sources.items()}
+                for sid, config in configured_sources.items():
+                    status = sources_status.setdefault(
+                        sid,
+                        {
+                            "source": sid,
+                            "status": "pending",
+                            "models": 0,
+                            "skipped": 0,
+                            "error": "",
+                            "not_modified": False,
+                        },
+                    )
+                    status["enabled"] = bool(config.get("enabled"))
+                selections = get_price_selections(_pcfg)
+                # 附生效价格摘要，前端已选价直接回显，无需另查 catalog
+                for _per_model in selections.values():
+                    if not isinstance(_per_model, dict):
+                        continue
+                    for _sel in _per_model.values():
+                        if isinstance(_sel, dict):
+                            _attach_selection_price(_sel, cat)
+                for p in provider_models:
+                    pid = p.get("id") or ""
+                    if not pid:
+                        continue
+                    models_to_check: list[str] = []
+                    mm = p.get("model") or ""
+                    if mm:
+                        models_to_check.append(mm)
+                    for c in p.get("candidates") or []:
+                        if c and c not in models_to_check:
+                            models_to_check.append(c)
+                    for rm in runtime_models.get(pid, []):
+                        if rm and rm not in models_to_check:
+                            models_to_check.append(rm)
+                    for m in models_to_check:
+                        psel = selections.get(pid, {})
+                        if isinstance(psel, dict) and psel.get(m, {}).get("confirmed"):
+                            continue  # 用户已确认，不再进候选/自动匹配
+                        cands = cat.find_candidates(m, sources=enabled_sources)
+                        if not cands:
+                            continue
+                        auto = select_auto_candidate(cands)
+                        if auto is not None:
+                            auto_selected.setdefault(pid, {})[m] = auto.price_key
+                        else:
+                            candidates.setdefault(pid, {})[m] = [
+                                self._candidate_brief(c) for c in cands[:8]
+                            ]
+            except Exception:
+                pass
             return self._ok(
                 {
                     "provider_models": provider_models,
@@ -1587,8 +1730,293 @@ class WebApiMixin:
                     "currency_symbol": get_currency_symbol(_pcfg),
                     "exchange_rates": get_rates(_pcfg),
                     "exchange_rates_updated_at": get_rate_updated_at(_pcfg),
+                    "sources": sources_status,
+                    "selections": selections,
+                    "candidates": candidates,
+                    "auto_selected": auto_selected,
                 }
             )
+        except Exception as e:
+            return self._err(str(e))
+
+    # ===== 多源价格目录（multi-source-pricing）=====
+
+    def _pricing_data_dir(self) -> str:
+        return getattr(self, "_data_dir", None) or str(self.get_data_dir())
+
+    def _provider_cfg_fn(self):
+        """构建 ``provider_id → 合并后的 provider 配置``回调（供 New API 源解析 api_base/key）。
+
+        委托 :func:`price_sources.merged_provider_config`：>=4.25.5 按
+        ``provider_source_id`` 用 ``provider_sources[]`` 条目回填 ``api_base`` / ``key``
+        （带 /v1 的 base 由 derive_newapi_root 统一剥离）；平铺旧结构原样返回。
+        """
+
+        def _get(pid: str) -> dict[str, Any] | None:
+            try:
+                return merged_provider_config(self.context.get_config(), pid)
+            except Exception:
+                pass
+            return None
+
+        return _get
+
+    @staticmethod
+    def _candidate_brief(c: Any) -> dict[str, Any]:
+        """候选序列化为紧凑 dict（不含 raw，控制响应体积）。"""
+        p = c.price
+        return {
+            "price_key": c.price_key,
+            "source": c.source,
+            "source_model_id": c.source_model_id,
+            "score": round(c.score, 4),
+            "reason": c.reason,
+            "mode": p.mode,
+            "prompt": p.prompt,
+            "completion": p.completion,
+            "cache_read": p.cache_read,
+            "cache_creation": p.cache_creation,
+            "price": p.price,
+            "context_tiers": len(p.context_tiers or []),
+            "service_tiers": len(p.service_tiers or []),
+            "expr": (p.expr or "")[:120] if p.mode == "tiered_expr" else "",
+        }
+
+    def _load_catalog(self):
+        from .price_catalog import load_catalog
+
+        return load_catalog(self._pricing_data_dir())
+
+    async def api_pricing_sync(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /pricing/sync``：拉取启用（或 body 指定）价格源并更新目录。"""
+        try:
+            from quart import request
+
+            from .price_sources import sync_all
+
+            try:
+                body = await request.json
+            except Exception:
+                body = None
+            sources = None
+            if isinstance(body, dict):
+                raw = body.get("sources")
+                if isinstance(raw, list):
+                    sources = [str(s) for s in raw]
+            cfg = getattr(self, "cfg", None) or {}
+            report = await sync_all(
+                cfg,
+                self._pricing_data_dir(),
+                sources=sources,
+                provider_cfg=self._provider_cfg_fn(),
+            )
+            self._invalidate_runtime_pricing("manual_price_sync")
+            return self._ok(report)
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_pricing_catalog(self, **kwargs: Any) -> dict[str, Any]:
+        """``GET /pricing/catalog``：源状态 + 价格条目（不含 raw，控制体积）。"""
+        try:
+            cat = self._load_catalog()
+            prices: dict[str, Any] = {}
+            for key, p in cat.prices.items():
+                d = p.to_dict()
+                d.pop("raw", None)
+                prices[key] = d
+            return self._ok(
+                {
+                    "updated_at": cat.updated_at,
+                    "sources": {sid: s.to_dict() for sid, s in cat.sources.items()},
+                    "prices": prices,
+                }
+            )
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_pricing_detect(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /pricing/sources/detect``：匿名探测 provider 是否为 New API 源。"""
+        try:
+            import asyncio
+            import json
+
+            from quart import request
+
+            from .price_sources import derive_newapi_root, http_get, is_http_url, newapi_pricing_url
+
+            try:
+                body = await request.json
+            except Exception:
+                body = None
+            pid = str((body or {}).get("provider_id") or "").strip()
+            if not pid:
+                return self._err("缺少 provider_id")
+            provider = self._provider_cfg_fn()(pid)
+            root = derive_newapi_root(str((provider or {}).get("api_base") or ""))
+            base = {
+                "provider_id": pid,
+                "base_url": root,
+                # 同 URL 已有源时前端复用，避免一个实例建 N 个重复源
+                "existing_source": _find_newapi_source_by_url(
+                    deep_merge(CONFIG_DEFAULTS, getattr(self, "cfg", {}) or {}), root
+                ),
+            }
+            if not is_http_url(root):
+                return self._ok(
+                    {
+                        **base,
+                        "is_newapi": False,
+                        "models": 0,
+                        "needs_key": False,
+                        "error": "api_base 缺失或非法",
+                    }
+                )
+            url = newapi_pricing_url(root)
+            body_b, status, _h, err = await asyncio.to_thread(http_get, url, {}, 8.0)
+            if err or status != 200 or body_b is None:
+                return self._ok(
+                    {
+                        **base,
+                        "is_newapi": False,
+                        "models": 0,
+                        "needs_key": False,
+                        "error": err or f"HTTP {status}",
+                    }
+                )
+            try:
+                data = json.loads(body_b.decode("utf-8"))
+            except Exception:
+                data = None
+            ok = (
+                isinstance(data, dict)
+                and bool(data.get("success"))
+                and isinstance(data.get("data"), list)
+            )
+            models = len(data.get("data") or []) if ok else 0
+            return self._ok(
+                {
+                    **base,
+                    "is_newapi": bool(ok),
+                    "models": models,
+                    "needs_key": bool(ok and models == 0),
+                }
+            )
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_pricing_select(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /pricing/select``：用户确认某 (provider,model) 选用某 price_key。"""
+        try:
+            from quart import request
+
+            from .config import get_price_selections
+
+            try:
+                body = await request.json
+            except Exception:
+                body = None
+            if not isinstance(body, dict):
+                return self._err("请求体必须是 JSON 对象")
+            pid = str(body.get("provider_id") or "").strip()
+            model = str(body.get("model") or "").strip()
+            price_key = str(body.get("price_key") or "").strip()
+            if not pid or not model or not price_key:
+                return self._err("provider_id / model / price_key 均必填")
+            cat = self._load_catalog()
+            price = cat.prices.get(price_key)
+            if price is None:
+                return self._err(f"价格条目不存在：{price_key}（请先同步价格源）")
+            cfg = deep_merge(CONFIG_DEFAULTS, getattr(self, "cfg", {}) or {})
+            sel = get_price_selections(cfg)
+            score, reason = 0.0, "manual"
+            for c in cat.find_candidates(model):
+                if c.price_key == price_key:
+                    score, reason = c.score, c.reason
+                    break
+            sel.setdefault(pid, {})[model] = {
+                "price_key": price_key,
+                "source": price.source,
+                "source_model_id": price.source_model_id,
+                "confirmed": True,
+                "auto": False,
+                "score": score,
+                "reason": reason,
+            }
+            cfg["price_selections"] = sel
+            save_plugin_config(self._pricing_data_dir(), cfg)
+            self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            self._invalidate_runtime_pricing("price_selection_changed")
+            _attach_selection_price(sel[pid][model], cat)
+            return self._ok({"selected": sel[pid][model]})
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_pricing_select_reset(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /pricing/select/reset``：清除选择。``{provider_id, model?}``。"""
+        try:
+            from quart import request
+
+            from .config import get_price_selections
+
+            try:
+                body = await request.json
+            except Exception:
+                body = None
+            if not isinstance(body, dict):
+                return self._err("请求体必须是 JSON 对象")
+            pid = str(body.get("provider_id") or "").strip()
+            model = str(body.get("model") or "").strip()
+            if not pid:
+                return self._err("缺少 provider_id")
+            cfg = deep_merge(CONFIG_DEFAULTS, getattr(self, "cfg", {}) or {})
+            sel = get_price_selections(cfg)
+            removed = 0
+            if pid in sel:
+                if model:
+                    if model in sel[pid]:
+                        del sel[pid][model]
+                        removed = 1
+                    if not sel[pid]:
+                        del sel[pid]
+                else:
+                    removed = len(sel[pid])
+                    del sel[pid]
+            cfg["price_selections"] = sel
+            save_plugin_config(self._pricing_data_dir(), cfg)
+            self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            self._invalidate_runtime_pricing("price_selection_reset")
+            return self._ok({"removed": removed})
+        except Exception as e:
+            return self._err(str(e))
+
+    async def api_pricing_expr_validate(self, **kwargs: Any) -> dict[str, Any]:
+        """``POST /pricing/expr/validate``：校验 tiered_expr 表达式（P2 引擎接入）。"""
+        try:
+            from quart import request
+
+            try:
+                body = await request.json
+            except Exception:
+                body = None
+            expr = str((body or {}).get("expr") or "").strip()
+            if not expr:
+                return self._err("缺少 expr")
+            try:
+                from .expr_eval import eval_tiered_expr, validate_tiered_expr
+            except Exception as e:
+                return self._err(f"表达式引擎导入失败：{type(e).__name__}: {e}")
+            err = validate_tiered_expr(expr)
+            if err:
+                return self._ok({"valid": False, "error": err, "samples": []})
+            # 试算预览：两组示例 token 输入下的 USD 成本与命中阶梯名
+            samples: list[dict[str, Any]] = []
+            for p, c in ((100_000, 5_000), (250_000, 10_000)):
+                try:
+                    raw, tier = eval_tiered_expr(expr, {"p": p, "c": c})
+                    samples.append({"p": p, "c": c, "usd": raw / 1_000_000, "tier": tier or ""})
+                except Exception:
+                    continue
+            return self._ok({"valid": True, "error": "", "samples": samples})
         except Exception as e:
             return self._err(str(e))
 
@@ -1673,6 +2101,7 @@ class WebApiMixin:
                     data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
                     save_plugin_config(data_dir, next_cfg)
                     self.cfg = deep_merge(CONFIG_DEFAULTS, next_cfg)
+                    self._invalidate_runtime_pricing("provider_pricing_deleted")
                     pricing_deleted = True
 
             return self._ok(
@@ -1779,6 +2208,13 @@ class WebApiMixin:
                     if n is not None:
                         normalized_p[pid_s] = n
                 out[k] = normalized_p
+            elif k == "price_sources":
+                # 不能用 coerce_to_default_type（非空默认 dict 会丢弃 newapi:<pid> 动态键）
+                from .config import normalize_price_sources
+
+                if not isinstance(v, dict):
+                    return None, "price_sources 必须是对象"
+                out[k] = normalize_price_sources(v)
             elif k == "pricing_multipliers":
                 if not isinstance(v, dict):
                     return None, "pricing_multipliers 必须是对象（key=provider_source_id）"
@@ -1835,7 +2271,7 @@ class WebApiMixin:
         校验 → 写插件自有 ``config.json``（持久，不被 AstrBot 裁剪）→ 重建
         ``self.cfg``（立即对后续读取生效）→ 开关同步 ``self.config`` + ``save_config``
         （持久到 ``<plugin>_config.json``，self.config 仅含开关故无裁剪噪音）→
-        schedule/alerts 变更则重注册 CronJob。
+        price_sync/schedule/alerts 变更则重注册 CronJob。
         """
         try:
             from astrbot import logger
@@ -1858,13 +2294,14 @@ class WebApiMixin:
                 return self._err(f"写入配置文件失败：{e}")
             # 2. 重建 self.cfg（热；merged 已含页面编辑值）
             self.cfg = deep_merge(CONFIG_DEFAULTS, merged)
+            self._invalidate_runtime_pricing("config_saved")
             # 3. 开关持久化到 <plugin>_config.json（self.config 仅含开关 → 无噪音）
             try:
                 self.config.save_config(switches_from_config(merged))
             except Exception as e:
                 logger.warning("[cost_control] 开关持久化失败（不影响热生效）: %s", e)
-            # 4. schedule/alerts 变更 → 重注册 cron（幂等）
-            if any(k in changed for k in ("schedule", "alerts")):
+            # price_sync/schedule/alerts 变更 → 重注册 cron（幂等）
+            if any(k in changed for k in ("price_sync", "schedule", "alerts")):
                 try:
                     await self.register_cron()
                 except Exception as e:
@@ -1896,6 +2333,7 @@ class WebApiMixin:
             cfg["exchange_rates"] = rates
             cfg["exchange_rates_updated_at"] = updated_at
             self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
+            self._invalidate_runtime_pricing("exchange_rates_synced")
             # 持久化到 config.json
             data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
             try:

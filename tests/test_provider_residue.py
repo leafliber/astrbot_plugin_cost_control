@@ -1,6 +1,7 @@
 """已删除 Provider 残留识别与精确清理测试。"""
 
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from cost_control.web_api import _deleted_provider_residues
@@ -33,6 +34,56 @@ def test_deleted_provider_residues_excludes_current_and_unions_usage_pricing():
             "has_pricing": True,
         },
     ]
+
+
+def test_reset_all_payload_clears_pricing_multipliers_and_selections():
+    from cost_control.web_api import WebApiMixin
+
+    api = WebApiMixin()
+    api.cfg = {
+        "pricing": {"p": {"mode": "per_turn", "price": 1}},
+        "pricing_multipliers": {"source": 1.5},
+        "price_selections": {"p": {"m": {"price_key": "litellm:m"}}},
+    }
+    merged, error = api._validate_save_payload(
+        {"pricing": {}, "pricing_multipliers": {}, "price_selections": {}}
+    )
+    assert error == ""
+    assert merged is not None
+    assert merged["pricing"] == {}
+    assert merged["pricing_multipliers"] == {}
+    assert merged["price_selections"] == {}
+
+    frontend = (
+        Path(__file__).parents[1] / "frontend/src/views/PricingView.tsx"
+    ).read_text(encoding="utf-8")
+    reset_call = frontend[frontend.index("const reset = async"):]
+    assert "price_selections: {}" in reset_call
+
+    records = (
+        Path(__file__).parents[1] / "frontend/src/views/RecordsView.tsx"
+    ).read_text(encoding="utf-8")
+    assert "r.cost == null" in records
+    assert '"—"' in records
+
+
+async def test_expr_validate_import_error_reports_actual_exception(monkeypatch):
+    import sys
+
+    from quart import Quart
+
+    from cost_control.web_api import WebApiMixin
+
+    monkeypatch.setitem(sys.modules, "cost_control.expr_eval", None)
+    api = WebApiMixin()
+    app = Quart(__name__)
+
+    async with app.test_request_context("/", method="POST", json={"expr": "p"}):
+        result = await api.api_pricing_expr_validate()
+
+    assert result["success"] is False
+    assert "表达式引擎导入失败" in result["error"]
+    assert "P2 待实现" not in result["error"]
 
 
 async def test_delete_supplements_by_provider_is_exact():

@@ -3,8 +3,13 @@
 覆盖日 / 月窗口计算、四维阈值比较、token 聚合、cron 表达式转换。
 """
 
+import asyncio
+import logging
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from cost_control.budget import (
     BudgetMixin,
@@ -430,3 +435,65 @@ def test_get_budgets_cost_override_and_bad():
     out = b.get_budgets_cost()
     assert out["global_daily"] == 5.5
     assert out["per_model_daily"] == 0.0  # 非法值跳过，保留默认 0.0
+
+
+class _FallbackRecordStub(BudgetMixin):
+    def __init__(self, pricing: dict) -> None:
+        self._pricing = pricing
+        self.saved: list[dict] = []
+
+    def get_pricing(self) -> dict:
+        return self._pricing
+
+    async def save_supplement(self, record: dict) -> None:
+        self.saved.append(record)
+
+
+def test_fallback_expr_failure_keeps_null_cost_and_debug_log(caplog):
+    host = _FallbackRecordStub(
+        {"user": {"prov": {"mode": "tiered_expr", "expr": "p * * c"}}}
+    )
+    prov = SimpleNamespace(meta=lambda: SimpleNamespace(id="prov", model="m"))
+    resp = SimpleNamespace(
+        id="fallback-r1",
+        usage=SimpleNamespace(input_other=10, input_cached=0, output=0),
+        raw_completion=None,
+    )
+    caplog.set_level(logging.DEBUG, logger="astrbot")
+
+    asyncio.run(host._record_fallback(SimpleNamespace(unified_msg_origin="u"), prov, "prov", resp))
+
+    assert host.saved[0]["cost_amount"] is None
+    assert any("fallback tiered_expr 计价失败" in r.getMessage() for r in caplog.records)
+
+
+def test_fallback_record_preserves_billing_context_and_request_id():
+    host = _FallbackRecordStub(
+        {
+            "user": {
+                "prov": {
+                    "mode": "tiered_expr",
+                    "expr": 'tier("fast", p * (param("service_tier") == "priority" ? 2 : 1))',
+                }
+            }
+        }
+    )
+    prov = SimpleNamespace(meta=lambda: SimpleNamespace(id="prov", model="m"))
+    resp = SimpleNamespace(
+        id="fallback-r2",
+        usage=SimpleNamespace(input_other=1_000_000, input_cached=0, output=0),
+        raw_completion=None,
+    )
+    event = SimpleNamespace(
+        unified_msg_origin="u",
+        _cost_control_request_id="req-fallback",
+        _cost_control_billing_req={"service_tier": "priority"},
+    )
+
+    asyncio.run(host._record_fallback(event, prov, "prov", resp))
+
+    record = host.saved[0]
+    assert record["request_id"] == "req-fallback"
+    assert record["billing_context"]["params"]["service_tier"] == "priority"
+    assert record["matched_tier"] == "fast"
+    assert record["cost_amount"] == pytest.approx(2.0)

@@ -4,6 +4,14 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- 多源价格目录：可同步 models.dev、LiteLLM、OpenRouter 和已配置的 New API Provider；按模型比较候选价格，用户确认后才覆盖自动匹配。
+- 定价支持 `per_tier` 上下文/服务层级规则与 New API 兼容的 `tiered_expr` 动态表达式；表达式经安全校验后执行。
+- 价格同步可手动触发，也可按配置的 Cron 自动执行；失败源保留上次有效目录。
+
 ## [0.3.0] - 2026-07-13
 
 **AI 成本诊断**与 **定价页面交互** 的集中打磨版本。补齐诊断免责声明、修复嵌入式 webview 下按钮失效的兼容性 bug,并统一定价匹配徽章的视觉风格。
