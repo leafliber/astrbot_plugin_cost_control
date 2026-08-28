@@ -21,7 +21,7 @@ from typing import Any
 from astrbot.api.event import AstrMessageEvent, filter
 
 from .attributor import ESTIMATION_NOTE
-from .budget import _DIM_ORDER, day_window_start, resolve_tz
+from .budget import _DIM_ORDER, day_window_start, get_budget_overrides, resolve_tz
 from .config import get_config
 from .cost import compute_row_cost_in_main
 from .exchange_rates import currency_to_symbol, get_main_currency, get_rates
@@ -58,7 +58,6 @@ class CommandsMixin:
     query_supplements: Any
     get_budgets: Any
     get_budgets_cost: Any
-    get_budget_overrides: Any
     get_fallback_providers: Any
     default_on_exceeded: Any
     check_budget: Any
@@ -114,7 +113,7 @@ class CommandsMixin:
             sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
             budgets = self.get_budgets()
             budgets_cost = self.get_budgets_cost()
-            overrides = self.get_budget_overrides(getattr(self, "cfg", None))
+            overrides = get_budget_overrides(getattr(self, "cfg", None))
             result = await self.check_budget(umo, None, event=event)
             lines = ["📋 预算配置"]
             any_cfg = False
