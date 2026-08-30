@@ -4,13 +4,67 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.0] - 2026-08-30
+
+**定价体系大版本**：新增多源价格目录与 `per_tier` / `tiered_expr` 动态计费，供应商倍率落地为 AstrBot Provider Source 聚类维度并提供已下线 Provider 数据清理；同时集中修复多货币金额口径（P0）、SQLite 并发稳定性与 Mixin 命令绑定问题。
 
 ### 新增
 
-- 多源价格目录：可同步 models.dev、LiteLLM、OpenRouter 和已配置的 New API Provider；按模型比较候选价格，用户确认后才覆盖自动匹配。
-- 定价支持 `per_tier` 上下文/服务层级规则与 New API 兼容的 `tiered_expr` 动态表达式；表达式经安全校验后执行。
-- 价格同步可手动触发，也可按配置的 Cron 自动执行；失败源保留上次有效目录。
+#### 多源价格目录
+
+- **公共价格源同步**（#10）：可同步 models.dev、LiteLLM、OpenRouter 三个公共目录；每个已配置的 New API Provider 按 URL 去重后作为独立价格源。
+- **候选比价**：定价页按模型比较多源候选价格，用户确认后才覆盖自动匹配结果；选择走乐观更新，响应携带生效价格摘要。
+- **定时同步**：价格同步可手动触发，也可按配置的 Cron 自动执行（`price_sync`，默认 `0 4 * * *`，自动开关默认关闭）；单个源失败保留上次有效目录，整体同步串行、原子。
+- **源状态可视化**：定价页新增源状态栏（`SourceStatusBar`），展示各价格源的启用与同步状态。
+
+#### 动态计费模式
+
+- **`per_tier`**（#10）：按上下文长度 / 服务层级（如 batch）匹配不同费率档，配套层级编辑器。
+- **`tiered_expr`**（#10）：New API 兼容的动态表达式计费；表达式经安全校验（白名单算子、无副作用）后才执行。
+- **性能**：候选匹配记忆化 + 自动匹配预算落表，计费热路径不再全量模糊扫描。
+- 新增配置项：`price_sources`（源开关与 `newapi:<provider_id>` 绑定）、`price_selections`（用户确认的目录价格选择）、`price_sync`（定时同步开关与 Cron）。
+
+#### 供应商倍率
+
+- **`pricing_multipliers`**：按 AstrBot Provider Source 聚类对内置模型表 / 自定义单价统一乘以倍率（0.01–100，缺省 1 倍），影响成本估算、预算比较、聊天命令与日报全链路。
+- **定价目录侧栏**：定价页新增供应商目录（`PricingCatalog`），可浏览每个聚类下的模型列表与当前倍率并就地编辑。
+
+#### 已下线 Provider 数据清理
+
+- 定价页「已删除供应商残留」卡片：支持永久删除对应 Provider 的原生用量记录、插件补充记录与旧定价。
+- 新增 `POST /actions/delete_provider_data`；数据层新增 `delete_usage_by_provider` / `delete_supplements_by_provider`；时间序列化统一带 UTC 偏移。
+
+#### 内置定价与设置页
+
+- 内置默认定价增补 aion-3.0 / aion-3.0-mini、claude-opus-5 / claude-opus-5-fast 等新模型，为 claude 系列补 `:batch` 半价档；移除 aion-1.0*、claude-3.5-haiku 等过时条目。
+- 设置页新增「每日日报」独立面板（`SettingField.group` 配置分组），字段帮助文本说明 `/sid` 获取目标会话 UMO 的方式。
+
+### 变更
+
+- **定价聚类维度重构**：废弃按模型名前缀推断供应商的内置白名单，改由 AstrBot Provider Source + provider 的 `provider_source_id` 推导聚类，倍率作用点从模型家族收敛到具体 provider。
+- **AstrBot 4.25+ source 架构兼容**：provider 无顶层 `api_base` 时从 `provider_sources` 回填并统一剥离 `/v1` 后缀。
+- 新建定价草稿默认跟随主货币。
+- Provider 定价卡移除模型名与 Provider ID 的双 ID 冗余显示；卡片展开/收起状态在刷新后保持记忆。
+- dashboard 静态资源 cache-bust 改用内容 hash。
+
+### 修复
+
+- **多货币换算审计修复**（#9，5 处 P0 金额口径错误）：
+  - `backfill_cost_amounts` 固化原始计费货币而非一律误标 USD，并新增迁移修正旧版误标的历史行（不动已固化金额）。
+  - `query_user_cost_total` 改为按主货币口径返回，消除预算比较、`check_budget`、`/budgets` API 三处调用方的双重换算。
+  - `/cost` 命令逐行换算到主货币后求和，不再混合货币直接相加。
+  - `/budgets` API 全局 5 维与 override 限额先换算到主货币再比较，消除 ratio / exceeded 错判；新增 `limits_cost_main` 字段，前端预算页展示统一主货币口径。
+  - override 超限消息与明细回退路径统一主货币口径。
+- **日报推送金额按主货币换算**并使用对应货币符号（#8）。
+- **`/budget` 命令报错 `'Main' object has no attribute 'get_budget_overrides'`**（#12）：mixin 属性继承不可达，改用直接函数调用。
+- **Mixin 模式命令权限 404 / 绑定失效**：新增 `_command` 装饰器统一改写命令处理函数的 `__module__` 为主模块路径。
+- **SQLite 并发稳定性**：启用 WAL、busy timeout、NORMAL 同步与连接池限制，降低并发下的 "database is locked"；store 静默异常改为告警日志，提升可诊断性。
+- **OpenAI Responses API 缓存读取 token 解析**：`_extract_cache` 新增 `input_tokens_details.cached_tokens` 兜底；同时修复 AI 诊断默认 Provider 推断的循环导入。
+
+### 工程
+
+- 新增 `.gitattributes` 规范化构建产物换行（`eol=lf` + linguist-generated），消除幽灵 diff。
+- 新增 / 扩充测试：价格源同步、价格目录、表达式求值、成本与预算回归、定时日报、供应商残留清理、ISO 时间、AI 诊断、补充采集（Responses API）、聚类倍率。
 
 ## [0.3.0] - 2026-07-13
 
@@ -200,3 +254,4 @@
 [0.2.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.2.0
 [0.2.1]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.2.1
 [0.3.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.3.0
+[0.4.0]: https://github.com/leafliber/astrbot_plugin_cost_control/releases/tag/v0.4.0
