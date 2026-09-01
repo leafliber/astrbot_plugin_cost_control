@@ -18,6 +18,25 @@
 - `pricing_multipliers` 聚类倍率支持下限改为 0：0 表示该 AstrBot Provider Source 分组计零成本（免费分组）。全链路生效于成本估算、预算比较、聊天命令与日报；同时修复计费内部 `or 1.0` 兜底会把 0 倍率吞回 1 倍的缺陷。
 - `pricing_schedules` 分时倍率支持下限改为 0：0 表示该时段计零成本（免费时段），可与聚类倍率任意叠加。
 
+### 修复
+
+- **数据安全**：`delete_provider_data` 改为 fail-closed——provider 枚举失败/配置结构异常时直接拒绝删除（此前降级为空列表会让活跃性校验形同虚设，活跃 Provider 数据可被不可恢复清空）；同时补删 `price_selections[provider_id]` 残留。
+- **沙箱**：计费表达式防字符串重复爆炸——`has(("a"*1000)*1000*100, ...)` 此前可通过全部校验并在每次 LLM 请求热路径分配百 MB～GB 级内存；字符串字面量现以 `_SafeStr` 代理注入，重复/拼接结果超过 10k 字符即抛错，保存前校验与求值两层拦截。
+- **AI 诊断**：归因取样方向修正——`query_supplements` 为最新优先，旧的 `sups[-20:]` 取到的是最旧 20 条，改为 `sups[:20]`。
+- **AI 诊断**：预算维度不再上报假数据——局部维度（每会话/每用户/每模型·每日）token 用量恒 0 的问题改为上报当日最大主体用量（用户维度经补充表按 user_id 聚合）；cost 限额补齐 `cost_used` / `cost_ratio` 用量与 `currency` 货币口径。
+- **缓存诊断**：`/cache` API 的 token 总量改为窗口 SQL 全量聚合（此前只是最近 `limit` 条样本的截断值却按窗口总量展示，响应新增 `sampled_supplements` 标明样本数）；`/cache` 命令「显示最新 5」实际取的是最旧 5 条，已修正。
+- **命令**：`/report weekly|monthly` 参数恢复生效——AstrBot 不改写 `event.message_str`（仍含命令名），旧的整串比较永远不命中、静默回退 daily；改为从 handler 签名参数（AstrBot `parsed_params` 注入 kwargs）读取时间窗。
+- **计费**：Anthropic 1h 缓存写（2× 价）恢复识别——AstrBot 4.25.5 的 `ProviderRequest` 没有 `extra_body`/`headers` 字段，旧的请求侧提取链路是永不触发的死代码（`cache_ttl_1h` 恒为 False）；已删除，改从响应侧 `usage.cache_creation.ephemeral_1h_input_tokens` 细分判定并贯通 `cc1h` 变量计价。
+- **计费**：DeepSeek `prompt_cache_miss_tokens` 不再被当作 `cache_creation` 双重计费——miss token 已在 `input_other` 里，此前再按缓存写收一遍 ≈ 2 倍；DeepSeek 缓存本无写入费。`cache_read` 仍取 `prompt_cache_hit_tokens`。
+- **预算**：`per_model_daily` 不再拿当前会话用量冒充模型用量——常见路径 `req.model` 为 None（AstrBot 用 provider 默认模型），此前配置了该限额的用户会被会话用量误拦截；现在解析 `provider.get_model()`（与 `ProviderStat.provider_model` 同源）后按真实模型用量评估，彻底解析不到时按 0 计。
+- **性能**：面板「立即同步」汇率不再卡住整个 bot——`sync_rates` 的阻塞 urllib 请求下沉线程；价格目录同步的 `load_catalog` / `save`（数 MB JSON）同样下沉线程。
+- **性能**：定价相关端点不再每请求全量同步解析数 MB 价格目录——`_load_catalog` 按 `(mtime_ns, size, inode)` 缓存已解析实例，`PriceCatalog.save` 的原子替换（新 inode）落盘即自动失效。
+- **计费**：显式 `cache_creation: 0` 不再被 `or input_price` 兜底吞成 input 价（`per_token` / `per_tier` 两处）——0 是合法单价（显式免费，如 New API `create_cache_ratio: 0`），缓存写免费场景此前被多计费；未配置（缺字段）时仍按 input 价计，行为不变。
+- **汇率**：`convert` 对未知货币（不在内置表且从未同步，如 VND/CAD）不再隐式按 USD（rate=1）换算，改为返回原值——此前非内置货币定价的成本会被再乘目标汇率、虚增数个数量级。
+- **迁移**：`fix_mislabeled_cost_currency` 改为经 `migrations` 标记只执行一次——此前每次启动按「当前」定价重标历史 USD 行的货币符号（金额不动），用户事后加非 USD 定价会造成记录页口径错乱。
+- **报表**：一条坏记录不再让整份报表静默变空——会话成本与 `cost_by_model` 逐行计算失败（如 `tiered_expr` 运行时除零）按 0 跳过并告警；日报推送的成本聚合同样逐行容错（此前整体归零）。
+- **报表口径**：会话成本优先用固化的 `cost_amount` + `currency_symbol` 按当前汇率换算（与明细页一致，不再按当前定价重算历史）；`per_request` 模式按 distinct `(provider, request_id)` 精确计一次，不再恒显示 0。
+
 ## [0.4.0] - 2026-08-30
 
 **定价体系大版本**：新增多源价格目录与 `per_tier` / `tiered_expr` 动态计费，供应商倍率落地为 AstrBot Provider Source 聚类维度并提供已下线 Provider 数据清理；同时集中修复多货币金额口径（P0）、SQLite 并发稳定性与 Mixin 命令绑定问题。

@@ -1419,8 +1419,9 @@ class WebApiMixin:
 
         Query：``window``（daily|weekly|monthly，默认 daily）按报表窗口
         （见 :func:`analytics.report_window_start`）过滤命中率与 token 聚合统计；
-        ``limit``（默认 100，上限 500）。缓存破坏事件始终取最近 ``limit`` 条，
-        **不受 window 影响**。
+        ``limit``（默认 100，上限 500）。token 总量为**窗口全量**（SQL 聚合），
+        命中率基于最近 ``limit`` 条样本（见 ``sampled_supplements``）。
+        缓存破坏事件始终取最近 ``limit`` 条，**不受 window 影响**。
         """
         try:
             from datetime import UTC, datetime
@@ -1440,9 +1441,6 @@ class WebApiMixin:
             from .cache_diag import hit_rate
 
             rates: list[float] = []
-            total_input_other = 0
-            total_input_cached = 0
-            total_output = 0
             for s in sups:
                 cache_read = getattr(s, "cache_read", None)
                 if cache_read is None:
@@ -1454,9 +1452,11 @@ class WebApiMixin:
                 )
                 if rate >= 0:
                     rates.append(rate)
-                total_input_other += int(getattr(s, "token_input_other", 0) or 0)
-                total_input_cached += int(getattr(s, "token_input_cached", 0) or 0)
-                total_output += int(getattr(s, "token_output", 0) or 0)
+            # 窗口总量走 SQL 全量聚合（supplements 只取了最近 limit 条样本，
+            # 直接求和会把窗口总量截断成样本总量）；命中率仍基于样本计算。
+            total_input_other, total_input_cached, total_output = (
+                await self.sum_supplement_tokens(start=start)
+            )
             avg = round(sum(rates) / len(rates), 1) if rates else 0.0
 
             events: list[dict[str, Any]] = []
@@ -1484,6 +1484,7 @@ class WebApiMixin:
                     "total_input_other": total_input_other,
                     "total_input_cached": total_input_cached,
                     "total_output": total_output,
+                    "sampled_supplements": len(sups),
                     "events": events,
                     "cache_note": CACHE_NOTE,
                 }
@@ -1675,7 +1676,7 @@ class WebApiMixin:
                 from .config import get_price_selections, get_price_sources
                 from .price_catalog import select_auto_candidate
 
-                cat = self._load_catalog()
+                cat = await self._load_catalog()
                 configured_sources = get_price_sources(_pcfg)
                 enabled_sources = {
                     sid for sid, config in configured_sources.items() if config.get("enabled")
@@ -1798,10 +1799,32 @@ class WebApiMixin:
             "expr": (p.expr or "")[:120] if p.mode == "tiered_expr" else "",
         }
 
-    def _load_catalog(self):
-        from .price_catalog import load_catalog
+    async def _load_catalog(self):
+        """加载价格目录（异步 + 按文件 stat 缓存）。
 
-        return load_catalog(self._pricing_data_dir())
+        目录可达数 MB，同步解析会阻塞事件循环，且此前每个请求都全量重读。
+        这里按 ``(path, mtime_ns, size, inode)`` 缓存已解析实例：同步写经
+        ``PriceCatalog.save`` 的 ``os.replace`` 落盘（新 inode），stat 变化即失效。
+        缓存实例只读复用（``find_candidates`` 的内部候选缓存共享，无副作用）。
+        """
+        import asyncio
+        import os
+
+        from .price_catalog import _catalog_path, load_catalog
+
+        data_dir = self._pricing_data_dir()
+        path = _catalog_path(data_dir)
+        try:
+            st = os.stat(path)
+            key: tuple[int, int, int] | None = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            key = None  # 文件不存在：load_catalog 返回空目录，开销可忽略
+        cached = getattr(self, "_catalog_cache", None)
+        if cached is not None and cached[0] == path and cached[1] == key:
+            return cached[2]
+        cat = await asyncio.to_thread(load_catalog, data_dir)
+        self._catalog_cache = (path, key, cat)
+        return cat
 
     async def api_pricing_sync(self, **kwargs: Any) -> dict[str, Any]:
         """``POST /pricing/sync``：拉取启用（或 body 指定）价格源并更新目录。"""
@@ -1834,7 +1857,7 @@ class WebApiMixin:
     async def api_pricing_catalog(self, **kwargs: Any) -> dict[str, Any]:
         """``GET /pricing/catalog``：源状态 + 价格条目（不含 raw，控制体积）。"""
         try:
-            cat = self._load_catalog()
+            cat = await self._load_catalog()
             prices: dict[str, Any] = {}
             for key, p in cat.prices.items():
                 d = p.to_dict()
@@ -1938,7 +1961,7 @@ class WebApiMixin:
             price_key = str(body.get("price_key") or "").strip()
             if not pid or not model or not price_key:
                 return self._err("provider_id / model / price_key 均必填")
-            cat = self._load_catalog()
+            cat = await self._load_catalog()
             price = cat.prices.get(price_key)
             if price is None:
                 return self._err(f"价格条目不存在：{price_key}（请先同步价格源）")
@@ -2093,11 +2116,21 @@ class WebApiMixin:
         if not provider_id:
             return self._err("provider_id 不能为空")
 
-        configured_ids = {
-            str(p.get("id") or "").strip()
-            for p in self._collect_provider_models()
-            if isinstance(p, dict)
-        }
+        # fail-closed：活跃性校验依赖 provider 枚举，枚举失败/结构异常时必须
+        # 拒绝删除（否则活跃 Provider 的数据会被不可恢复地清掉）。这里不走
+        # ``_collect_provider_models``（其内部吞异常、失败降级为空列表）。
+        try:
+            prov_cfg = self.context.get_config() or {}
+            prov_list = prov_cfg.get("provider") if isinstance(prov_cfg, dict) else None
+            if not isinstance(prov_list, list):
+                raise ValueError("无法读取 provider 配置列表")
+            configured_ids = {
+                str(p.get("id") or "").strip()
+                for p in prov_list
+                if isinstance(p, dict)
+            }
+        except Exception as e:
+            return self._err(f"无法确认 Provider 是否仍活跃，已拒绝删除（fail-closed）：{e}")
         if provider_id in configured_ids:
             return self._err("该 Provider 仍在当前配置中，不能作为残留数据删除")
 
@@ -2107,10 +2140,12 @@ class WebApiMixin:
 
             pricing_deleted = False
             pricing_schedule_deleted = False
+            price_selection_deleted = False
             current_cfg = getattr(self, "cfg", None)
             if isinstance(current_cfg, dict):
                 current_pricing = current_cfg.get("pricing")
                 current_schedules = current_cfg.get("pricing_schedules")
+                current_selections = current_cfg.get("price_selections")
                 next_cfg = dict(current_cfg)
                 changed = False
                 if isinstance(current_pricing, dict) and provider_id in current_pricing:
@@ -2129,6 +2164,12 @@ class WebApiMixin:
                         next_cfg["pricing_schedules"] = next_schedules
                         pricing_schedule_deleted = True
                         changed = True
+                if isinstance(current_selections, dict) and provider_id in current_selections:
+                    next_selections = dict(current_selections)
+                    del next_selections[provider_id]
+                    next_cfg["price_selections"] = next_selections
+                    price_selection_deleted = True
+                    changed = True
                 if changed:
                     data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
                     save_plugin_config(data_dir, next_cfg)
@@ -2143,6 +2184,8 @@ class WebApiMixin:
             }
             if pricing_schedule_deleted:
                 payload["pricing_schedule_deleted"] = True
+            if price_selection_deleted:
+                payload["price_selection_deleted"] = True
             return self._ok(payload)
         except Exception as e:
             return self._err(f"删除 Provider 残留数据失败：{e}")
@@ -2261,15 +2304,20 @@ class WebApiMixin:
                 out[k] = normalize_pricing_multipliers(v)
             elif k == "exchange_rates":
                 # 接受任意 {货币代码: 汇率} dict，逐值转 float（可能含 API 同步的
-                # 160+ 货币，不能用非空默认 dict 的 coerce 逻辑裁剪）
+                # 160+ 货币，不能用非空默认 dict 的 coerce 逻辑裁剪）。
+                # 汇率必须为正有限数：0/负数/inf/nan 会污染所有换算结果。
+                import math
+
                 if not isinstance(v, dict):
                     return None, "exchange_rates 必须是对象"
                 rates_out: dict[str, float] = {}
                 for rk, rv in v.items():
                     try:
-                        rates_out[str(rk).strip().upper()] = float(rv)
+                        f = float(rv)
                     except (TypeError, ValueError):
                         continue
+                    if math.isfinite(f) and f > 0:
+                        rates_out[str(rk).strip().upper()] = f
                 if rates_out:
                     rates_out["USD"] = 1.0  # 基准
                 out[k] = rates_out
@@ -2374,10 +2422,16 @@ class WebApiMixin:
             cfg["exchange_rates_updated_at"] = updated_at
             self.cfg = deep_merge(CONFIG_DEFAULTS, cfg)
             self._invalidate_runtime_pricing("exchange_rates_synced")
-            # 持久化到 config.json
+            # 持久化到 config.json：只合并这两个 key 到已存文件，不写完整
+            # deep_merge 快照（避免把当前版本的全部默认值固化，遮蔽未来更新）。
             data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
             try:
-                save_plugin_config(data_dir, self.cfg)
+                from .config import load_plugin_config
+
+                persisted = load_plugin_config(data_dir)
+                persisted["exchange_rates"] = rates
+                persisted["exchange_rates_updated_at"] = updated_at
+                save_plugin_config(data_dir, persisted)
             except Exception as e:
                 logger.warning("[cost_control] 汇率持久化失败（热生效）: %s", e)
             return self._ok(

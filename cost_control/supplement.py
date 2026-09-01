@@ -10,6 +10,11 @@
 （Anthropic Message / OpenAI ChatCompletion / OpenAI Response（Responses API）/
 Google GenerateContentResponse），cache 字段命名各异，按 duck-typing 兼容，
 解析失败降级为 None。
+
+计费上下文（service_tier / 1h 缓存写标志）一律取**响应侧**：Anthropic
+``usage.cache_creation.ephemeral_1h_input_tokens`` 与 OpenAI
+``service_tier``。AstrBot 4.25.5 的 ``ProviderRequest`` 没有
+``extra_body`` / ``headers`` 字段，请求侧提取链路是永不触发的死代码，已删除。
 """
 
 from __future__ import annotations
@@ -25,23 +30,30 @@ if TYPE_CHECKING:
 # 生产环境经 root logger 汇入 astrbot/loguru；测试经 caplog 可捕获。
 logger = logging.getLogger("cost_control.supplement")
 
-# 允许进入 billing_context 的计费相关请求头白名单（1h 缓存写判定）。
-_BILLING_HEADER_ALLOWLIST = frozenset({"anthropic-beta"})
-
 
 def _extract_cache(
     raw: Any,
-) -> tuple[int | None, int | None, dict[str, Any] | None]:
-    """从 raw_completion 提取 cache 细分（cache_creation, cache_read）与原始 usage。
+) -> tuple[int | None, int | None, dict[str, Any] | None, int | None]:
+    """从 raw_completion 提取 cache 细分与原始 usage。
 
     按 provider 类型 duck-typing，逐个尝试已知字段路径；全部失败返回
-    ``(None, None, raw_usage)``。
+    ``(None, None, raw_usage, None)``。
+
+    注意（已对照 AstrBot 4.25.5 ``openai_source._extract_usage``）：
+    ``TokenUsage.input_other = prompt_tokens - cached_tokens`` 已包含缓存
+    未命中的输入 token。DeepSeek 系（``prompt_cache_hit_tokens`` /
+    ``prompt_cache_miss_tokens``）的 miss token 同样已计入 ``input_other``
+    （其响应无 ``prompt_tokens_details``，AstrBot 取不到 hit 数）——因此
+    ``prompt_cache_miss_tokens`` **不得**映射为 ``cache_creation``，否则同一段
+    token 按 input + cache_creation 收两遍（≈2 倍；DeepSeek 缓存本无写入费）。
 
     Returns:
-        ``(cache_creation, cache_read, raw_usage_dict)``
+        ``(cache_creation, cache_read, raw_usage_dict, cache_creation_1h)``。
+        ``cache_creation_1h`` 来自 Anthropic ``usage.cache_creation.
+        ephemeral_1h_input_tokens``（1h 缓存写，2× 价）；无该细分返回 None。
     """
     if raw is None:
-        return None, None, None
+        return None, None, None, None
 
     usage = getattr(raw, "usage", None)  # OpenAI / Anthropic
     usage_meta = getattr(raw, "usage_metadata", None)  # Google
@@ -55,6 +67,7 @@ def _extract_cache(
 
     cache_creation: int | None = None
     cache_read: int | None = None
+    cache_creation_1h: int | None = None
 
     try:
         if usage is not None:
@@ -65,6 +78,16 @@ def _extract_cache(
                 cache_creation = int(cc)
             if cr is not None:
                 cache_read = int(cr)
+            # Anthropic 缓存写细分：usage.cache_creation.ephemeral_1h_input_tokens
+            # （CacheCreation 对象；SDK >= 0.62）。请求侧 ProviderRequest 无
+            # headers/extra_body 可判定 1h（4.25.5 实测），响应侧细分是唯一信号。
+            ccd = getattr(usage, "cache_creation", None)
+            if ccd is not None:
+                e1h = getattr(ccd, "ephemeral_1h_input_tokens", None)
+                if e1h is None and isinstance(ccd, dict):
+                    e1h = ccd.get("ephemeral_1h_input_tokens")
+                if e1h is not None:
+                    cache_creation_1h = int(e1h)
             # OpenAI 风格：prompt_tokens_details.cached_tokens
             if cache_read is None:
                 ptd = getattr(usage, "prompt_tokens_details", None)
@@ -78,15 +101,12 @@ def _extract_cache(
                 cached = getattr(itd, "cached_tokens", None) if itd is not None else None
                 if cached is not None:
                     cache_read = int(cached)
-            # DeepSeek 等扩展字段（部分 provider 直接挂在 usage 上）
+            # DeepSeek 等扩展字段（部分 provider 直接挂在 usage 上）。
+            # 只取 hit 作 cache_read；miss 留在 input_other（见 docstring）。
             if cache_read is None:
                 dsh = getattr(usage, "prompt_cache_hit_tokens", None)
                 if dsh is not None:
                     cache_read = int(dsh)
-            if cache_creation is None:
-                dsm = getattr(usage, "prompt_cache_miss_tokens", None)
-                if dsm is not None:
-                    cache_creation = int(dsm)
         # Google 风格：usage_metadata.cached_content_token_count
         if usage_meta is not None and cache_read is None:
             ccc = getattr(usage_meta, "cached_content_token_count", None)
@@ -95,7 +115,7 @@ def _extract_cache(
     except Exception:
         pass
 
-    return cache_creation, cache_read, raw_usage_dict
+    return cache_creation, cache_read, raw_usage_dict, cache_creation_1h
 
 
 def _safe_sender_id(event: Any) -> str | None:
@@ -135,103 +155,40 @@ def _read_request_id(event: Any) -> str | None:
         return None
 
 
-def _extract_req_billing(req: Any) -> dict[str, Any]:
-    """从 ``ProviderRequest`` 白名单提取计费上下文（全异常吞掉，绝不采敏感头）。
-
-    提取项：``extra_body.service_tier``、``anthropic-beta`` header（用于 1h 缓存判定）。
-    绝不采集 ``Authorization`` 等敏感头。提取失败/无 req 返回 ``{}``。
-    """
-    try:
-        if req is None:
-            return {}
-        out: dict[str, Any] = {}
-        # service_tier（请求体 extra_body；OpenAI service tier 扩展字段）
-        extra = getattr(req, "extra_body", None)
-        if isinstance(extra, dict):
-            st = extra.get("service_tier")
-            if st is not None:
-                s = str(st).strip()
-                if s:
-                    out["service_tier"] = s
-        # anthropic-beta header（1h 缓存写判定）；兼容 headers 为 dict 或对象
-        headers = getattr(req, "headers", None)
-        beta = None
-        if isinstance(headers, dict):
-            beta = headers.get("anthropic-beta")
-        if beta is None and isinstance(extra, dict):
-            beta = extra.get("anthropic-beta")
-        if beta:
-            sb = str(beta)
-            out["headers"] = {"anthropic-beta": sb}
-            if "1h" in sb or "extended-cache-ttl" in sb:
-                out["cache_ttl_1h"] = True
-        return out
-    except Exception:
-        return {}
-
-
-def _read_req_billing(event: Any) -> dict[str, Any]:
-    """读回 ``on_llm_request_head`` 挂到 event 的请求侧计费上下文（健壮只读）。"""
-    try:
-        ctx = getattr(event, "_cost_control_billing_req", None)
-        return dict(ctx) if isinstance(ctx, dict) else {}
-    except Exception:
-        return {}
-
-
 def _extract_billing_context(
     raw: Any,
-    req_ctx: dict[str, Any] | None,
+    cache_creation_1h: int | None = None,
 ) -> dict[str, Any]:
-    """合并请求侧与响应侧计费上下文，统一归一化到 ``{"params": {...}}`` 形态。
+    """从**响应侧**提取计费上下文，归一化到 ``{"params": {...}}`` 形态。
 
-    白名单内可计费字段（service_tier / anthropic-beta 标志 / cache_ttl_1h）挂在
-    ``params`` 子字典下，与 :func:`expr_eval.eval_tiered_expr` 的 ``param()`` /
-    ``header()`` 读取口径一致；只读旧扁平形态由消费方兼容。全异常吞掉返回 ``{}``。
+    计费字段全部来自响应（权威且可得）：
+
+    - ``service_tier``：OpenAI ``ChatCompletion.service_tier``（attr 或 dict）；
+    - ``cache_ttl_1h``：Anthropic ``usage.cache_creation.ephemeral_1h_input_tokens
+      > 0`` 时置 True（1h 缓存写，2× 价）。
+
+    请求侧（``ProviderRequest.extra_body`` / ``.headers``）在 AstrBot 4.25.5
+    并不存在这两个字段（已核对 ``core/provider/entities.py``），旧版从这里提取
+    的链路是永不触发的死代码，已删除；``expr_eval.param()`` 读取口径不变。
+    全异常吞掉返回 ``{}``。
     """
     try:
-        flat: dict[str, Any] = {}
-        if isinstance(req_ctx, dict):
-            # 兼容调用方已经归一化的 ``{"params": {...}}``，同时保留旧扁平形态。
-            nested = req_ctx.get("params")
-            if isinstance(nested, dict):
-                flat.update(nested)
-            flat.update({k: v for k, v in req_ctx.items() if k != "params"})
-            nested_headers = nested.get("headers") if isinstance(nested, dict) else None
-            direct_headers = flat.get("headers")
-            if isinstance(nested_headers, dict) and isinstance(direct_headers, dict):
-                flat["headers"] = {**nested_headers, **direct_headers}
-            elif isinstance(nested_headers, dict) and not isinstance(direct_headers, dict):
-                flat["headers"] = nested_headers
-        # 响应侧 service_tier 优先（OpenAI ChatCompletion.service_tier）
+        params: dict[str, Any] = {}
         st = getattr(raw, "service_tier", None)
         if st is None and isinstance(raw, dict):
             st = raw.get("service_tier")
         if st is not None:
             s = str(st).strip()
             if s:
-                flat["service_tier"] = s
-        if not flat:
+                params["service_tier"] = s
+        if cache_creation_1h is not None and int(cache_creation_1h) > 0:
+            params["cache_ttl_1h"] = True
+        if not params:
             return {}
-        params: dict[str, Any] = {}
-        headers_flat = flat.get("headers")
-        for key in ("service_tier", "cache_ttl_1h"):
-            if flat.get(key) is not None:
-                params[key] = flat[key]
-        if isinstance(headers_flat, dict):
-            # 双保险：只持久化白名单计费头，绝不保存任意 header（Authorization 等）。
-            kept = {
-                str(k): str(v)
-                for k, v in headers_flat.items()
-                if str(k).lower() in _BILLING_HEADER_ALLOWLIST
-            }
-            if kept:
-                params["headers"] = kept
         out = {"params": params}
         logger.debug(
-            "[cost_control] 计费上下文字段 params_keys=%s header_names=%s",
-            sorted(k for k in params if k != "headers"),
-            sorted(params.get("headers", {})),
+            "[cost_control] 计费上下文字段 params_keys=%s",
+            sorted(params),
         )
         return out
     except Exception:
@@ -268,7 +225,7 @@ class SupplementMixin:
         token_output = int(getattr(usage, "output", 0) or 0)
 
         raw = getattr(resp, "raw_completion", None)
-        cache_creation, cache_read, raw_usage = _extract_cache(raw)
+        cache_creation, cache_read, raw_usage, cache_creation_1h = _extract_cache(raw)
 
         umo = self._get_umo(event)
         conversation_id = self._get_conversation_id(event)
@@ -278,12 +235,16 @@ class SupplementMixin:
         request_id = _read_request_id(event)
 
         # 计费上下文（service_tier / 1h 缓存判定），供 per_tier / tiered_expr 求值。
-        req_ctx = _read_req_billing(event)
-        billing_context = _extract_billing_context(raw, req_ctx)
+        # 全部来自响应侧（ProviderRequest 无 extra_body/headers 可提取，见
+        # _extract_billing_context docstring）。
+        billing_context = _extract_billing_context(raw, cache_creation_1h)
         bc_params = billing_context.get("params") if isinstance(billing_context, dict) else None
         bc_params = bc_params if isinstance(bc_params, dict) else {}
-        # 1h 缓存写：仅当请求侧标记了 cache_ttl_1h 时计入，否则归到普通 cache_creation。
-        cc1h = (cache_creation or 0) if bc_params.get("cache_ttl_1h") else 0
+        # 1h 缓存写：优先 Anthropic 响应侧 ephemeral_1h 细分；provider 未返回
+        # 细分但计费上下文标记了 1h 时，退化为整段 cache_creation 按 1h 计。
+        cc1h = int(cache_creation_1h or 0)
+        if cc1h <= 0 and bc_params.get("cache_ttl_1h"):
+            cc1h = int(cache_creation or 0)
 
         # 固化原始货币成本金额与符号（展示时按当前汇率换算到主货币）。
         created = datetime.now(UTC)
@@ -304,8 +265,12 @@ class SupplementMixin:
         except TieredExprEvaluationError:
             # 表达式失败不得固化为 0；保留 NULL 供后续修正规则后重算/回填。
             raw_cost, cur = None, "USD"
-        except Exception:
-            raw_cost, cur = 0.0, "USD"
+        except Exception as e:
+            # 其余计算失败同样不得静默固化为 0 成本（资损防线）。
+            logging.getLogger(__name__).warning(
+                "[cost_control] 成本计算异常，保留 NULL 待回填: %s", e, exc_info=True
+            )
+            raw_cost, cur = None, "USD"
         # tiered_expr 命中的阶梯名（tier() 回填到 usage_dict），供审计与调试；
         # 求值失败时把失败类别固化进 billing_context.params（绝不静默归零）。
         matched_tier = usage_dict.pop("_matched_tier", None)
@@ -389,18 +354,5 @@ class SupplementMixin:
                 setattr(event, "_cost_control_request_id", rid)
             except Exception:
                 pass
-        except Exception:
-            pass
-
-    def capture_req_billing(self, event: Any, req: Any) -> None:
-        """在 ``on_llm_request_head`` 提取请求侧计费上下文并挂到 event（幂等、绝不抛异常）。
-
-        供 ``collect_response`` 经 :func:`_read_req_billing` 读回。失败不影响主流程。
-        """
-        try:
-            ctx = _extract_req_billing(req)
-            if not ctx:
-                return
-            setattr(event, "_cost_control_billing_req", ctx)
         except Exception:
             pass

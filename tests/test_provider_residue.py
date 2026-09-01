@@ -174,7 +174,7 @@ async def test_delete_provider_data_rejects_active_provider():
     from cost_control.web_api import WebApiMixin
 
     api = WebApiMixin()
-    api._collect_provider_models = lambda: [{"id": "active"}]
+    api.context = SimpleNamespace(get_config=lambda: {"provider": [{"id": "active"}]})
     api.delete_usage_by_provider = lambda _pid: (_ for _ in ()).throw(
         AssertionError("active provider must not be deleted")
     )
@@ -189,6 +189,55 @@ async def test_delete_provider_data_rejects_active_provider():
 
     assert result["success"] is False
     assert "仍在当前配置" in result["error"]
+
+
+async def test_delete_provider_data_fails_closed_when_enumeration_breaks():
+    """provider 枚举异常时必须拒绝删除，而不是把活跃性校验当通过。"""
+    from quart import Quart
+
+    from cost_control.web_api import WebApiMixin
+
+    def _boom():
+        raise RuntimeError("config unavailable")
+
+    api = WebApiMixin()
+    api.context = SimpleNamespace(get_config=_boom)
+    api.delete_usage_by_provider = lambda _pid: (_ for _ in ()).throw(
+        AssertionError("must not delete when enumeration fails")
+    )
+    app = Quart(__name__)
+
+    async with app.test_request_context(
+        "/",
+        method="POST",
+        json={"provider_id": "whatever", "confirm": "DELETE_PROVIDER_DATA"},
+    ):
+        result = await api.api_action_delete_provider_data()
+
+    assert result["success"] is False
+    assert "拒绝删除" in result["error"]
+
+
+async def test_delete_provider_data_rejects_when_provider_list_malformed():
+    from quart import Quart
+
+    from cost_control.web_api import WebApiMixin
+
+    api = WebApiMixin()
+    api.context = SimpleNamespace(get_config=lambda: {"provider": "not-a-list"})
+    api.delete_usage_by_provider = lambda _pid: (_ for _ in ()).throw(
+        AssertionError("must not delete when provider list malformed")
+    )
+    app = Quart(__name__)
+
+    async with app.test_request_context(
+        "/",
+        method="POST",
+        json={"provider_id": "whatever", "confirm": "DELETE_PROVIDER_DATA"},
+    ):
+        result = await api.api_action_delete_provider_data()
+
+    assert result["success"] is False
 
 
 async def test_delete_provider_data_cleans_usage_supplements_and_pricing(tmp_path):
@@ -212,9 +261,13 @@ async def test_delete_provider_data_cleans_usage_supplements_and_pricing(tmp_pat
             "deleted": {"mode": "per_turn", "price": 1},
             "keep": {"mode": "per_turn", "price": 2},
         },
+        "price_selections": {
+            "deleted": {"m": {"price_key": "x", "confirmed": True}},
+            "keep": {"m": {"price_key": "y", "confirmed": True}},
+        },
     }
     api._data_dir = str(tmp_path)
-    api._collect_provider_models = lambda: [{"id": "keep"}]
+    api.context = SimpleNamespace(get_config=lambda: {"provider": [{"id": "keep"}]})
     api.delete_usage_by_provider = delete_usage
     api.delete_supplements_by_provider = delete_supplements
     app = Quart(__name__)
@@ -233,7 +286,11 @@ async def test_delete_provider_data_cleans_usage_supplements_and_pricing(tmp_pat
             "usage_deleted": 3,
             "supplements_deleted": 2,
             "pricing_deleted": True,
+            "price_selection_deleted": True,
         },
     }
     assert set(api.cfg["pricing"]) == {"keep"}
-    assert set(load_plugin_config(str(tmp_path))["pricing"]) == {"keep"}
+    assert set(api.cfg["price_selections"]) == {"keep"}
+    saved = load_plugin_config(str(tmp_path))
+    assert set(saved["pricing"]) == {"keep"}
+    assert set(saved["price_selections"]) == {"keep"}

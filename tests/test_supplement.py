@@ -8,15 +8,15 @@ from cost_control.supplement import (
     SupplementMixin,
     _extract_billing_context,
     _extract_cache,
-    _extract_req_billing,
 )
 
 
 def test_extract_cache_none_raw():
-    cc, cr, raw = _extract_cache(None)
+    cc, cr, raw, cc1h = _extract_cache(None)
     assert cc is None
     assert cr is None
     assert raw is None
+    assert cc1h is None
 
 
 def test_extract_cache_anthropic():
@@ -26,17 +26,45 @@ def test_extract_cache_anthropic():
         input_tokens=1000,
         output_tokens=500,
     )
-    cc, cr, _ = _extract_cache(SimpleNamespace(usage=usage))
+    cc, cr, _, cc1h = _extract_cache(SimpleNamespace(usage=usage))
     assert cc == 100
     assert cr == 200
+    assert cc1h is None  # 无 cache_creation 细分对象
+
+
+def test_extract_cache_anthropic_1h_breakdown_object():
+    """Anthropic usage.cache_creation.ephemeral_1h_input_tokens（CacheCreation 对象）。"""
+    usage = SimpleNamespace(
+        cache_creation_input_tokens=1000,
+        cache_read_input_tokens=0,
+        cache_creation=SimpleNamespace(
+            ephemeral_5m_input_tokens=400, ephemeral_1h_input_tokens=600
+        ),
+    )
+    cc, cr, _, cc1h = _extract_cache(SimpleNamespace(usage=usage))
+    assert cc == 1000
+    assert cr == 0
+    assert cc1h == 600
+
+
+def test_extract_cache_anthropic_1h_breakdown_dict():
+    """dict 形态的 cache_creation 细分（部分兼容层 / 反序列化路径）。"""
+    usage = SimpleNamespace(
+        cache_creation_input_tokens=300,
+        cache_creation={"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 300},
+    )
+    cc, _, _, cc1h = _extract_cache(SimpleNamespace(usage=usage))
+    assert cc == 300
+    assert cc1h == 300
 
 
 def test_extract_cache_openai_prompt_tokens_details():
     ptd = SimpleNamespace(cached_tokens=150)
     usage = SimpleNamespace(prompt_tokens_details=ptd, prompt_tokens=1000)
-    cc, cr, _ = _extract_cache(SimpleNamespace(usage=usage))
+    cc, cr, _, cc1h = _extract_cache(SimpleNamespace(usage=usage))
     assert cc is None
     assert cr == 150
+    assert cc1h is None
 
 
 def test_extract_cache_openai_responses_input_tokens_details():
@@ -49,30 +77,38 @@ def test_extract_cache_openai_responses_input_tokens_details():
         input_tokens_details=itd,
         output_tokens_details=SimpleNamespace(reasoning_tokens=99),
     )
-    cc, cr, _ = _extract_cache(SimpleNamespace(usage=usage))
+    cc, cr, _, cc1h = _extract_cache(SimpleNamespace(usage=usage))
     assert cc is None
     assert cr == 150
+    assert cc1h is None
 
 
-def test_extract_cache_deepseek_extension_fields():
+def test_extract_cache_deepseek_hit_only_no_creation_mapping():
+    # DeepSeek miss token 已在 TokenUsage.input_other（AstrBot openai_source：
+    # input_other = prompt_tokens - cached，DeepSeek 无 prompt_tokens_details 故
+    # cached=0、input_other=hit+miss）。miss 若再映射 cache_creation 会按
+    # input + cache_creation 双重计费（≈2 倍），且 DeepSeek 缓存本无写入费。
     usage = SimpleNamespace(prompt_cache_hit_tokens=80, prompt_cache_miss_tokens=20)
-    cc, cr, _ = _extract_cache(SimpleNamespace(usage=usage))
+    cc, cr, _, cc1h = _extract_cache(SimpleNamespace(usage=usage))
     assert cr == 80
-    assert cc == 20
+    assert cc is None  # miss 绝不冒充 cache_creation
+    assert cc1h is None
 
 
 def test_extract_cache_google_usage_metadata():
     um = SimpleNamespace(cached_content_token_count=300)
-    cc, cr, _ = _extract_cache(SimpleNamespace(usage_metadata=um))
+    cc, cr, raw, cc1h = _extract_cache(SimpleNamespace(usage_metadata=um))
     assert cc is None
     assert cr == 300
+    assert cc1h is None
 
 
 def test_extract_cache_no_usage():
-    cc, cr, raw = _extract_cache(SimpleNamespace())
+    cc, cr, raw, cc1h = _extract_cache(SimpleNamespace())
     assert cc is None
     assert cr is None
     assert raw is None
+    assert cc1h is None
 
 
 # ===== request_id 采集（ensure_request_id 生成 + _read_request_id 读回）=====
@@ -104,65 +140,42 @@ def test_read_request_id_none_when_absent():
     assert _read_request_id(SimpleNamespace()) is None
 
 
-# ===== 计费上下文采集（billing_context，归一化到 params 嵌套形态） =====
+# ===== 计费上下文（billing_context，全部取响应侧，归一化到 params 嵌套形态） =====
 
 
 def test_extract_billing_context_service_tier_from_raw_attr():
 
     raw = SimpleNamespace(service_tier="priority")
-    ctx = _extract_billing_context(raw, {})
+    ctx = _extract_billing_context(raw)
     assert ctx["params"]["service_tier"] == "priority"
 
 
 def test_extract_billing_context_service_tier_from_raw_dict():
 
-    ctx = _extract_billing_context({"service_tier": "flex"}, {})
+    ctx = _extract_billing_context({"service_tier": "flex"})
     assert ctx["params"]["service_tier"] == "flex"
 
 
-def test_extract_billing_context_response_overrides_request():
-
-    raw = SimpleNamespace(service_tier="priority")
-    req_ctx = _extract_req_billing(SimpleNamespace(extra_body={"service_tier": "default"}))
-    ctx = _extract_billing_context(raw, req_ctx)
-    assert ctx["params"]["service_tier"] == "priority"
-
-
-def test_extract_billing_context_nests_whitelist_header_under_params():
-
-    req_ctx = _extract_req_billing(SimpleNamespace(headers={"anthropic-beta": "prompt-caching-1h"}))
-    ctx = _extract_billing_context(None, req_ctx)
-    assert ctx["params"]["headers"] == {"anthropic-beta": "prompt-caching-1h"}
+def test_extract_billing_context_cache_ttl_1h_from_response_breakdown():
+    # 1h 缓存写唯一可得信号：响应侧 ephemeral_1h 细分（请求侧无 headers 可读）。
+    ctx = _extract_billing_context(None, cache_creation_1h=600)
     assert ctx["params"]["cache_ttl_1h"] is True
 
 
-def test_extract_billing_context_accepts_already_nested_request_context():
-    ctx = _extract_billing_context(
-        None,
-        {"params": {"service_tier": "priority", "cache_ttl_1h": True}},
-    )
-    assert ctx["params"] == {"service_tier": "priority", "cache_ttl_1h": True}
+def test_extract_billing_context_1h_zero_or_absent_not_flagged():
+    assert _extract_billing_context(None, cache_creation_1h=0) == {}
+    assert _extract_billing_context(None) == {}
+    assert _extract_billing_context(SimpleNamespace()) == {}
 
 
-def test_extract_billing_context_debug_logs_names_only(caplog):
+def test_extract_billing_context_debug_logs_keys_only(caplog):
     import logging as _logging
 
-    from cost_control.supplement import _extract_req_billing
-
     caplog.set_level(_logging.DEBUG, logger="cost_control.supplement")
-    # 请求侧带 Authorization：白名单过滤后只剩计费头，日志只见头名不见值。
-    req_ctx = _extract_req_billing(
-        SimpleNamespace(
-            extra_body={"service_tier": "flex"},
-            headers={"anthropic-beta": "prompt-caching-1h", "Authorization": "Bearer SECRET"},
-        )
-    )
-    ctx = _extract_billing_context(None, req_ctx)
-    assert "Authorization" not in str(ctx)
-    assert "SECRET" not in str(ctx)
+    _extract_billing_context(SimpleNamespace(service_tier="flex"), cache_creation_1h=5)
     text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "anthropic-beta" in text  # 只记录头名
-    assert "Bearer" not in text and "SECRET" not in text  # 绝不记录值
+    assert "params_keys" in text
+    assert "flex" not in text  # 只记字段名，绝不记值
 
 
 # ===== collect_response 集成：billing_context 贯通到成本计算 =====
@@ -223,15 +236,69 @@ def test_collect_response_service_tier_flows_into_tiered_expr_param():
     resp = SimpleNamespace(
         id="r2",
         usage=SimpleNamespace(input_other=100_000, input_cached=0, output=0),
-        raw_completion=None,
+        # service_tier 来自响应侧（OpenAI ChatCompletion.service_tier）
+        raw_completion=SimpleNamespace(service_tier="fast"),
     )
-    event = SimpleNamespace(unified_msg_origin="u", _cost_control_billing_req={})
-    # 模拟请求侧 fast tier（capture_req_billing 正常链路）
-    host.capture_req_billing(event, SimpleNamespace(extra_body={"service_tier": "fast"}))
-    rec = asyncio.run(host.collect_response(event, resp))
+    rec = asyncio.run(host.collect_response(SimpleNamespace(unified_msg_origin="u"), resp))
     assert rec["billing_context"]["params"]["service_tier"] == "fast"
-    # p=100000 × 4（fast） / 1M = $0.4，param() 必须读到嵌套后的 service_tier
+    # p=100000 × 4（fast） / 1M = $0.4，param() 必须读到响应侧 service_tier
     assert rec["cost_amount"] == pytest.approx(0.4)
+
+
+def test_collect_response_anthropic_1h_cache_billed_via_cc1h():
+    """响应侧 ephemeral_1h 细分 → cache_creation_1h / cache_ttl_1h / cc1h 变量计价。"""
+    import asyncio
+
+    user = {"prov": {"mode": "tiered_expr", "expr": 'tier("std", cc + cc1h * 2)'}}
+    host = _CollectHost({"user": user})
+    raw = SimpleNamespace(
+        usage=SimpleNamespace(
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_input_tokens=1_000_000,
+            cache_read_input_tokens=0,
+            cache_creation=SimpleNamespace(
+                ephemeral_5m_input_tokens=400_000, ephemeral_1h_input_tokens=600_000
+            ),
+        )
+    )
+    resp = SimpleNamespace(
+        id="r-1h",
+        usage=SimpleNamespace(input_other=0, input_cached=0, output=0),
+        raw_completion=raw,
+    )
+    rec = asyncio.run(host.collect_response(SimpleNamespace(unified_msg_origin="u"), resp))
+    assert rec["cache_creation"] == 1_000_000
+    # 1h 细分不落独立列；持久化形态是 billing_context 的 cache_ttl_1h 标志，
+    # 金额在采集时已按 cc1h 价固化进 cost_amount。
+    assert rec["billing_context"]["params"]["cache_ttl_1h"] is True
+    # 5m 写 400k ×1 + 1h 写 600k ×2 = 1.6M token 单位 → $1.6
+    assert rec["cost_amount"] == pytest.approx(1.6)
+
+
+def test_collect_response_deepseek_miss_not_double_billed():
+    """DeepSeek miss token 只按 input_other 收一次，不再冒充 cache_creation 加收。"""
+    import asyncio
+
+    user = {"prov": {"mode": "per_token", "input": 1.0, "output": 2.0}}
+    host = _CollectHost({"user": user})
+    # AstrBot openai_source 映射：input_other = prompt_tokens - 0 = hit(80)+miss(20)
+    resp = SimpleNamespace(
+        id="r-ds",
+        usage=SimpleNamespace(input_other=100, input_cached=0, output=0),
+        raw_completion=SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                prompt_cache_hit_tokens=80,
+                prompt_cache_miss_tokens=20,
+            )
+        ),
+    )
+    rec = asyncio.run(host.collect_response(SimpleNamespace(unified_msg_origin="u"), resp))
+    assert rec["cache_read"] == 80
+    assert rec["cache_creation"] is None
+    # 修复前：cache_creation=20 会让成本按 (100 + 20×1.0) / 1M 收 ≈ 2 倍
+    assert rec["cost_amount"] == pytest.approx(100 / 1_000_000)
 
 
 def test_collect_response_expr_failure_records_class_not_silent(caplog):
@@ -302,61 +369,6 @@ def test_collect_response_success_debug_logs_stay_safe(caplog):
     text = "\n".join(r.getMessage() for r in cost_records)
     assert 'tier("std", p * 2)' not in text  # 表达式原文只出现在长度计数里
     assert "123456" not in text and "123_456" not in text  # 用量数值绝不入日志
-
-
-def test_extract_req_billing_from_extra_body():
-    from cost_control.supplement import _extract_req_billing
-
-    req = SimpleNamespace(extra_body={"service_tier": "fast"})
-    assert _extract_req_billing(req)["service_tier"] == "fast"
-
-
-def test_extract_req_billing_anthropic_beta_1h():
-    from cost_control.supplement import _extract_req_billing
-
-    req = SimpleNamespace(extra_body={}, headers={"anthropic-beta": "prompt-caching-1h"})
-    ctx = _extract_req_billing(req)
-    assert ctx.get("cache_ttl_1h") is True
-    assert ctx["headers"]["anthropic-beta"] == "prompt-caching-1h"
-
-
-def test_extract_req_billing_never_captures_authorization():
-    from cost_control.supplement import _extract_req_billing
-
-    req = SimpleNamespace(
-        extra_body={},
-        headers={"anthropic-beta": "x", "Authorization": "Bearer SECRET"},
-    )
-    ctx = _extract_req_billing(req)
-    assert "Authorization" not in str(ctx)
-    assert "SECRET" not in str(ctx)
-
-
-def test_extract_req_billing_none_and_garbage():
-    from cost_control.supplement import _extract_req_billing
-
-    assert _extract_req_billing(None) == {}
-    # headers 非 dict、extra_body 缺失等异常形状都吞掉返回 {}
-    assert _extract_req_billing(SimpleNamespace(extra_body="notdict", headers=42)) == {}
-
-
-def test_read_req_billing_roundtrip():
-    from cost_control.supplement import SupplementMixin, _read_req_billing
-
-    mixin = SupplementMixin()
-    event = SimpleNamespace()
-    req = SimpleNamespace(extra_body={"service_tier": "fast"})
-    mixin.capture_req_billing(event, req)
-    assert _read_req_billing(event)["service_tier"] == "fast"
-
-
-def test_capture_req_billing_empty_not_stashed():
-    from cost_control.supplement import SupplementMixin, _read_req_billing
-
-    mixin = SupplementMixin()
-    event = SimpleNamespace()
-    mixin.capture_req_billing(event, SimpleNamespace())  # 无可提取内容
-    assert _read_req_billing(event) == {}
 
 
 def test_collect_response_created_datetime_reaches_time_funcs(monkeypatch):

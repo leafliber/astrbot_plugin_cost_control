@@ -9,6 +9,8 @@ from cost_control.config import (
     get_price_sources,
     get_pricing,
     load_plugin_config,
+    mark_migration_done,
+    migration_done,
     normalize_price_sources,
     save_plugin_config,
     switches_from_config,
@@ -127,6 +129,40 @@ def test_plugin_config_overwrite(tmp_path):
     save_plugin_config(d, {"a": 2, "b": 3})
     assert load_plugin_config(d) == {"a": 2, "b": 3}
 
+
+# ===== 一次性迁移标记 =====
+
+
+def test_migration_done_default_false():
+    assert migration_done({}, "fix_mislabeled_cost_currency") is False
+    assert migration_done(None, "fix_mislabeled_cost_currency") is False
+    assert migration_done({"migrations": "bad-type"}, "fix_mislabeled_cost_currency") is False
+
+
+def test_mark_migration_done_sets_and_persists(tmp_path):
+    d = str(tmp_path)
+    cfg: dict = {"budgets": {"global_daily": 1000}}
+    save_plugin_config(d, cfg)
+
+    assert migration_done(cfg, "fix_mislabeled_cost_currency") is False
+    mark_migration_done(cfg, "fix_mislabeled_cost_currency")
+    assert migration_done(cfg, "fix_mislabeled_cost_currency") is True
+    # 其它配置不受影响
+    assert cfg["budgets"] == {"global_daily": 1000}
+
+    save_plugin_config(d, cfg)
+    reloaded = load_plugin_config(d)
+    assert migration_done(reloaded, "fix_mislabeled_cost_currency") is True
+    # 再跑一次标记幂等
+    mark_migration_done(cfg, "fix_mislabeled_cost_currency")
+    assert migration_done(cfg, "fix_mislabeled_cost_currency") is True
+
+
+def test_mark_migration_done_creates_block_when_missing():
+    cfg: dict = {}
+    mark_migration_done(cfg, "m1")
+    mark_migration_done(cfg, "m2")
+    assert cfg["migrations"] == {"m1": True, "m2": True}
 
 
 def test_price_sources_backfill_public_defaults_for_partial_config():

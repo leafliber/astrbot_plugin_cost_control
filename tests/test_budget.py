@@ -56,6 +56,13 @@ def test_day_window_start_invalid_fallback():
     assert day_window_start("garbage", now, SHANGHAI) == datetime(2026, 6, 14, 16, 0, tzinfo=UTC)
 
 
+def test_day_window_start_out_of_range_fallback():
+    # 越界时刻（25:00）不得抛异常（否则 check_budget 整体静默失效）。
+    now = datetime(2026, 6, 14, 16, 0, tzinfo=UTC)
+    assert day_window_start("25:00", now, SHANGHAI) == datetime(2026, 6, 14, 16, 0, tzinfo=UTC)
+    assert day_window_start("12:99", now, SHANGHAI) == datetime(2026, 6, 14, 16, 0, tzinfo=UTC)
+
+
 def test_month_window_start():
     # 06-14 12:30 UTC = 06-14 20:30 Shanghai；本月 1 日 00:00（本地）= 05-31 16:00 UTC
     now = datetime(2026, 6, 14, 12, 30, tzinfo=UTC)
@@ -110,6 +117,12 @@ def test_hhmm_to_cron():
 
 def test_hhmm_to_cron_invalid():
     assert hhmm_to_cron("bad") == "0 9 * * *"
+
+
+def test_hhmm_to_cron_out_of_range_not_wrapped():
+    # 越界时刻不得被取模静默折叠（25:00 → 01:00），必须回退默认并告警。
+    assert hhmm_to_cron("25:00") == "0 9 * * *"
+    assert hhmm_to_cron("09:70") == "0 9 * * *"
 
 
 class _FakeCtx:
@@ -450,9 +463,7 @@ class _FallbackRecordStub(BudgetMixin):
 
 
 def test_fallback_expr_failure_keeps_null_cost_and_debug_log(caplog):
-    host = _FallbackRecordStub(
-        {"user": {"prov": {"mode": "tiered_expr", "expr": "p * * c"}}}
-    )
+    host = _FallbackRecordStub({"user": {"prov": {"mode": "tiered_expr", "expr": "p * * c"}}})
     prov = SimpleNamespace(meta=lambda: SimpleNamespace(id="prov", model="m"))
     resp = SimpleNamespace(
         id="fallback-r1",
@@ -482,12 +493,12 @@ def test_fallback_record_preserves_billing_context_and_request_id():
     resp = SimpleNamespace(
         id="fallback-r2",
         usage=SimpleNamespace(input_other=1_000_000, input_cached=0, output=0),
-        raw_completion=None,
+        # service_tier 取响应侧（ProviderRequest 无 extra_body/headers 可提取）
+        raw_completion=SimpleNamespace(service_tier="priority"),
     )
     event = SimpleNamespace(
         unified_msg_origin="u",
         _cost_control_request_id="req-fallback",
-        _cost_control_billing_req={"service_tier": "priority"},
     )
 
     asyncio.run(host._record_fallback(event, prov, "prov", resp))
@@ -497,3 +508,100 @@ def test_fallback_record_preserves_billing_context_and_request_id():
     assert record["billing_context"]["params"]["service_tier"] == "priority"
     assert record["matched_tier"] == "fast"
     assert record["cost_amount"] == pytest.approx(2.0)
+
+
+# ===== per_model_daily：req.model 为 None 时解析生效模型，绝不拿会话用量冒充 =====
+
+
+class _BudgetQueryHost(BudgetMixin):
+    """check_budget 测试宿主：内存版 query_usage + 可配置生效 provider。"""
+
+    def __init__(self, provider: object | None) -> None:
+        self.cfg = {"budgets": {"per_model_daily": 500}, "budgets_cost": {}}
+        self.context = SimpleNamespace(
+            get_config=lambda: {},
+            get_using_provider=lambda umo: provider,
+        )
+        self.rows_by_filter: dict[str, dict[str, object]] = {}
+        self.model_queries: list[str] = []
+
+    def get_pricing(self) -> dict:  # cost 维度未配置，不应被触达
+        raise AssertionError("cost 维度未配置预算，get_pricing 不应被调用")
+
+    async def query_usage(self, **kw: object) -> dict[str, object]:
+        if kw.get("model"):
+            self.model_queries.append(str(kw["model"]))
+            return self.rows_by_filter.get("model", {})
+        if kw.get("umo"):
+            return self.rows_by_filter.get("umo", {})
+        return self.rows_by_filter.get("global", {})
+
+
+_SESSION_OVER_LIMIT = {
+    "token_input_other": 600,
+    "token_input_cached": 200,
+    "token_output": 200,
+    "count": 4,
+}  # 会话今日 1000 token ≥ 500 限额
+
+
+def test_resolve_request_model_prefers_get_model():
+    provider = SimpleNamespace(
+        get_model=lambda: "gpt-x",
+        meta=lambda: SimpleNamespace(id="p", model="meta-x"),
+    )
+    host = _BudgetQueryHost(provider)
+    assert host._resolve_request_model("u") == "gpt-x"
+
+
+def test_resolve_request_model_falls_back_to_meta():
+    provider = SimpleNamespace(meta=lambda: SimpleNamespace(id="p", model="meta-x"))
+    host = _BudgetQueryHost(provider)
+    assert host._resolve_request_model("u") == "meta-x"
+
+
+def test_resolve_request_model_unresolvable_returns_none():
+    assert _BudgetQueryHost(None)._resolve_request_model("u") is None
+    # provider 查询抛异常 → None（不阻断主流程）
+    host = _BudgetQueryHost(SimpleNamespace())
+    host.context = SimpleNamespace(
+        get_config=lambda: {},
+        get_using_provider=lambda umo: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert host._resolve_request_model("u") is None
+
+
+def test_check_budget_per_model_daily_uses_resolved_model_not_session():
+    # 场景（回归）：req.model 为 None + 会话用量 1000 ≥ 限额 500，但生效模型
+    # 今日用量为 0 ——修复前 model 未知 → per_model 冒用会话用量 → 误拦截。
+    provider = SimpleNamespace(
+        get_model=lambda: "gpt-x",
+        meta=lambda: SimpleNamespace(id="p", model="meta-x"),
+    )
+    host = _BudgetQueryHost(provider)
+    host.rows_by_filter = {"umo": dict(_SESSION_OVER_LIMIT), "model": {}, "global": {}}
+    result = asyncio.run(host.check_budget("u", None, event=None))
+    assert result["exceeded"] is False
+    assert host.model_queries == ["gpt-x"]  # 确实按解析出的模型查询了
+
+
+def test_check_budget_per_model_daily_still_blocks_when_model_over_limit():
+    provider = SimpleNamespace(get_model=lambda: "gpt-x")
+    host = _BudgetQueryHost(provider)
+    host.rows_by_filter = {
+        "umo": {},
+        "model": dict(_SESSION_OVER_LIMIT),
+        "global": {},
+    }
+    result = asyncio.run(host.check_budget("u", None, event=None))
+    assert result["exceeded"] is True
+    assert result["dim"] == "per_model_daily"
+
+
+def test_check_budget_per_model_daily_unknown_model_counts_zero():
+    # 模型彻底解析不到：per_model 按 0 计（宁可放行，不冒充会话用量误拦截）。
+    host = _BudgetQueryHost(None)
+    host.rows_by_filter = {"umo": dict(_SESSION_OVER_LIMIT), "global": {}}
+    result = asyncio.run(host.check_budget("u", None, event=None))
+    assert result["exceeded"] is False
+    assert host.model_queries == []

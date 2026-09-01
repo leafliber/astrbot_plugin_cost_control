@@ -325,6 +325,39 @@ class StoreMixin:
             logger.warning("[cost_control] query_supplements 失败: %s", e)
             return []
 
+    async def sum_supplement_tokens(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[int, int, int]:
+        """按窗口 SQL 聚合补充表三类 token 总量，返回 (input_other, input_cached, output)。
+
+        供缓存诊断等需要**窗口全量**语义的统计使用——避免「取最近 N 条再求和」
+        把窗口总量截断成样本总量。失败返回 (0, 0, 0)。
+        """
+        try:
+            from sqlalchemy import func
+
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                stmt = select(
+                    func.coalesce(func.sum(CostSupplement.token_input_other), 0),
+                    func.coalesce(func.sum(CostSupplement.token_input_cached), 0),
+                    func.coalesce(func.sum(CostSupplement.token_output), 0),
+                )
+                if start:
+                    stmt = stmt.where(CostSupplement.created_at >= start)
+                if end:
+                    stmt = stmt.where(CostSupplement.created_at <= end)
+                row = (await session.execute(stmt)).first()
+                if not row:
+                    return (0, 0, 0)
+                return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+        except Exception as e:
+            logger.warning("[cost_control] sum_supplement_tokens 失败: %s", e)
+            return (0, 0, 0)
+
     async def query_user_token_total(
         self,
         user_id: str,
@@ -353,6 +386,44 @@ class StoreMixin:
         except Exception as e:
             logger.warning("[cost_control] query_user_token_total 失败: %s", e)
             return 0
+
+    async def query_user_token_totals(
+        self,
+        start: datetime,
+        *,
+        limit: int = 500,
+    ) -> list[tuple[str, int]]:
+        """按 user_id 聚合自 ``start`` 以来的 token 三类总和（降序，供诊断报告）。
+
+        忽略 user_id 为空的行（无法归属到具体用户）。失败返回空列表。
+        """
+        try:
+            from sqlalchemy import func
+
+            maker = await self._ensure_session_maker()
+            async with maker() as session:
+                stmt = (
+                    select(
+                        CostSupplement.user_id,
+                        func.coalesce(
+                            func.sum(
+                                CostSupplement.token_input_other
+                                + CostSupplement.token_input_cached
+                                + CostSupplement.token_output
+                            ),
+                            0,
+                        ),
+                    )
+                    .where(CostSupplement.user_id.is_not(None))
+                    .group_by(CostSupplement.user_id)
+                    .order_by(func.sum(CostSupplement.token_input_other).desc())
+                    .limit(limit)
+                )
+                rows = (await session.execute(stmt)).all()
+                return [(str(r[0]), int(r[1] or 0)) for r in rows]
+        except Exception as e:
+            logger.warning("[cost_control] query_user_token_totals 失败: %s", e)
+            return []
 
     async def query_user_cost_total(
         self,
@@ -597,6 +668,10 @@ class StoreMixin:
         ``currency_symbol`` 为定价条目的实际货币，**不动** ``cost_amount``（保持
         历史快照）。仅处理 ``cost_amount IS NOT NULL AND currency_symbol == "USD"``
         的行，避免覆盖已正确固化的数据。
+
+        由 ``initialize`` 经 ``migrations`` 标记门控**只执行一次**：历史行的金额是
+        当时定价的快照，若每次启动按当前定价重标符号，用户事后给 provider 加
+        非 USD 定价会把真正的 USD 历史行改错（金额不动、符号变，口径错乱）。
 
         Args:
             pricing: :func:`get_pricing` 返回的 ``{"defaults", "user"}`` 结构。

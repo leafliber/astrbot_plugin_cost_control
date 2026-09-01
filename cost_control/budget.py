@@ -68,6 +68,9 @@ def day_window_start(refresh_time: str, now_utc: datetime, tz: ZoneInfo) -> date
         mm = int(parts[1])
     except (ValueError, IndexError):
         hh, mm = 0, 0
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        # 非法时刻（如 25:00）不得让 replace() 抛异常拖垮整个预算检查。
+        hh, mm = 0, 0
     now_local = now_utc.astimezone(tz)
     start_local = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if start_local > now_local:
@@ -311,6 +314,34 @@ class BudgetMixin:
         except Exception:
             return None
 
+    def _resolve_request_model(self, umo: str) -> str | None:
+        """尽力解析当前会话实际生效的模型名（``per_model_daily`` 用）。
+
+        ``ProviderRequest.model`` 常为 None（AstrBot 此时用 provider 默认模型），
+        而 ``ProviderStat.provider_model`` 记的是 ``provider.get_model()``——
+        预算查询必须用同一字符串才能对上账。优先 ``get_model()``，退化
+        ``meta().model``；失败返回 ``None``（per_model 维度按 0 计，绝不拿
+        会话用量冒充模型用量造成误拦截）。
+        """
+        try:
+            getter = getattr(self.context, "get_using_provider", None)
+            if not callable(getter):
+                return None
+            prov = getter(umo)
+            if prov is None:
+                return None
+            get_model = getattr(prov, "get_model", None)
+            if callable(get_model):
+                m = str(get_model() or "").strip()
+                if m:
+                    return m
+            meta = getattr(prov, "meta", None)
+            if callable(meta):
+                return str(getattr(meta(), "model", "") or "").strip() or None
+            return None
+        except Exception:
+            return None
+
     async def _user_id_for_request(self, event: Any) -> str | None:
         """从 event 读取 user_id（封装 :func:`supplement._safe_sender_id`）。"""
         from .supplement import _safe_sender_id
@@ -441,6 +472,10 @@ class BudgetMixin:
             provider_id = (
                 await self._provider_id_for_request(event, umo) if event is not None else None
             )
+            # req.model 为 None 时 AstrBot 会用 provider 默认模型；解析出该模型，
+            # per_model_daily 才能按真实模型用量评估（而非退化为会话用量误拦截）。
+            if not model:
+                model = self._resolve_request_model(umo)
 
             # ===== 1. 局部阈值（override）=====
             if overrides:
@@ -453,8 +488,8 @@ class BudgetMixin:
                     lt = float(ov.get("token_limit") or 0)
                     lc = float(ov.get("cost_limit") or 0)
                     if lt <= 0 and lc <= 0:
-                        # 规则未设上限，视为不限制；继续下一条 / 全局
-                        break
+                        # 规则未设上限，视为不限制；继续检查下一条规则 / 全局。
+                        continue
                     used_t = 0.0
                     used_c = 0.0
                     if lt > 0:
@@ -529,7 +564,8 @@ class BudgetMixin:
             if has_global_token:
                 session_usage = await self.query_usage(umo=umo, start=d_start)
                 session_total = total_tokens(session_usage)
-                model_total = session_total
+                # 模型未知时按 0 计（宁可不拦截，也不拿会话用量冒充模型用量）。
+                model_total = 0.0
                 if model:
                     model_total = total_tokens(await self.query_usage(model=model, start=d_start))
                 # per_user_daily：有 user_id 且配置了限额时，从补充表按 user_id
@@ -558,7 +594,8 @@ class BudgetMixin:
                     main_cur,
                     rates,
                 )
-                mod_cost = ses_cost
+                # 模型未知时按 0 计（同 token 维度，不冒充）。
+                mod_cost = 0.0
                 if model:
                     mod_cost = compute_cost_grouped_in_main(
                         await self.query_usage_cost_rows(pricing, model=model, start=d_start),
@@ -604,7 +641,11 @@ class BudgetMixin:
             result["stop_message"] = ""
             result["rule_idx"] = -1
             return result
-        except Exception:
+        except Exception as e:
+            # 预算检查是资损防线：静默返回「未超限」等于防线失效，必须留痕。
+            from astrbot import logger
+
+            logger.warning("[cost_control] 预算检查异常，按未超限放行: %s", e, exc_info=True)
             return zero
 
     # ===== 执行动作派发 =====
@@ -759,7 +800,6 @@ class BudgetMixin:
         from .supplement import (
             _extract_billing_context,
             _extract_cache,
-            _read_req_billing,
             _read_request_id,
             _safe_sender_id,
         )
@@ -769,11 +809,13 @@ class BudgetMixin:
         token_input_cached = int(getattr(usage, "input_cached", 0) or 0)
         token_output = int(getattr(usage, "output", 0) or 0)
         raw = getattr(resp, "raw_completion", None)
-        cache_creation, cache_read, raw_usage = _extract_cache(raw)
-        billing_context = _extract_billing_context(raw, _read_req_billing(event))
+        cache_creation, cache_read, raw_usage, cache_creation_1h = _extract_cache(raw)
+        billing_context = _extract_billing_context(raw, cache_creation_1h)
         params = billing_context.get("params") if isinstance(billing_context, dict) else None
         params = params if isinstance(params, dict) else {}
-        cache_creation_1h = (cache_creation or 0) if params.get("cache_ttl_1h") else 0
+        cache_creation_1h = int(cache_creation_1h or 0)
+        if cache_creation_1h <= 0 and params.get("cache_ttl_1h"):
+            cache_creation_1h = int(cache_creation or 0)
 
         provider_id = str(pid)
         provider_model = ""

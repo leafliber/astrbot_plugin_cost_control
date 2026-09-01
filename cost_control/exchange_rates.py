@@ -73,9 +73,9 @@ def convert(
 
     换算公式：``amount × (rate_to / rate_from)``。
 
-    兜底策略（任一货币不在 rates / DEFAULT_RATES 中）：
-    - 目标货币缺失 → rate=1（等同原值，避免异常）；
-    - 源货币缺失或 rate<=0 → 返回原值（避免除零）。
+    兜底策略（任一货币不在 rates / DEFAULT_RATES 中，或汇率非法 / <=0）：
+    返回原值——绝不把未知货币隐式当作 USD（rate=1），否则用非内置货币
+    （VND/CAD 等）定价的成本会被再乘目标汇率、虚增数个数量级。
     同货币直接返回原值。
 
     Args:
@@ -98,21 +98,27 @@ def convert(
     tbl = rates if rates else DEFAULT_RATES
     r_from = _lookup_rate(fc, tbl)
     r_to = _lookup_rate(tc, tbl)
-    if r_from <= 0:
-        return amount  # 源货币无汇率，避免除零
+    if r_from is None or r_from <= 0 or r_to is None or r_to <= 0:
+        return amount  # 任一货币缺汇率，返回原值
     return round(amount * (r_to / r_from), 8)
 
 
-def _lookup_rate(cur: str, rates: dict[str, float]) -> float:
-    """查某货币汇率：rates 优先 → DEFAULT_RATES → 1.0 兜底。"""
+def _lookup_rate(cur: str, rates: dict[str, float]) -> float | None:
+    """查某货币汇率：rates 优先 → DEFAULT_RATES；缺失或非法返回 ``None``。
+
+    不兜底 1.0——``None`` 让 :func:`convert` 把「查不到」与「无汇率」归一为
+    返回原值，而不是把未知货币隐式当作 USD。
+    """
     v = rates.get(cur)
     if v is None:
         v = DEFAULT_RATES.get(cur)
+    if v is None:
+        return None
     try:
-        f = float(v) if v is not None else 1.0
-        return f if f > 0 else 1.0
+        f = float(v)
     except (TypeError, ValueError):
-        return 1.0
+        return None
+    return f if f > 0 else None
 
 
 def get_main_currency(cfg: Any) -> str:
@@ -153,7 +159,9 @@ async def sync_rates(timeout: float = 10.0) -> tuple[dict[str, float], str, str]
     调用 ``open.er-api.com/v6/latest/USD``，解析 ``rates`` 字段。成功返回
     更新后的汇率表与当前 UTC 时间；失败返回 ``(DEFAULT_RATES, "", errmsg)``。
 
-    本函数只负责取数与解析，不写 config（由调用方持久化）。
+    本函数只负责取数与解析，不写 config（由调用方持久化）。阻塞的
+    urllib 请求在线程中执行（本函数跑在事件循环上，「立即同步」点击
+    期间不能卡住整个 bot）。
 
     Args:
         timeout: 请求超时秒数。
@@ -161,6 +169,13 @@ async def sync_rates(timeout: float = 10.0) -> tuple[dict[str, float], str, str]
     Returns:
         ``(rates, updated_at, error)``。error 非空表示失败（此时 rates 为静态表）。
     """
+    import asyncio
+
+    return await asyncio.to_thread(_sync_rates_blocking, timeout)
+
+
+def _sync_rates_blocking(timeout: float) -> tuple[dict[str, float], str, str]:
+    """:func:`sync_rates` 的同步实现（仅可在工作线程中调用）。"""
     import urllib.request
 
     try:

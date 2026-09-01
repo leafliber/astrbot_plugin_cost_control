@@ -740,8 +740,7 @@ def test_sync_source_rejects_first_empty_response_with_debug(caplog, monkeypatch
 def test_provider_token_resolves_env_and_skips_empty_entries(monkeypatch):
     monkeypatch.setenv("ASTRBOT_PRICE_KEY", "sk-from-env")
     assert (
-        ps._provider_token({"key": ["", "$MISSING_KEY", "${ASTRBOT_PRICE_KEY}"]})
-        == "sk-from-env"
+        ps._provider_token({"key": ["", "$MISSING_KEY", "${ASTRBOT_PRICE_KEY}"]}) == "sk-from-env"
     )
     assert ps._provider_token({"key": ["", "second-key"]}) == "second-key"
 
@@ -949,3 +948,22 @@ def test_sync_all_serializes_same_catalog_and_preserves_both_updates(monkeypatch
     assert max_active == 1
     assert set(catalog.sources) == {"litellm", "openrouter"}
     assert set(catalog.prices) == {"litellm:litellm-model", "openrouter:openrouter-model"}
+
+
+def test_to_float_rejects_non_finite():
+    from cost_control.price_sources import _to_float
+
+    assert _to_float(float("inf")) is None
+    assert _to_float(float("nan")) is None
+    assert _to_float("-1") is None
+    assert _to_float("1.5") == 1.5
+    assert _to_float(0) == 0
+
+
+def test_opt_float_rejects_non_finite():
+    from cost_control.price_catalog import _opt_float
+
+    assert _opt_float(float("inf")) is None
+    assert _opt_float(float("nan")) is None
+    assert _opt_float("-0.5") is None
+    assert _opt_float("2") == 2.0

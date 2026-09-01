@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import urllib.error
 import urllib.request
@@ -57,14 +58,15 @@ PER_TOKEN_MULTIPLIER = 1_000_000
 
 
 def _to_float(v: Any) -> float | None:
-    """安全转非负 float；None/空串/非法返回 None。"""
+    """安全转非负有限 float；None/空串/非法/inf/nan 返回 None。"""
     if v is None or v == "":
         return None
     try:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f >= 0 else None
+    # inf >= 0 为 True，必须显式排除，否则 inf 价格直接进目录。
+    return f if f >= 0 and math.isfinite(f) else None
 
 
 def _first_float(d: dict, *keys: str) -> tuple[float | None, bool]:
@@ -1037,7 +1039,8 @@ async def _sync_all_locked(
     concurrency: int,
     provider_cfg: ProviderCfgFn | None,
 ) -> dict[str, Any]:
-    catalog = load_catalog(data_dir)
+    # 目录可达数 MB，读写与解析都在线程中做，避免阻塞事件循环。
+    catalog = await asyncio.to_thread(load_catalog, data_dir)
     from .config import get_enabled_price_sources, get_price_sources
 
     source_cfg = get_price_sources(cfg)
@@ -1074,7 +1077,7 @@ async def _sync_all_locked(
         enabled = bool(source_cfg.get(res.source, {}).get("enabled", True))
         catalog.upsert_source(res.to_status(prev, enabled=enabled))
     catalog.updated_at = _now_iso()
-    catalog.save(data_dir)
+    await asyncio.to_thread(catalog.save, data_dir)
 
     return {
         "ok": all(r.status == "ok" for r in results),

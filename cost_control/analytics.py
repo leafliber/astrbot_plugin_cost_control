@@ -10,6 +10,7 @@ astrbot / DB，可单测）；DB 查询在 ``AnalyticsMixin.build_report`` 内�
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,7 +18,15 @@ from zoneinfo import ZoneInfo
 from .budget import day_window_start, resolve_tz
 from .cache_diag import hit_rate
 from .config import get_config
-from .cost import compute_cost_in_main, compute_row_cost, compute_row_cost_in_main
+from .cost import (
+    compute_cost_in_main,
+    compute_row_cost_in_main,
+    resolve_effective_pricing,
+)
+from .exchange_rates import convert as _convert
+
+# 生产环境经 root logger 汇入 astrbot/loguru；测试经 caplog 可捕获。
+logger = logging.getLogger("cost_control.analytics")
 
 
 def report_window_start(
@@ -80,19 +89,27 @@ def compare_windows(
     return cur_start, cur_end, prev_start, prev_end
 
 
-def _row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
-    """按 (provider_id, model) 解析定价算单行成本（纯函数辅助）。无定价返回 0.0。"""
-    return compute_row_cost(row, pricing)
-
-
-def _row_cost_in_main(
+def _safe_row_cost_in_main(
     row: dict[str, Any],
     pricing: dict[str, Any],
     main_cur: str,
     rates: dict[str, float],
 ) -> float:
-    """按 (provider_id, model) 解析定价算单行成本并换算到主货币（纯函数辅助）。"""
-    return compute_row_cost_in_main(row, pricing, main_cur, rates)
+    """单条聚合行的主货币成本；该行计算失败（如 tiered_expr 运行时除零）按 0 计。
+
+    报表是跨行聚合视图，一条坏记录只应损失自身那份成本（debug 日志可查），
+    绝不能把异常抛回 ``build_report`` 的大 except——那会让整份日 / 周 / 月报
+    静默变空。
+    """
+    try:
+        return compute_row_cost_in_main(row, pricing, main_cur, rates)
+    except Exception as e:
+        logger.debug(
+            "[cost_control] 报表 cost_by_model 单行失败 model=%s class=%s",
+            str(row.get("provider_model") or "-"),
+            type(e).__name__,
+        )
+        return 0.0
 
 
 def _aggregate_supplements(
@@ -107,10 +124,21 @@ def _aggregate_supplements(
         sups: ``CostSupplement`` 对象列表（duck-typed，含 ``cache_read`` /
             ``cache_creation`` / ``token_input_cached`` / ``token_input_other`` /
             ``injection_total`` / ``umo`` / token 三类属性）。
-        pricing: 模型单价表，非空时按模型算每条成本并按会话累加到
-            ``by_session[*].cost``（未定价为 0.0）。成本换算到 ``main_cur``。
+        pricing: 模型单价表，非空时按会话累加成本到 ``by_session[*].cost``。
         main_cur: 主货币代码。
         rates: 生效汇率表。
+
+    会话成本口径与明细页（``_supplement_to_dict``）一致：
+
+    - 优先用固化的 ``cost_amount`` + ``currency_symbol`` 按当前汇率换算到
+      ``main_cur``（金额是记录时刻定价的快照，不受之后定价改动影响）；
+    - ``per_request`` 无法逐行固化（单条恒 0），按 distinct
+      ``(provider_id, request_id)`` × 当前定价只计一次（以最早行的定价为准），
+      与 ``query_user_cost_total`` 同口径；``request_id`` 缺失的行无法归属，跳过；
+    - 无固化值的历史未回填行，回退按当前定价重算。
+
+    单行失败（如 tiered_expr 运行时除零）按 0 跳过并计一条 warning，绝不让
+    一条坏记录把整份报表打挂成空。
 
     Returns:
         ``{"cache_hit_rate": float, "cache_samples": int, "avg_injection": float,
@@ -120,7 +148,11 @@ def _aggregate_supplements(
     injections: list[int] = []
     sessions: dict[str, dict[str, Any]] = {}
     _rates = rates or {}
-    for s in sups or []:
+    # per_request：同一 (provider, request_id) 只计一次，以最早 LLM 调用行的定价为准。
+    req_charged: set[tuple[str, str]] = set()
+    failed = 0
+    ordered = sorted(sups or [], key=lambda s: str(getattr(s, "created_at", None) or ""))
+    for s in ordered:
         cache_read = getattr(s, "cache_read", None)
         if cache_read is None:
             cache_read = getattr(s, "token_input_cached", None)
@@ -144,22 +176,51 @@ def _aggregate_supplements(
         bucket = sessions.setdefault(umo, {"count": 0, "tokens": 0, "cost": 0.0})
         bucket["count"] += 1
         bucket["tokens"] += token_input_other + token_input_cached + token_output
-        if pricing is not None:
-            bucket["cost"] += compute_cost_in_main(
-                {
-                    "token_input_other": token_input_other,
-                    "token_input_cached": token_input_cached,
-                    "token_output": token_output,
-                    "cache_creation": getattr(s, "cache_creation", None),
-                    "billing_context": getattr(s, "billing_context", None),
-                    "created_at": getattr(s, "created_at", None),
-                },
-                getattr(s, "provider_id", None) or None,
-                getattr(s, "provider_model", None),
-                pricing,
-                main_cur,
-                _rates,
-            )
+        if pricing is None:
+            continue
+        try:
+            provider_id = getattr(s, "provider_id", None) or None
+            model = getattr(s, "provider_model", None)
+            created_at = getattr(s, "created_at", None)
+            rule = resolve_effective_pricing(provider_id, model, pricing, created_at)
+            if rule is not None and rule.get("mode") == "per_request":
+                rid = getattr(s, "request_id", None)
+                pid = provider_id or ""
+                if rid and (pid, str(rid)) not in req_charged:
+                    req_charged.add((pid, str(rid)))
+                    cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
+                    bucket["cost"] += _convert(
+                        float(rule.get("price", 0.0) or 0.0), cur, main_cur, _rates
+                    )
+            elif getattr(s, "cost_amount", None) is not None:
+                # 固化金额优先：与明细页同口径，按当前汇率换算到主货币。
+                bucket["cost"] += _convert(
+                    float(getattr(s, "cost_amount")),
+                    str(getattr(s, "currency_symbol", None) or "USD"),
+                    main_cur,
+                    _rates,
+                )
+            else:
+                # 回退：历史未回填行按当前定价重算并换算到主货币。
+                bucket["cost"] += compute_cost_in_main(
+                    {
+                        "token_input_other": token_input_other,
+                        "token_input_cached": token_input_cached,
+                        "token_output": token_output,
+                        "cache_creation": getattr(s, "cache_creation", None),
+                        "billing_context": getattr(s, "billing_context", None),
+                        "created_at": created_at,
+                    },
+                    provider_id,
+                    model,
+                    pricing,
+                    main_cur,
+                    _rates,
+                )
+        except Exception:
+            failed += 1
+    if failed:
+        logger.warning("[cost_control] 报表会话成本有 %d 条记录计算失败，已按 0 跳过", failed)
     by_session: list[dict[str, Any]] = [
         {
             "umo": umo,
@@ -247,12 +308,17 @@ class AnalyticsMixin:
                     + int(r.get("token_output", 0) or 0)
                 )
                 m["tokens"] += toks
-                m["cost"] += _row_cost_in_main(r, pricing, main_cur, rates)
+                # 单行失败按 0 计（见 _safe_row_cost_in_main），不让坏记录打挂整份报表。
+                m["cost"] += _safe_row_cost_in_main(r, pricing, main_cur, rates)
             cost_by_model = [{**m, "cost": round(float(m["cost"]), 6)} for m in model_agg.values()]
             cost_by_model.sort(key=lambda m: m["cost"], reverse=True)
             total_cost = round(sum(m["cost"] for m in cost_by_model), 6)
 
             sups = await self.query_supplements(start=start, limit=5000)
+            if len(sups) >= 5000:
+                logger.warning(
+                    "[cost_control] 月报补充记录达到 limit=5000，缓存/注入统计可能被截断"
+                )
             agg = _aggregate_supplements(sups, pricing, main_cur, rates)
 
             return {

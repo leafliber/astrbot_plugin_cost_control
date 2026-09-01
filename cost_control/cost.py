@@ -578,13 +578,28 @@ def _fallback_per_token(
     return None
 
 
+def _cache_creation_price(src: dict[str, Any], input_price: float) -> float:
+    """读 cache_creation 单价；None / 非法值回退 input 价。
+
+    0 是合法单价（显式免费，如 New API ``create_cache_ratio: 0``），不能用
+    ``or`` 兜底，否则显式免费会被当成未配置而按 input 价多计费。
+    """
+    raw = src.get("cache_creation")
+    if raw is None:
+        return input_price
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return input_price
+
+
 def _cost_per_token(usage: dict[str, Any], rule: dict[str, Any]) -> float:
     """per_token 模式成本（USD）。单价 USD / 百万 token。"""
     input_price = float(rule.get("input", 0.0) or 0.0)
     cached_price = float(rule.get("input_cached", 0.0) or 0.0)
     output_price = float(rule.get("output", 0.0) or 0.0)
     # cache_creation 单价缺省时按 input 价计（缓存写入通常等同或略高于输入）。
-    creation_price = float(rule.get("cache_creation", input_price) or input_price)
+    creation_price = _cache_creation_price(rule, input_price)
     cost = (
         int(usage.get("token_input_other", 0) or 0) * input_price
         + int(usage.get("token_input_cached", 0) or 0) * cached_price
@@ -642,7 +657,7 @@ def _cost_per_tier(usage: dict[str, Any], rule: dict[str, Any]) -> float:
     input_price = float(prices.get("input") or 0.0)
     cached_price = float(prices.get("input_cached") or 0.0)
     output_price = float(prices.get("output") or 0.0)
-    creation_price = float(prices.get("cache_creation") or input_price)
+    creation_price = _cache_creation_price(prices, input_price)
     cost = (
         int(usage.get("token_input_other", 0) or 0) * input_price
         + int(usage.get("token_input_cached", 0) or 0) * cached_price

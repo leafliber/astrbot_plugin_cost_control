@@ -20,7 +20,7 @@ from astrbot import logger
 
 from .budget import day_window_start, month_window_start, resolve_tz
 from .config import get_config, get_price_sync_config, get_pricing, get_rates
-from .cost import compute_cost_grouped_in_main
+from .cost import compute_row_cost_in_main
 from .exchange_rates import currency_to_symbol, get_main_currency
 
 REPORT_JOB_NAME = "cost_control_daily_report"
@@ -36,10 +36,14 @@ def hhmm_to_cron(hhmm: str) -> str:
     """
     try:
         parts = str(hhmm).strip().split(":")
-        hh = int(parts[0]) % 24
-        mm = int(parts[1]) % 60
+        hh = int(parts[0])
+        mm = int(parts[1])
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError(f"越界时刻 {hh:02d}:{mm:02d}")
         return f"{mm} {hh} * * *"
     except (ValueError, IndexError):
+        # 取模会把 25:00 静默折叠成 01:00，掩盖配置错误；直接回退并留痕。
+        logger.warning("[cost_control] 日报时刻 %r 非法（需 HH:MM 24小时制），回退 09:00", hhmm)
         return "0 9 * * *"
 
 
@@ -204,7 +208,11 @@ class ScheduleMixin:
             logger.warning("[cost_control] 历史清理失败: %s", e)
 
     async def _grouped_cost(self, *, start: datetime) -> float:
-        """按 (provider,model) 分组聚合用量并求和成本，换算到主货币（无定价的行计 0）。"""
+        """按 (provider,model) 分组聚合用量并逐行求和成本，换算到主货币。
+
+        单行计算失败（如 tiered_expr 运行时除零）按 0 跳过（debug 日志可查）：
+        日报推送绝不能因一条坏记录整体归零。无定价的行计 0。
+        """
         try:
             cfg = getattr(self, "cfg", None)
             pricing_getter = getattr(self, "get_pricing", None)
@@ -215,8 +223,19 @@ class ScheduleMixin:
                 if callable(cost_query)
                 else await self.query_usage_grouped(by="provider_model", start=start)
             )
-            return compute_cost_grouped_in_main(
-                rows, pricing, get_main_currency(cfg), get_rates(cfg)
-            )
-        except Exception:
+            main_cur = get_main_currency(cfg)
+            rates = get_rates(cfg)
+            total = 0.0
+            for r in rows:
+                try:
+                    total += compute_row_cost_in_main(r, pricing, main_cur, rates)
+                except Exception as e:
+                    logger.debug(
+                        "[cost_control] 日报成本单行失败 model=%s class=%s",
+                        str(r.get("provider_model") or "-") if isinstance(r, dict) else "-",
+                        type(e).__name__,
+                    )
+            return round(total, 6)
+        except Exception as e:
+            logger.warning("[cost_control] 日报成本聚合失败，按 0 计: %s", e, exc_info=True)
             return 0.0

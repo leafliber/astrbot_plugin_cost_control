@@ -360,3 +360,33 @@ def test_param_miss_logs_keys_only_at_debug(caplog):
     text = "\n".join(r.getMessage() for r in recs)
     assert "params.service_tier" in text  # 只列可用键名
     assert "flex-priority-secret" not in text  # 键值严格禁止
+
+
+def test_string_repeat_bomb_blocked_at_validation():
+    """链式字符串重复不能通过保存前校验（防热路径 OOM）。"""
+    bomb = 'has(("a"*1000)*1000*100, "a") ? 8 : 2'
+    msg = ee.validate_tiered_expr(bomb)
+    assert msg is not None
+    assert "字符串运算结果过长" in msg
+
+
+def test_string_repeat_bomb_blocked_at_eval():
+    bomb = 'has(("a"*1000)*1000*100, "a") ? 8 : 2'
+    with pytest.raises(ValueError, match="字符串运算结果过长"):
+        ee.eval_tiered_expr(bomb, {}, {})
+
+
+def test_small_string_repeat_still_works():
+    val, _ = ee.eval_tiered_expr('has("ab"*3, "abab") ? 8 : 2', {}, {})
+    assert val == pytest.approx(8)
+
+
+def test_string_concat_bounded():
+    val, _ = ee.eval_tiered_expr('has("a" + "b", "ab") ? 8 : 2', {}, {})
+    assert val == pytest.approx(8)
+
+
+def test_overlong_string_literal_rejected():
+    # 超长字面量先被 4000 字符总长拦截（字面量 10k 上限是纵深防御）。
+    msg = ee.validate_tiered_expr(f'has("{"x"*20001}", "x") ? 8 : 2')
+    assert msg is not None

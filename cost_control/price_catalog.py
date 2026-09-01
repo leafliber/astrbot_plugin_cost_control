@@ -16,6 +16,7 @@ substring(0.55~0.85)；New API 源 exact 命中排序置顶（自有网关报价
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -141,9 +142,10 @@ class PriceCatalog:
     sources: dict[str, SourceStatus] = field(default_factory=dict)
     prices: dict[str, CatalogPrice] = field(default_factory=dict)
     # 候选匹配缓存：key=(model, limit_per_source, sources-or-None)；prices 变更时必须清空
-    _candidate_cache: dict[
-        tuple[str, int, frozenset[str] | None], list[Candidate]
-    ] = field(default_factory=dict)
+    _candidate_cache: dict[tuple[str, int, frozenset[str] | None], list[Candidate]] = field(
+        default_factory=dict
+    )
+
     # ---- 持久化 ----
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -368,7 +370,8 @@ def _opt_float(v: Any) -> float | None:
         return None
     try:
         f = float(v)
-        return f if f >= 0 else None
+        # isfinite 排除 inf（inf >= 0 为 True，会绕过非负检查）。
+        return f if f >= 0 and math.isfinite(f) else None
     except (TypeError, ValueError):
         return None
 

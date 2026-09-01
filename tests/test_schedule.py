@@ -140,16 +140,16 @@ def test_grouped_cost_uses_host_effective_pricing(monkeypatch, tmp_path: Path) -
         observed["query"] = kwargs
         return [{"provider_id": "gateway", "model": "image", "count": 2}]
 
-    # _grouped_cost 现在用 compute_cost_grouped_in_main（带主货币换算）；
+    # _grouped_cost 现在逐行用 compute_row_cost_in_main（带主货币换算）；
     # mock 它，断言传入的 pricing 来自 host.get_pricing()。
-    def fake_compute(rows: object, pricing: object, main_cur: object, rates: object) -> float:
-        observed["rows"] = rows
+    def fake_compute(row: object, pricing: object, main_cur: object, rates: object) -> float:
+        observed["rows"] = [row]
         observed["pricing"] = pricing
         return 0.06
 
     host.query_usage_grouped = query_usage_grouped
     host.get_pricing = lambda: expected_pricing
-    monkeypatch.setattr("cost_control.schedule.compute_cost_grouped_in_main", fake_compute)
+    monkeypatch.setattr("cost_control.schedule.compute_row_cost_in_main", fake_compute)
 
     assert asyncio.run(host._grouped_cost(start=datetime.now(UTC))) == 0.06
     assert observed["pricing"] is expected_pricing

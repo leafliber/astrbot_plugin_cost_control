@@ -274,6 +274,36 @@ def test_compute_cost_cache_creation_anthropic():
     assert abs(cost - 3.75) < 1e-9
 
 
+def test_compute_cost_cache_creation_explicit_zero_is_free():
+    # 显式 cache_creation=0（如 New API create_cache_ratio: 0）= 缓存写免费，
+    # 不能被 ``or input_price`` 兜底当成未配置而按 input 价多计费。
+    usage = {
+        "token_input_other": 1_000_000,
+        "token_input_cached": 0,
+        "token_output": 0,
+        "cache_creation": 1_000_000,
+    }
+    with_flag = _per_token_partial(input=3.0, output=0.0, cache_creation=0.0)
+    without_flag = {
+        "mode": "per_token",
+        "input": 3.0,
+        "output": 0.0,
+        "cache_creation": 0,
+    }
+    for rule in (with_flag, without_flag):
+        user = {"prov": rule}
+        cost = compute_cost_value(usage, "prov", "claude-sonnet-4-5", pricing_full(user))
+        assert abs(cost - 3.0) < 1e-9  # 仅 input 计费，缓存写 0 元
+
+
+def test_compute_cost_cache_creation_missing_falls_back_to_input():
+    # 未配置 cache_creation（无候选 / 默认可继承）→ 按 input 价计（旧行为不变）。
+    user = {"prov": _per_token_partial(input=3.0, output=0.0)}
+    usage = {"token_input_other": 0, "token_output": 0, "cache_creation": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "zzz-no-such", pricing_full(user))
+    assert abs(cost - 3.0) < 1e-9
+
+
 def test_compute_cost_handles_missing_fields():
     assert compute_cost_value({}, None, "gpt-4o", pricing_struct()) == 0.0
 
@@ -572,6 +602,22 @@ def test_per_tier_row_aggregate():
         "token_output": 0,
     }
     assert abs(compute_row_cost(row, pricing_full(user)) - 1.0) < 1e-9
+
+
+def test_per_tier_cache_creation_explicit_zero_is_free():
+    # base 显式 cache_creation=0 → 缓存写免费，不被 ``or input`` 吞回 input 价。
+    user = {"prov": _per_tier_rule({"input": 1.0, "output": 2.0, "cache_creation": 0.0})}
+    usage = {"token_input_other": 1_000_000, "token_output": 0, "cache_creation": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert abs(cost - 1.0) < 1e-12
+
+
+def test_per_tier_cache_creation_missing_falls_back_to_input():
+    # base 未配 cache_creation → 按 input 价计（旧行为不变）。
+    user = {"prov": _per_tier_rule({"input": 1.0, "output": 2.0})}
+    usage = {"token_input_other": 1_000_000, "token_output": 0, "cache_creation": 1_000_000}
+    cost = compute_cost_value(usage, "prov", "m", pricing_full(user))
+    assert abs(cost - 2.0) < 1e-12
 
 
 # ---- tiered_expr ----

@@ -189,7 +189,8 @@ class CommandsMixin:
             events = await self.recent_events(umo)
             if events:
                 lines.append(f"最近破坏事件（共 {len(events)} 条，显示最新 5）：")
-                for ev in events[-5:]:
+                # recent_events 最新优先，取前 5 条才是最新 5 条。
+                for ev in events[:5]:
                     lines.append(f"  · [{ev.get('type')}] {ev.get('detail')}")
             else:
                 lines.append("未检测到缓存破坏事件")
@@ -198,13 +199,17 @@ class CommandsMixin:
             yield event.plain_result(f"查询失败：{e}")
 
     @_command("report")
-    async def cmd_report(self, event: AstrMessageEvent):
+    async def cmd_report(self, event: AstrMessageEvent, window: str = "daily"):
         """``/report``：生成用量 / 成本 / 缓存 / 归因综合报表。
 
         可选参数 ``daily``（默认）/ ``weekly`` / ``monthly`` 指定时间窗。
         """
         try:
-            arg = str(getattr(event, "message_str", "") or "").strip().lower()
+            # AstrBot 的 CommandFilter 只在内部局部变量里剥离命令名，不改写
+            # event.message_str（其仍含 "/report" 前缀），因此不能从 message_str
+            # 整串取参；命令参数经 handler 签名注入 kwargs（star_request.py
+            # ``call_handler(event, handler, **params)``）。此处仅做白名单校验。
+            arg = str(window or "").strip().lower()
             window = arg if arg in ("daily", "weekly", "monthly") else "daily"
             sym = currency_to_symbol(get_main_currency(getattr(self, "cfg", None)))
             report = await self.build_report(window=window)

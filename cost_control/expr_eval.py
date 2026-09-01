@@ -242,6 +242,41 @@ _ALLOWED_NODES = frozenset(
         ast.GtE,
     }
 )
+# 单个字符串字面量及其运算结果的长度上限：表达式会保存在定价规则中并在
+# 每次 LLM 请求热路径执行，必须封顶 ``("a"*N)*N*...`` 链式重复的内存放大。
+_MAX_STR_LEN = 10_000
+
+
+class _SafeStr(str):
+    """字符串字面量的安全代理：重复 / 拼接结果超过 :data:`_MAX_STR_LEN` 即抛错。
+
+    编译期把所有 str 常量包成本类；``str.__mul__`` 被覆盖且返回值仍是
+    ``_SafeStr``，因此链式 ``("a"*1000)*1000*100`` 在第二级重复即被拦截，
+    无法在单次求值中分配百 MB 级内存。传给 ``has``/``header`` 等白名单函数
+    时与普通 str 完全兼容。
+    """
+
+    def _guard(self, length: int) -> None:
+        if length > _MAX_STR_LEN:
+            raise ValueError(f"字符串运算结果过长（>{_MAX_STR_LEN} 字符）")
+
+    def __mul__(self, other: Any) -> "_SafeStr":
+        n = int(other)
+        self._guard(len(self) * abs(n))
+        return _SafeStr(str.__mul__(self, n))
+
+    def __rmul__(self, other: Any) -> "_SafeStr":
+        return self.__mul__(other)
+
+    def __add__(self, other: Any) -> "_SafeStr":
+        result = _SafeStr(str.__add__(self, other))
+        self._guard(len(result))
+        return result
+
+    def __radd__(self, other: Any) -> "_SafeStr":
+        return _SafeStr(other).__add__(self) if isinstance(other, str) else NotImplemented
+
+
 _ALLOWED_FUNCS = frozenset(
     {
         "tier",
@@ -277,6 +312,36 @@ def _check_node(node: ast.AST) -> None:
                 raise ValueError("仅允许调用白名单函数")
         if isinstance(sub, ast.Name) and sub.id.startswith("__"):
             raise ValueError("不允许双下划线标识符")
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and len(sub.value) > _MAX_STR_LEN:
+            raise ValueError(f"字符串字面量过长（>{_MAX_STR_LEN} 字符）")
+
+
+class _StrPlaceholderTransformer(ast.NodeTransformer):
+    """把 str 常量节点替换为占位符 Name，收集 ``_SafeStr`` 实例到 ``consts``。"""
+
+    def __init__(self) -> None:
+        self.consts: dict[str, _SafeStr] = {}
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:  # noqa: N802
+        if isinstance(node.value, str):
+            name = f"_s{len(self.consts)}"
+            self.consts[name] = _SafeStr(node.value)
+            return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+        return node
+
+
+def _wrap_str_constants(tree: ast.Expression) -> dict[str, "_SafeStr"]:
+    """把树中所有 str 常量替换为占位符 Name（``_sN``），返回占位符映射。
+
+    ``ast.Constant`` 只接受精确的内置类型（子类会让 ``compile`` 报错），因此用
+    Name 占位、求值时经 globals 注入 :class:`_SafeStr` 实例的方式实现字符串
+    字面量的长度封顶。必须在 :func:`_check_node` 之后调用（新增的 Name 节点
+    不再过白名单，但其 id 固定为 ``_sN``，不可被表达式作者控制）。
+    """
+    transformer = _StrPlaceholderTransformer()
+    transformer.visit(tree)
+    ast.fix_missing_locations(tree)
+    return transformer.consts
 
 
 def referenced_variables(expr: str) -> frozenset[str]:
@@ -286,7 +351,7 @@ def referenced_variables(expr: str) -> frozenset[str]:
     （cr/cc/cc1h 等）才会把对应 token 从粗粒度维度中拆走。
     """
     try:
-        code = _compile(expr)
+        code, _ = _compile(expr)
     except Exception:
         return frozenset()
     return frozenset(name for name in code.co_names if name in _VARIABLE_NAME_SET)
@@ -298,7 +363,7 @@ _COMPILE_CACHE: OrderedDict[str, Any] = OrderedDict()
 _COMPILE_CACHE_MAX = 256
 
 
-def _compile(expr: str) -> Any:
+def _compile(expr: str) -> tuple[Any, dict[str, _SafeStr]]:
     # 缓存键对齐上游语义：剥掉版本前缀后同一主体共享编译缓存。
     body = split_version_prefix(expr)
     key = hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -316,11 +381,13 @@ def _compile(expr: str) -> Any:
             len(expr),
         )
         raise
+    consts = _wrap_str_constants(tree)
     code = compile(tree, "<tiered_expr>", "eval")
-    _COMPILE_CACHE[key] = code
+    entry = (code, consts)
+    _COMPILE_CACHE[key] = entry
     if len(_COMPILE_CACHE) > _COMPILE_CACHE_MAX:
         _COMPILE_CACHE.popitem(last=False)
-    return code
+    return entry
 
 
 # ---- 求值 ----
@@ -486,8 +553,9 @@ def eval_tiered_expr(
         except Exception:
             namespace[name] = 0.0
 
-    code = _compile(expr)
-    result = eval(code, {"__builtins__": {}}, dict(namespace))  # 白名单 AST 已限制可执行范围
+    code, str_consts = _compile(expr)
+    # 字符串字面量经 globals 注入 _SafeStr 代理，封顶重复/拼接长度。
+    result = eval(code, {"__builtins__": {}, **str_consts}, dict(namespace))  # 白名单 AST 已限制可执行范围
     return float(result), trace.matched_tier
 
 

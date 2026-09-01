@@ -27,6 +27,7 @@ head 存、tail 取删。asyncio 单线程且 head→tail 在同一 ``call_event
 
 from __future__ import annotations
 
+import zlib
 from typing import Any
 
 from astrbot.api.provider import ProviderRequest
@@ -186,7 +187,9 @@ class AttributorMixin:
     def _attribution_sampled(self, req: Any) -> bool:
         """按 ``sample_rate``（百分比）决定本次是否采样。100 = 全采样。
 
-        无随机源（确定性采样）：用 ``id(req) % 100 < rate`` 近似，可复现。
+        确定性采样：对 ``id(req)`` 做稳定哈希后取模。不能用 ``id(req) % 100``
+        直接取模——CPython 对象地址按 16 字节对齐，取模结果只落在 4 的倍数上，
+        小采样率下实际命中概率系统性偏高（约 4 倍）。
         """
         cfg = get_config(getattr(self, "cfg", None), "attribution", {}) or {}
         rate = int(cfg.get("sample_rate", 100) or 0) if isinstance(cfg, dict) else 100
@@ -194,7 +197,7 @@ class AttributorMixin:
             return True
         if rate <= 0:
             return False
-        return (id(req) % 100) < rate
+        return (zlib.crc32(str(id(req)).encode()) % 100) < rate
 
     def estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
         """估算消息列表 token（Mixin 暴露口，转调纯函数）。"""

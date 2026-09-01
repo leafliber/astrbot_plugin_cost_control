@@ -220,9 +220,9 @@ class AiDiagMixin:
             refresh = str(get_config(getattr(self, "cfg", None), "refresh_time", "00:00"))
             start = report_window_start("weekly", now, tz, refresh)
             sups = await self.query_supplements(start=start, limit=500)
-            # 提取归因数据
+            # 提取归因数据（query_supplements 为最新优先，取前 20 条即最近 20 条）
             attributions: list[dict[str, Any]] = []
-            for s in sups[-20:]:  # 最近20条
+            for s in sups[:20]:
                 attr = getattr(s, "attribution", None)
                 if attr and isinstance(attr, dict):
                     attributions.append(
@@ -254,7 +254,7 @@ class AiDiagMixin:
                 resolve_tz,
                 total_tokens,
             )
-            from .config import get_config
+            from .config import get_config, get_currency_symbol, get_rates
 
             now = datetime.now(UTC)
             tz = resolve_tz(self.context)
@@ -267,6 +267,50 @@ class AiDiagMixin:
             limits = self.get_budgets()
             limits_cost = self.get_budgets_cost()
 
+            # 主货币口径的全局花费（诊断报告没有具体请求上下文，per_* 维度
+            # 的 token 用量取当日最大会话/用户/模型，代表最接近限额的主体）。
+            main_cur = get_currency_symbol(getattr(self, "cfg", None))
+            rates = get_rates(getattr(self, "cfg", None))
+            day_cost = month_cost = 0.0
+            try:
+                from .cost import compute_cost_grouped_in_main
+
+                pricing = self.get_pricing()
+                day_cost = compute_cost_grouped_in_main(
+                    await self.query_usage_cost_rows(pricing, start=d_start),
+                    pricing,
+                    main_cur,
+                    rates,
+                )
+                month_cost = compute_cost_grouped_in_main(
+                    await self.query_usage_cost_rows(pricing, start=m_start),
+                    pricing,
+                    main_cur,
+                    rates,
+                )
+            except Exception:
+                pass
+
+            async def _max_group_total(by: str) -> int:
+                best = 0
+                for g in await self.query_usage_grouped(by=by, start=d_start):
+                    best = max(
+                        best,
+                        int(g.get("token_input_other", 0) or 0)
+                        + int(g.get("token_input_cached", 0) or 0)
+                        + int(g.get("token_output", 0) or 0),
+                    )
+                return best
+
+            top_session = await _max_group_total("umo")
+            top_model = await _max_group_total("model")
+            top_user = 0
+            try:
+                user_totals = await self.query_user_token_totals(d_start)
+                top_user = user_totals[0][1] if user_totals else 0
+            except Exception:
+                pass
+
             dims: list[dict[str, Any]] = []
             dim_labels = {
                 "global_daily": "每日全局",
@@ -275,24 +319,40 @@ class AiDiagMixin:
                 "per_user_daily": "每用户·每日",
                 "per_model_daily": "每模型·每日",
             }
-            dim_used = {"global_daily": day_total, "global_monthly": month_total}
+            dim_used = {
+                "global_daily": day_total,
+                "global_monthly": month_total,
+                "per_session_daily": top_session,
+                "per_user_daily": top_user,
+                "per_model_daily": top_model,
+            }
+            dim_cost = {"global_daily": day_cost, "global_monthly": month_cost}
             for d in _DIM_ORDER:
                 lt = int(limits.get(d, 0) or 0)
                 lc = float(limits_cost.get(d, 0) or 0)
                 used = dim_used.get(d, 0)
+                cost_used = round(float(dim_cost.get(d, 0.0) or 0.0), 6)
                 if lt > 0 or lc > 0:
                     ratio = round(used * 100.0 / lt, 1) if lt > 0 else 0
-                    dims.append(
-                        {
-                            "dimension": dim_labels.get(d, d),
-                            "token_limit": lt,
-                            "token_used": used,
-                            "token_ratio": ratio,
-                            "cost_limit": lc,
-                            "exceeded": used >= lt if lt > 0 else False,
-                        }
-                    )
-            data["budgets"] = {"dimensions": dims}
+                    cost_ratio = round(cost_used * 100.0 / lc, 1) if lc > 0 else 0
+                    exceeded_t = used >= lt if lt > 0 else False
+                    exceeded_c = cost_used >= lc if lc > 0 else False
+                    entry: dict[str, Any] = {
+                        "dimension": dim_labels.get(d, d),
+                        "token_limit": lt,
+                        "token_used": used,
+                        "token_ratio": ratio,
+                        "exceeded": exceeded_t or exceeded_c,
+                    }
+                    if lc > 0:
+                        entry["cost_limit"] = lc
+                        entry["cost_used"] = cost_used
+                        entry["cost_ratio"] = cost_ratio
+                        entry["currency"] = main_cur
+                    if d.startswith("per_"):
+                        entry["note"] = "局部维度用量为当日最大主体的用量"
+                    dims.append(entry)
+            data["budgets"] = {"dimensions": dims, "currency": main_cur}
         except Exception as e:
             data["budgets"] = {"error": str(e)}
 

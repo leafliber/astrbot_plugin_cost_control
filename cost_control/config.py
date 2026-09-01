@@ -600,6 +600,21 @@ def save_plugin_config(data_dir: str, cfg: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def migration_done(cfg: dict[str, Any] | None, name: str) -> bool:
+    """一次性迁移 ``name`` 是否已完成（读 config 的 ``migrations`` 块）。"""
+    migrations = cfg.get("migrations") if isinstance(cfg, dict) else None
+    return bool(isinstance(migrations, dict) and migrations.get(name))
+
+
+def mark_migration_done(cfg: dict[str, Any], name: str) -> None:
+    """在 ``cfg`` 上置位一次性迁移标记（原地修改；持久化由调用方负责）。"""
+    migrations = cfg.get("migrations") if isinstance(cfg, dict) else None
+    if not isinstance(migrations, dict):
+        migrations = {}
+        cfg["migrations"] = migrations
+    migrations[name] = True
+
+
 def switches_from_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     """从 AstrBot 配置（``self.config``，仅含 schema 开关）抽取开关子集，供合并时覆盖。"""
     out: dict[str, Any] = {}

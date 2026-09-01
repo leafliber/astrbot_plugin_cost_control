@@ -79,22 +79,23 @@ class NotifierMixin:
             getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", None) or ""
         )
         now = datetime.now(UTC)
-        # 先检查冷却（不写入）：发送成功后再标记，避免发送失败却消耗冷却窗口，
-        # 导致后续告警被静默。
+        # 先标记冷却再发送（消除 check-then-mark 竞态：并发告警最多一条发出）；
+        # 发送失败则回滚冷却（ts=0 使冷却判定立即通过），下次仍可重试。
         if not await self._check_cooldown(umo, now):
             return False
+        await self._mark_cooldown(umo, now)
         try:
             from astrbot.api.event import MessageChain
 
             chain = MessageChain().message(message)
             send = getattr(event, "send", None)
             if send is None:
+                await self._mark_cooldown(umo, datetime.fromtimestamp(0, tz=UTC))
                 return False
             await send(chain)
         except Exception:
+            await self._mark_cooldown(umo, datetime.fromtimestamp(0, tz=UTC))
             return False
-        # 发送成功后才标记冷却（失败不消耗窗口，下次仍可重试）。
-        await self._mark_cooldown(umo, now)
         return True
 
     async def push_to_session(self, umo: str, message: str) -> bool:

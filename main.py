@@ -105,11 +105,23 @@ class Main(
                 logger.info("[cost_control] 已为 %d 条历史记录补算 cost_amount", n)
         except Exception as e:
             logger.warning("[cost_control] 历史记录补算失败（不影响运行）: %s", e)
-        # 一次性迁移：修正旧版 backfill 误标 USD 的历史行
+        # 一次性迁移：修正旧版 backfill 误标 USD 的历史行。完成即落 ``migrations``
+        # 标记——此后用户再给 provider 加非 USD 定价也不回头重标历史行（金额是
+        # 当时定价的快照，只改符号不改金额会造成记录页口径错乱）。
         try:
-            n = await self.fix_mislabeled_cost_currency(self.get_pricing())
-            if n > 0:
-                logger.info("[cost_control] 已修正 %d 条历史记录的货币标记", n)
+            from .cost_control.config import mark_migration_done, migration_done, save_plugin_config
+
+            _MIGRATION = "fix_mislabeled_cost_currency"
+            if not migration_done(getattr(self, "cfg", None), _MIGRATION):
+                n = await self.fix_mislabeled_cost_currency(self.get_pricing())
+                if n > 0:
+                    logger.info("[cost_control] 已修正 %d 条历史记录的货币标记", n)
+                mark_migration_done(self.cfg, _MIGRATION)
+                try:
+                    _dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
+                    save_plugin_config(_dir, self.cfg)
+                except Exception as e:
+                    logger.warning("[cost_control] 迁移标记持久化失败（下次启动将重跑）: %s", e)
         except Exception as e:
             logger.warning("[cost_control] 历史货币标记修正失败（不影响运行）: %s", e)
         try:
@@ -131,12 +143,12 @@ class Main(
         快照仅在未超限（或链路未处理）时记录。异常一律降级放行，绝不阻断主流程。
         """
         # 为本次用户请求生成 request_id（per_request 计费用；function-calling 多步复用）。
-        # 独立 try，绝不影响后续预算/归因逻辑。
+        # 计费上下文（service_tier / 1h 缓存）改由 on_llm_response 从响应侧解析——
+        # ProviderRequest（4.25.5）没有 extra_body/headers，请求侧无从提取。
         try:
             self.ensure_request_id(event)
-            self.capture_req_billing(event, req)
         except Exception as e:
-            logger.warning("[cost_control] request_id/计费上下文生成失败: %s", e)
+            logger.warning("[cost_control] request_id 生成失败: %s", e)
         try:
             umo = str(getattr(event, "unified_msg_origin", None) or "")
             model = getattr(req, "model", None) or None

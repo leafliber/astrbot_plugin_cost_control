@@ -82,11 +82,7 @@ def test_invalid_timezone_and_multiplier_are_rejected():
         )
     with pytest.raises(PricingScheduleValidationError, match="0–100"):
         normalize_pricing_schedules(
-            {
-                "prov": _raw_schedule(
-                    [_multiplier_period(adjustment={"type": "multiplier"})]
-                )
-            },
+            {"prov": _raw_schedule([_multiplier_period(adjustment={"type": "multiplier"})])},
             strict=True,
         )
 
@@ -149,7 +145,12 @@ def test_zero_schedule_multiplier_zeroes_cost_even_with_cluster_multiplier():
     schedule = normalize_pricing_schedules(
         {
             "prov": _raw_schedule(
-                [_multiplier_period(weekdays=[1, 2, 3, 4, 5, 6, 7], adjustment={"type": "multiplier", "value": 0})]
+                [
+                    _multiplier_period(
+                        weekdays=[1, 2, 3, 4, 5, 6, 7],
+                        adjustment={"type": "multiplier", "value": 0},
+                    )
+                ]
             )
         },
         strict=True,
