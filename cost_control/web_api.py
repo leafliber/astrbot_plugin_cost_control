@@ -109,6 +109,7 @@ def _deleted_provider_residues(
     provider_models: list[dict[str, Any]],
     usage_by_provider: dict[str, dict[str, int]],
     user_pricing: dict[str, Any],
+    pricing_schedules: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """汇总已不在当前配置中的 Provider 用量/定价残留（纯函数，便于测试）。"""
     configured_ids = {
@@ -116,21 +117,27 @@ def _deleted_provider_residues(
         for p in provider_models
         if isinstance(p, dict) and str(p.get("id") or "").strip()
     }
-    residue_ids = (set(usage_by_provider) | set(user_pricing)) - configured_ids
+    schedule_providers = {
+        str(target or "").split("|", 1)[0]
+        for target in (pricing_schedules or {})
+        if str(target or "").strip()
+    }
+    residue_ids = (set(usage_by_provider) | set(user_pricing) | schedule_providers) - configured_ids
     out: list[dict[str, Any]] = []
     for pid in residue_ids:
         pid_s = str(pid or "").strip()
         if not pid_s:
             continue
         usage = usage_by_provider.get(pid_s, {})
-        out.append(
-            {
-                "provider_id": pid_s,
-                "tokens": int(usage.get("tokens", 0) or 0),
-                "count": int(usage.get("count", 0) or 0),
-                "has_pricing": pid_s in user_pricing,
-            }
-        )
+        item = {
+            "provider_id": pid_s,
+            "tokens": int(usage.get("tokens", 0) or 0),
+            "count": int(usage.get("count", 0) or 0),
+            "has_pricing": pid_s in user_pricing,
+        }
+        if pid_s in schedule_providers:
+            item["has_pricing_schedule"] = True
+        out.append(item)
     out.sort(key=lambda x: (-x["tokens"], x["provider_id"]))
     return out
 
@@ -427,6 +434,8 @@ class WebApiMixin:
             "cost_error": cost_error,
             "cost_original": cost_original,
             "currency_symbol": currency_symbol,
+            "pricing_period_id": getattr(s, "pricing_period_id", None),
+            "pricing_period_name": getattr(s, "pricing_period_name", None),
             "created_at": _iso_utc(created),
         }
 
@@ -618,13 +627,13 @@ class WebApiMixin:
                 _rates = get_rates(cfg)
                 pricing = self.get_pricing()
                 day_cost = compute_cost_grouped_in_main(
-                    await self.query_usage_grouped(by="provider_model", start=d_start),
+                    await self.query_usage_cost_rows(pricing, start=d_start),
                     pricing,
                     _main_cur,
                     _rates,
                 )
                 month_cost = compute_cost_grouped_in_main(
-                    await self.query_usage_grouped(by="provider_model", start=m_start),
+                    await self.query_usage_cost_rows(pricing, start=m_start),
                     pricing,
                     _main_cur,
                     _rates,
@@ -736,7 +745,7 @@ class WebApiMixin:
 
             async def _stats(start: datetime, end: datetime) -> dict[str, Any]:
                 usage = await self.query_usage(start=start, end=end)
-                rows = await self.query_usage_grouped(by="provider_model", start=start, end=end)
+                rows = await self.query_usage_cost_rows(pricing, start=start, end=end)
                 cost = compute_cost_grouped_in_main(rows, pricing, main_cur, rates)
                 return {
                     "cost": cost,
@@ -804,7 +813,8 @@ class WebApiMixin:
                 pricing = self.get_pricing()
                 _mc = get_main_currency(getattr(self, "cfg", None))
                 _rt = get_rates(getattr(self, "cfg", None))
-                model_rows = await self.query_usage_timeseries_by_model(
+                model_rows = await self.query_usage_cost_timeseries(
+                    pricing,
                     start=start,
                     end=end,
                     bucket=bucket,
@@ -934,8 +944,8 @@ class WebApiMixin:
                     g["token_input_cached"] += tic
                     g["token_output"] += tio_out
             else:
-                pm_rows = await self.query_usage_grouped(
-                    by="provider_model",
+                pm_rows = await self.query_usage_cost_rows(
+                    pricing,
                     umo=umo,
                     provider=provider,
                     model=model,
@@ -1049,26 +1059,24 @@ class WebApiMixin:
             rates = get_rates(cfg)
 
             if has_cost:
-                from .cost import compute_cost_grouped_in_main, compute_row_cost_in_main
+                from .cost import compute_cost_grouped_in_main
 
                 pricing = self.get_pricing()
                 day_cost = compute_cost_grouped_in_main(
-                    await self.query_usage_grouped(by="provider_model", start=d_start),
+                    await self.query_usage_cost_rows(pricing, start=d_start),
                     pricing,
                     main_cur,
                     rates,
                 )
                 month_cost = compute_cost_grouped_in_main(
-                    await self.query_usage_grouped(by="provider_model", start=m_start),
+                    await self.query_usage_cost_rows(pricing, start=m_start),
                     pricing,
                     main_cur,
                     rates,
                 )
                 ses_cost = (
                     compute_cost_grouped_in_main(
-                        await self.query_usage_grouped(
-                            by="provider_model", umo=ses_key, start=d_start
-                        ),
+                        await self.query_usage_cost_rows(pricing, umo=ses_key, start=d_start),
                         pricing,
                         main_cur,
                         rates,
@@ -1077,8 +1085,13 @@ class WebApiMixin:
                     else 0.0
                 )
                 mod_cost = (
-                    round(compute_row_cost_in_main(top_model[0], pricing, main_cur, rates), 6)
-                    if top_model
+                    compute_cost_grouped_in_main(
+                        await self.query_usage_cost_rows(pricing, model=mod_key, start=d_start),
+                        pricing,
+                        main_cur,
+                        rates,
+                    )
+                    if mod_key
                     else 0.0
                 )
             else:
@@ -1146,9 +1159,7 @@ class WebApiMixin:
                             )
                         if ov.get("cost_limit", 0) > 0:
                             used_c_v = compute_cost_grouped_in_main(
-                                await self.query_usage_grouped(
-                                    by="provider_model", umo=tv, start=d_start
-                                ),
+                                await self.query_usage_cost_rows(pricing, umo=tv, start=d_start),
                                 pricing,
                                 main_cur,
                                 rates,
@@ -1160,8 +1171,8 @@ class WebApiMixin:
                             )
                         if ov.get("cost_limit", 0) > 0:
                             used_c_v = compute_cost_grouped_in_main(
-                                await self.query_usage_grouped(
-                                    by="provider_model", provider=tv, start=d_start
+                                await self.query_usage_cost_rows(
+                                    pricing, provider=tv, start=d_start
                                 ),
                                 pricing,
                                 main_cur,
@@ -1629,7 +1640,10 @@ class WebApiMixin:
             if not isinstance(user_pricing, dict):
                 user_pricing = {}
             deleted_providers = _deleted_provider_residues(
-                provider_models, usage_by_provider, user_pricing
+                provider_models,
+                usage_by_provider,
+                user_pricing,
+                pricing.get("schedules", {}),
             )
             # 已删除项也提示其历史模型能否命中内置价，避免把原本可定价的数据误标为
             # “未定价”。显示仍以 Provider 配置名为主，不伪造已不存在的供应商 type。
@@ -1723,6 +1737,8 @@ class WebApiMixin:
                     "provider_models": provider_models,
                     "deleted_providers": deleted_providers,
                     "user_pricing": user_pricing,
+                    "pricing_schedules": pricing.get("schedules", {}),
+                    "pricing_timezone": pricing.get("timezone", "Asia/Shanghai"),
                     "defaults": DEFAULT_PRICING,
                     "pricing_clusters": build_provider_pricing_clusters(provider_models),
                     "pricing_multipliers": pricing.get("multipliers", {}),
@@ -2090,28 +2106,44 @@ class WebApiMixin:
             supplements_deleted = await self.delete_supplements_by_provider(provider_id)
 
             pricing_deleted = False
+            pricing_schedule_deleted = False
             current_cfg = getattr(self, "cfg", None)
             if isinstance(current_cfg, dict):
                 current_pricing = current_cfg.get("pricing")
+                current_schedules = current_cfg.get("pricing_schedules")
+                next_cfg = dict(current_cfg)
+                changed = False
                 if isinstance(current_pricing, dict) and provider_id in current_pricing:
-                    next_cfg = dict(current_cfg)
                     next_pricing = dict(current_pricing)
                     del next_pricing[provider_id]
                     next_cfg["pricing"] = next_pricing
+                    pricing_deleted = True
+                    changed = True
+                if isinstance(current_schedules, dict):
+                    next_schedules = {
+                        key: value
+                        for key, value in current_schedules.items()
+                        if str(key).split("|", 1)[0] != provider_id
+                    }
+                    if len(next_schedules) != len(current_schedules):
+                        next_cfg["pricing_schedules"] = next_schedules
+                        pricing_schedule_deleted = True
+                        changed = True
+                if changed:
                     data_dir = getattr(self, "_data_dir", None) or str(self.get_data_dir())
                     save_plugin_config(data_dir, next_cfg)
                     self.cfg = deep_merge(CONFIG_DEFAULTS, next_cfg)
                     self._invalidate_runtime_pricing("provider_pricing_deleted")
-                    pricing_deleted = True
 
-            return self._ok(
-                {
-                    "provider_id": provider_id,
-                    "usage_deleted": usage_deleted,
-                    "supplements_deleted": supplements_deleted,
-                    "pricing_deleted": pricing_deleted,
-                }
-            )
+            payload = {
+                "provider_id": provider_id,
+                "usage_deleted": usage_deleted,
+                "supplements_deleted": supplements_deleted,
+                "pricing_deleted": pricing_deleted,
+            }
+            if pricing_schedule_deleted:
+                payload["pricing_schedule_deleted"] = True
+            return self._ok(payload)
         except Exception as e:
             return self._err(f"删除 Provider 残留数据失败：{e}")
 
@@ -2162,7 +2194,7 @@ class WebApiMixin:
         (:func:`coerce_to_default_type`)；``budget_overrides`` 逐条过
         :func:`normalize_budget_override`（非法整条丢弃）；``fallback_providers``
         逐条过 :func:`normalize_fallback_provider`；``pricing`` 接受任意 dict；
-        ``pricing_multipliers`` 接受 AstrBot ``provider_source_id`` 到 0.01–100 倍率的映射；
+        ``pricing_multipliers`` 接受 AstrBot ``provider_source_id`` 到 0–100 倍率的映射（0 = 该分组计零成本）；
         ``default_on_exceeded`` 限定 ``stop|fallback|warn``。未知 key 忽略。
         """
         if not isinstance(body, dict):
@@ -2208,6 +2240,14 @@ class WebApiMixin:
                     if n is not None:
                         normalized_p[pid_s] = n
                 out[k] = normalized_p
+            elif k == "pricing_schedules":
+                from .config import normalize_pricing_schedules
+                from .pricing_schedule import PricingScheduleValidationError
+
+                try:
+                    out[k] = normalize_pricing_schedules(v, strict=True)
+                except PricingScheduleValidationError as e:
+                    return None, str(e)
             elif k == "price_sources":
                 # 不能用 coerce_to_default_type（非空默认 dict 会丢弃 newapi:<pid> 动态键）
                 from .config import normalize_price_sources

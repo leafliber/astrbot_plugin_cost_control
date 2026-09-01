@@ -1041,6 +1041,127 @@ tr:hover td {
   border-color: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
+.pricing-badge--purple {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.time-pricing-editor {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.time-pricing-title-row,
+.time-period-head,
+.time-period-controls,
+.time-rule-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.time-pricing-title-row {
+  justify-content: space-between;
+}
+
+.time-pricing-toggle,
+.time-timezone,
+.time-multiplier {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.time-timezone .budget-input {
+  width: 180px;
+}
+
+.time-pricing-help {
+  margin: 7px 0 10px;
+}
+
+.time-period-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent) 2%);
+}
+
+.time-period-head .time-period-name {
+  flex: 1;
+  min-width: 140px;
+}
+
+.time-weekdays {
+  display: flex;
+  gap: 5px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+
+.time-weekdays label {
+  cursor: pointer;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.time-weekdays label.is-active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.time-weekdays input {
+  display: none;
+}
+
+.time-period-controls .budget-input[type="time"] {
+  width: 118px;
+}
+
+.time-multiplier .budget-input {
+  width: 92px;
+}
+
+.time-rule-editor {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+}
+
+.time-rule-token-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.time-add-period {
+  margin-top: 10px;
+}
+
+@media (max-width: 760px) {
+  .time-rule-token-grid {
+    grid-template-columns: repeat(2, minmax(100px, 1fr));
+  }
+
+  .time-timezone {
+    width: 100%;
+  }
+
+  .time-timezone .budget-input {
+    flex: 1;
+  }
+}
+
 /* 已删除 Provider 残留标签 */
 .pricing-tag-residue {
   font-size: 11px;

@@ -102,6 +102,8 @@ export interface RecordRow {
   cost_error?: string | null;
   cost_original?: number;
   currency_symbol?: string;
+  pricing_period_id?: string | null;
+  pricing_period_name?: string | null;
   created_at?: string;
 }
 
@@ -340,6 +342,25 @@ export type UserPricingEntry =
   | PerRequestEntry
   | PerTierEntry
   | TieredExprEntry;
+
+export interface PricingPeriod {
+  id: string;
+  name: string;
+  enabled: boolean;
+  weekdays: number[];
+  all_day: boolean;
+  start: string;
+  end: string;
+  adjustment:
+    | { type: "multiplier"; value: number }
+    | { type: "override"; rule: UserPricingEntry };
+}
+
+export interface PricingSchedule {
+  enabled: boolean;
+  timezone: string;
+  periods: PricingPeriod[];
+}
 // provider 实际匹配到的内置默认（主模型经 _best_match_key 模糊匹配，与后端计费同口径）
 export interface MatchedDefault {
   model: string;
@@ -363,6 +384,7 @@ export interface DeletedProviderInfo {
   tokens: number;
   count: number;
   has_pricing?: boolean;
+  has_pricing_schedule?: boolean;
   models?: string[];
   matched_default?: MatchedDefault | null;
 }
@@ -380,6 +402,7 @@ export interface DeleteProviderDataResult {
   usage_deleted: number;
   supplements_deleted: number;
   pricing_deleted: boolean;
+  pricing_schedule_deleted?: boolean;
 }
 
 export interface PricingUnpriced {
@@ -504,6 +527,8 @@ export interface PricingResponse {
   provider_models?: ProviderModelInfo[];
   deleted_providers?: DeletedProviderInfo[];
   user_pricing?: Record<string, UserPricingEntry>; // key=provider_id
+  pricing_schedules?: Record<string, PricingSchedule>;
+  pricing_timezone?: string;
   defaults?: Record<string, PriceEntry>; // key=模型名，per_token
   pricing_clusters?: PricingCluster[];
   pricing_multipliers?: Record<string, number>; // key=provider_source_id，缺省=1

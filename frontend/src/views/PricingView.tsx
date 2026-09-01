@@ -29,6 +29,14 @@ import {
   normalizeDefaultCurrency,
 } from "../components/ProviderPricingCard";
 import { SourceStatusBar } from "../components/price/SourceStatusBar";
+import {
+  TimePricingEditor,
+  draftToSchedule,
+  emptyTimeSchedule,
+  scheduleDraftHasData,
+  scheduleToDraft,
+  type TimeScheduleDraft,
+} from "../components/price/TimePricingEditor";
 
 interface PricingDisplayProvider {
   id: string;
@@ -42,6 +50,9 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const res = useApi(() => api.getPricing(), [refreshNonce]);
   const data = res.data;
   const [drafts, setDrafts] = useState<Record<string, DraftEntry>>({});
+  const [scheduleDrafts, setScheduleDrafts] = useState<
+    Record<string, TimeScheduleDraft>
+  >({});
   const [multiplierDrafts, setMultiplierDrafts] = useState<
     Record<string, string>
   >({});
@@ -98,6 +109,15 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       next[pid] = entryToDraft(entry, defaultCurrency);
     }
     setDrafts(next);
+    const nextSchedules: Record<string, TimeScheduleDraft> = {};
+    for (const [target, schedule] of Object.entries(data.pricing_schedules || {})) {
+      nextSchedules[target] = scheduleToDraft(
+        schedule,
+        data.pricing_timezone || "Asia/Shanghai",
+        defaultCurrency,
+      );
+    }
+    setScheduleDrafts(nextSchedules);
     const nextMultipliers: Record<string, string> = {};
     const currentClusterIds = new Set(
       (data.pricing_clusters || []).map((cluster) => cluster.id),
@@ -303,6 +323,12 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const ensureDraft = (pid: string): DraftEntry =>
     drafts[pid] ?? entryToDraft(undefined, defaultCurrency);
 
+  const ensureScheduleDraft = (pid: string): TimeScheduleDraft =>
+    scheduleDrafts[pid] ??
+    emptyTimeSchedule(data?.pricing_timezone || "Asia/Shanghai");
+  const updateScheduleDraft = (pid: string, value: TimeScheduleDraft) =>
+    setScheduleDrafts((prev) => ({ ...prev, [pid]: value }));
+
   const updateMultiplier = (clusterId: string, value: string) =>
     setMultiplierDrafts((prev) => ({ ...prev, [clusterId]: value }));
 
@@ -322,12 +348,21 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       const multiplier = Number(raw);
       if (
         !Number.isFinite(multiplier) ||
-        multiplier < 0.01 ||
+        multiplier < 0 ||
         multiplier > 100
       ) {
-        throw new Error("聚类倍率必须在 0.01–100 之间");
+        throw new Error("聚类倍率必须在 0–100 之间（0 表示该分组免费）");
       }
       if (Math.abs(multiplier - 1) > 1e-12) out[clusterId] = multiplier;
+    }
+    return out;
+  };
+
+  const collectSchedules = () => {
+    const out: Record<string, ReturnType<typeof draftToSchedule>> = {};
+    for (const [target, draft] of Object.entries(scheduleDrafts)) {
+      if (!scheduleDraftHasData(draft)) continue;
+      out[target] = draftToSchedule(draft);
     }
     return out;
   };
@@ -335,22 +370,25 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
   const payload = useMemo<{
     pricing: Record<string, UserPricingEntry> | null;
     pricing_multipliers: Record<string, number> | null;
+    pricing_schedules: ReturnType<typeof collectSchedules> | null;
     error?: string;
   }>(() => {
     try {
       return {
         pricing: collect(),
         pricing_multipliers: collectMultipliers(),
+        pricing_schedules: collectSchedules(),
       };
     } catch (e) {
       return {
         pricing: null,
         pricing_multipliers: null,
+        pricing_schedules: null,
         error: e instanceof Error ? e.message : String(e),
       };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drafts, multiplierDrafts]);
+  }, [drafts, multiplierDrafts, scheduleDrafts]);
 
   const { status, error, flush } = useAutoSave(
     payload,
@@ -359,6 +397,7 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       await api.postSaveConfig({
         pricing: p.pricing,
         pricing_multipliers: p.pricing_multipliers,
+        pricing_schedules: p.pricing_schedules,
       });
       // 局部刷新未定价告警，避免整页 refetch 导致闪烁
       try {
@@ -572,10 +611,14 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
     try {
       await api.postSaveConfig({
         pricing: {},
+        pricing_schedules: {},
         pricing_multipliers: {},
         price_selections: {},
       });
       setSelectionsOverride({});
+      setDrafts({});
+      setMultiplierDrafts({});
+      setScheduleDrafts({});
       setResetResult("✅ 已重置，立即生效");
       res.refetch();
     } catch (e) {
@@ -630,6 +673,18 @@ export function PricingView({ refreshNonce }: { refreshNonce: number }) {
       onClear={() => clearDraft(p.id)}
       onDeleteData={
         p.isDeletedResidue ? () => deleteResidualData(p.id) : undefined
+      }
+      timePeriodCount={
+        ensureScheduleDraft(p.id).enabled
+          ? ensureScheduleDraft(p.id).periods.filter((period) => period.enabled).length
+          : 0
+      }
+      timePricingEditor={
+        <TimePricingEditor
+          draft={ensureScheduleDraft(p.id)}
+          defaultCurrency={defaultCurrency}
+          onChange={(value) => updateScheduleDraft(p.id, value)}
+        />
       }
     />
   );

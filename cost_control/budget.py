@@ -353,13 +353,13 @@ class BudgetMixin:
         _rates = rates if rates else {}
         if tt == "umo":
             return compute_cost_grouped_in_main(
-                await self.query_usage_grouped(by="provider_model", umo=tv, start=d_start),
+                await self.query_usage_cost_rows(pricing, umo=tv, start=d_start),
                 pricing,
                 main_cur,
                 _rates,
             )
         if tt == "provider":
-            rows = await self.query_usage_grouped(by="provider_model", provider=tv, start=d_start)
+            rows = await self.query_usage_cost_rows(pricing, provider=tv, start=d_start)
             return compute_cost_grouped_in_main(rows, pricing, main_cur, _rates)
         if tt == "user":
             if not user_id:
@@ -553,7 +553,7 @@ class BudgetMixin:
                 from .cost import compute_cost_grouped_in_main
 
                 ses_cost = compute_cost_grouped_in_main(
-                    await self.query_usage_grouped(by="provider_model", umo=umo, start=d_start),
+                    await self.query_usage_cost_rows(pricing, umo=umo, start=d_start),
                     pricing,
                     main_cur,
                     rates,
@@ -561,9 +561,7 @@ class BudgetMixin:
                 mod_cost = ses_cost
                 if model:
                     mod_cost = compute_cost_grouped_in_main(
-                        await self.query_usage_grouped(
-                            by="provider_model", model=model, start=d_start
-                        ),
+                        await self.query_usage_cost_rows(pricing, model=model, start=d_start),
                         pricing,
                         main_cur,
                         rates,
@@ -586,13 +584,13 @@ class BudgetMixin:
                     "per_user_daily": user_total_c,
                     "per_model_daily": mod_cost,
                     "global_daily": compute_cost_grouped_in_main(
-                        await self.query_usage_grouped(by="provider_model", start=d_start),
+                        await self.query_usage_cost_rows(pricing, start=d_start),
                         pricing,
                         main_cur,
                         rates,
                     ),
                     "global_monthly": compute_cost_grouped_in_main(
-                        await self.query_usage_grouped(by="provider_model", start=m_start),
+                        await self.query_usage_cost_rows(pricing, start=m_start),
                         pricing,
                         main_cur,
                         rates,
@@ -836,6 +834,8 @@ class BudgetMixin:
             "currency_symbol": cur,
             "billing_context": billing_context or None,
             "matched_tier": usage_dict.pop("_matched_tier", None),
+            "pricing_period_id": usage_dict.pop("_pricing_period_id", None),
+            "pricing_period_name": usage_dict.pop("_pricing_period_name", None),
             "created_at": created,
         }
         await self.save_supplement(record)

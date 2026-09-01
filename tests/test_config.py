@@ -162,8 +162,9 @@ def test_get_pricing_includes_normalized_cluster_multipliers():
             "pricing_multipliers": {
                 "openai-main": "1.25",
                 "default-one": 1,
-                "invalid-zero": 0,
+                "free": 0,
+                "invalid-negative": -0.5,
             }
         }
     )
-    assert pricing["multipliers"] == {"openai-main": 1.25}
+    assert pricing["multipliers"] == {"openai-main": 1.25, "free": 0.0}

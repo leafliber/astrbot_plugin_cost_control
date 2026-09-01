@@ -309,6 +309,8 @@ class SupplementMixin:
         # tiered_expr 命中的阶梯名（tier() 回填到 usage_dict），供审计与调试；
         # 求值失败时把失败类别固化进 billing_context.params（绝不静默归零）。
         matched_tier = usage_dict.pop("_matched_tier", None)
+        pricing_period_id = usage_dict.pop("_pricing_period_id", None)
+        pricing_period_name = usage_dict.pop("_pricing_period_name", None)
         expr_error = usage_dict.pop("_expr_error", None)
         if expr_error and isinstance(billing_context, dict):
             billing_context.setdefault("params", {})["expr_error"] = str(expr_error)
@@ -329,6 +331,8 @@ class SupplementMixin:
             "user_id": user_id,
             "billing_context": billing_context or None,
             "matched_tier": matched_tier,
+            "pricing_period_id": pricing_period_id,
+            "pricing_period_name": pricing_period_name,
             "cost_amount": round(raw_cost, 6) if raw_cost is not None else None,
             "currency_symbol": cur,
             "created_at": created,

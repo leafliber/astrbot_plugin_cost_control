@@ -36,33 +36,41 @@ def test_deleted_provider_residues_excludes_current_and_unions_usage_pricing():
     ]
 
 
-def test_reset_all_payload_clears_pricing_multipliers_and_selections():
+def test_reset_all_payload_clears_pricing_schedules_multipliers_and_selections():
     from cost_control.web_api import WebApiMixin
 
     api = WebApiMixin()
     api.cfg = {
         "pricing": {"p": {"mode": "per_turn", "price": 1}},
+        "pricing_schedules": {"p": {"enabled": False, "periods": []}},
         "pricing_multipliers": {"source": 1.5},
         "price_selections": {"p": {"m": {"price_key": "litellm:m"}}},
     }
     merged, error = api._validate_save_payload(
-        {"pricing": {}, "pricing_multipliers": {}, "price_selections": {}}
+        {
+            "pricing": {},
+            "pricing_schedules": {},
+            "pricing_multipliers": {},
+            "price_selections": {},
+        }
     )
     assert error == ""
     assert merged is not None
     assert merged["pricing"] == {}
+    assert merged["pricing_schedules"] == {}
     assert merged["pricing_multipliers"] == {}
     assert merged["price_selections"] == {}
 
-    frontend = (
-        Path(__file__).parents[1] / "frontend/src/views/PricingView.tsx"
-    ).read_text(encoding="utf-8")
-    reset_call = frontend[frontend.index("const reset = async"):]
+    frontend = (Path(__file__).parents[1] / "frontend/src/views/PricingView.tsx").read_text(
+        encoding="utf-8"
+    )
+    reset_call = frontend[frontend.index("const reset = async") :]
     assert "price_selections: {}" in reset_call
+    assert "pricing_schedules: {}" in reset_call
 
-    records = (
-        Path(__file__).parents[1] / "frontend/src/views/RecordsView.tsx"
-    ).read_text(encoding="utf-8")
+    records = (Path(__file__).parents[1] / "frontend/src/views/RecordsView.tsx").read_text(
+        encoding="utf-8"
+    )
     assert "r.cost == null" in records
     assert '"—"' in records
 

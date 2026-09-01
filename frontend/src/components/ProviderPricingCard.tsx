@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Segmented } from "./Segmented";
 import type {
   MatchedDefault,
@@ -318,6 +318,8 @@ export function ProviderPricingCard({
   onDeleteData,
   expanded: expandedProp,
   onExpandedChange,
+  timePricingEditor,
+  timePeriodCount,
 }: {
   providerId: string;
   type?: string;
@@ -351,6 +353,9 @@ export function ProviderPricingCard({
   /** 受控展开态（父级记忆）；缺省时按未定价默认展开 */
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
+  /** 独立于基础定价的分时策略编辑器。 */
+  timePricingEditor?: ReactNode;
+  timePeriodCount?: number;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
   // 展开态由父级记忆（providerId 粒度），过滤/切聚类重挂载不丢
@@ -515,6 +520,11 @@ export function ProviderPricingCard({
             <span className="pricing-badge pricing-badge--gray">内置匹配</span>
           ) : (
             <span className="pricing-badge pricing-badge--red">未定价</span>
+          )}
+          {!!timePeriodCount && (
+            <span className="pricing-badge pricing-badge--purple">
+              分时 × {timePeriodCount}
+            </span>
           )}
         </div>
         <div
@@ -784,6 +794,7 @@ export function ProviderPricingCard({
               onChange={(patch) => onChange(patch)}
             />
           )}
+          {timePricingEditor}
         </>
       )}
     </div>

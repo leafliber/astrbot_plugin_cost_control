@@ -78,6 +78,9 @@ class CostSupplement(SQLModel, table=True):  # type: ignore[call-arg]
     billing_context: dict[str, Any] | None = Field(default=None, sa_type=JSON)
     # 表达式/阶梯求值命中的阶梯名（tier() 回填），供审计与调试；旧记录为 NULL。
     matched_tier: str | None = Field(default=None)
+    # 分时定价命中的稳定 ID / 展示名；未命中或旧记录为 NULL。
+    pricing_period_id: str | None = Field(default=None, index=True)
+    pricing_period_name: str | None = Field(default=None)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         index=True,
@@ -199,6 +202,14 @@ class StoreMixin:
                 await conn.execute(
                     text("ALTER TABLE cost_supplements ADD COLUMN matched_tier TEXT")
                 )
+            if "pricing_period_id" not in cols:
+                await conn.execute(
+                    text("ALTER TABLE cost_supplements ADD COLUMN pricing_period_id TEXT")
+                )
+            if "pricing_period_name" not in cols:
+                await conn.execute(
+                    text("ALTER TABLE cost_supplements ADD COLUMN pricing_period_name TEXT")
+                )
             # 索引（IF NOT EXISTS 在 SQLite 3.8+ 可用）
             await conn.execute(
                 text(
@@ -210,6 +221,12 @@ class StoreMixin:
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_cost_supplements_request_id "
                     "ON cost_supplements (request_id)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_cost_supplements_pricing_period_id "
+                    "ON cost_supplements (pricing_period_id)"
                 )
             )
         except Exception as e:
@@ -247,6 +264,8 @@ class StoreMixin:
             currency_symbol=record.get("currency_symbol"),
             billing_context=record.get("billing_context"),
             matched_tier=record.get("matched_tier"),
+            pricing_period_id=record.get("pricing_period_id"),
+            pricing_period_name=record.get("pricing_period_name"),
             created_at=record.get("created_at") or datetime.now(UTC),
         )
         maker = await self._ensure_session_maker()
@@ -354,7 +373,11 @@ class StoreMixin:
           request_id 为 NULL 的行无法归属，跳过。
         """
         try:
-            from .cost import TieredExprEvaluationError, compute_cost_with_currency, resolve_pricing
+            from .cost import (
+                TieredExprEvaluationError,
+                compute_cost_with_currency,
+                resolve_effective_pricing,
+            )
             from .exchange_rates import convert as _convert
 
             _rates = rates if rates else {}
@@ -367,13 +390,15 @@ class StoreMixin:
                 rows = list(result.scalars().all())
 
             total = 0.0
-            # per_request：按 provider 聚合 (price, 货币代码)
-            req_prices: dict[str, tuple[float, str]] = {}
+            # per_request：同一 (provider, request_id) 只计一次，以最早 LLM 调用时刻定价。
+            req_charges: dict[tuple[str, str], tuple[float, str]] = {}
+            rows.sort(key=lambda item: str(getattr(item, "created_at", None) or ""))
             for r in rows:
                 try:
                     provider_id = getattr(r, "provider_id", "") or None
                     model = getattr(r, "provider_model", None)
-                    rule = resolve_pricing(provider_id, model, pricing)
+                    created_at = getattr(r, "created_at", None)
+                    rule = resolve_effective_pricing(provider_id, model, pricing, created_at)
                     if rule is None:
                         continue
                     cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
@@ -400,25 +425,19 @@ class StoreMixin:
                         total += _convert(raw, cur, main_cur, _rates)
                     elif mode == "per_request":
                         pid = provider_id or ""
-                        req_prices[pid] = (float(rule.get("price", 0.0) or 0.0), cur)
+                        rid = getattr(r, "request_id", None)
+                        if rid:
+                            req_charges.setdefault(
+                                (pid, str(rid)),
+                                (float(rule.get("price", 0.0) or 0.0), cur),
+                            )
                 except TieredExprEvaluationError:
                     raise
                 except Exception:
                     continue
 
-            # per_request 精确：每个 provider 的 distinct request_id 数 × price，再换算到主货币
-            if req_prices:
-                distinct: dict[str, set[str]] = {}
-                for r in rows:
-                    pid = getattr(r, "provider_id", "") or ""
-                    if pid not in req_prices:
-                        continue
-                    rid = getattr(r, "request_id", None)
-                    if rid:
-                        distinct.setdefault(pid, set()).add(str(rid))
-                for pid, (price, cur) in req_prices.items():
-                    cnt = len(distinct.get(pid, set()))
-                    total += _convert(cnt * price, cur, main_cur, _rates)
+            for price, cur in req_charges.values():
+                total += _convert(price, cur, main_cur, _rates)
             return round(total, 6)
         except TieredExprEvaluationError:
             raise
@@ -559,6 +578,8 @@ class StoreMixin:
                         )
                         r.cost_amount = round(raw, 6)  # type: ignore[assignment]
                         r.currency_symbol = cur or "USD"  # type: ignore[assignment]
+                        r.pricing_period_id = usage.pop("_pricing_period_id", None)  # type: ignore[assignment]
+                        r.pricing_period_name = usage.pop("_pricing_period_name", None)  # type: ignore[assignment]
                         n += 1
                     except Exception:
                         continue

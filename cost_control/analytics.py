@@ -151,6 +151,8 @@ def _aggregate_supplements(
                     "token_input_cached": token_input_cached,
                     "token_output": token_output,
                     "cache_creation": getattr(s, "cache_creation", None),
+                    "billing_context": getattr(s, "billing_context", None),
+                    "created_at": getattr(s, "created_at", None),
                 },
                 getattr(s, "provider_id", None) or None,
                 getattr(s, "provider_model", None),
@@ -229,7 +231,7 @@ class AnalyticsMixin:
         }
         try:
             usage = await self.query_usage(start=start)
-            rows = await self.query_usage_grouped(by="provider_model", start=start)
+            rows = await self.query_usage_cost_rows(pricing, start=start)
             # 按 model 二次聚合（同模型可能由多个 provider 提供、不同价）
             model_agg: dict[str, dict[str, Any]] = {}
             for r in rows:

@@ -4,6 +4,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- 新增独立 `pricing_schedules` 峰谷分时定价层：支持 IANA 时区、星期、跨午夜、全日时段，以及基础价倍率或完整计费规则替换。
+- 定价页新增分时策略编辑器；明细页展示每次调用命中的计价时段。
+
+### 改进
+
+- 成本聚合对启用分时策略的 Provider 保留 UTC 分钟粒度，预算、总览、趋势、日报和 `/cost` 命令均按历史调用时刻选择价格。
+- 补充记录新增 `pricing_period_id` / `pricing_period_name` 审计字段及幂等 SQLite 迁移。
+- `pricing_multipliers` 聚类倍率支持下限改为 0：0 表示该 AstrBot Provider Source 分组计零成本（免费分组）。全链路生效于成本估算、预算比较、聊天命令与日报；同时修复计费内部 `or 1.0` 兜底会把 0 倍率吞回 1 倍的缺陷。
+- `pricing_schedules` 分时倍率支持下限改为 0：0 表示该时段计零成本（免费时段），可与聚类倍率任意叠加。
+
 ## [0.4.0] - 2026-08-30
 
 **定价体系大版本**：新增多源价格目录与 `per_tier` / `tiered_expr` 动态计费，供应商倍率落地为 AstrBot Provider Source 聚类维度并提供已下线 Provider 数据清理；同时集中修复多货币金额口径（P0）、SQLite 并发稳定性与 Mixin 命令绑定问题。

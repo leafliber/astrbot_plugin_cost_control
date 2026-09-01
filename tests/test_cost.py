@@ -317,6 +317,43 @@ def test_compute_cost_applies_cluster_multiplier_after_user_override():
     assert cost == 0.04
 
 
+def test_zero_cluster_multiplier_zeroes_default_per_token_cost():
+    # 0 是合法聚类倍率：默认表价格也应被清零，而非被 ``or 1.0`` 兜底回 1 倍。
+    usage = {"token_input_other": 1_000_000, "token_input_cached": 0, "token_output": 0}
+    cost = compute_cost_value(
+        usage,
+        "gpt-primary",
+        "gpt-4o",
+        pricing_struct(
+            multipliers={"source-main": 0},
+            provider_clusters={"gpt-primary": "source-main"},
+        ),
+    )
+    assert cost == 0.0
+
+
+def test_zero_cluster_multiplier_zeroes_per_turn_user_price():
+    user = {"prov_x": {"mode": "per_turn", "price": 0.02}}
+    cost = compute_cost_value(
+        {},
+        "prov_x",
+        "m",
+        pricing_struct(user, {"source-main": 0}, {"prov_x": "source-main"}),
+    )
+    assert cost == 0.0
+
+
+def test_zero_cluster_multiplier_zeroes_tiered_expr_at_result_level():
+    rule = {"mode": "tiered_expr", "expr": "p * 2"}
+    cost = compute_cost_value(
+        {"token_input_other": 1_000_000},
+        "prov",
+        "m",
+        pricing_struct({"prov": rule}, {"c1": 0}, {"prov": "c1"}),
+    )
+    assert cost == 0.0
+
+
 # ===== compute_row_cost / compute_cost_grouped（聚合行）=====
 
 

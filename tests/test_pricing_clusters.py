@@ -31,11 +31,12 @@ def test_normalize_pricing_multipliers_accepts_dynamic_source_ids():
             "openai-main": "1.5",
             "用户自定义供应商": 2,
             "default-one": 1,
-            "zero": 0,
+            "free": 0,
+            "negative": -1,
             "too-large": 101,
             "": 2,
         }
-    ) == {"openai-main": 1.5, "用户自定义供应商": 2.0}
+    ) == {"openai-main": 1.5, "用户自定义供应商": 2.0, "free": 0.0}
 
 
 def test_build_provider_pricing_clusters_only_groups_existing_providers():

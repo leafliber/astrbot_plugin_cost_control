@@ -277,6 +277,7 @@ export function RecordsView({ refreshNonce }: { refreshNonce: number }) {
                 <th>会话</th>
                 <th>模型</th>
                 <th>Provider</th>
+                <th>计价时段</th>
                 <th>输入</th>
                 <th>缓存</th>
                 <th>输出</th>
@@ -296,6 +297,15 @@ export function RecordsView({ refreshNonce }: { refreshNonce: number }) {
                     {r.provider_model || "-"}
                   </td>
                   <td className="mono">{r.provider_id || "-"}</td>
+                  <td>
+                    {r.pricing_period_name ? (
+                      <span className="pricing-badge pricing-badge--purple" title={r.pricing_period_id || ""}>
+                        {r.pricing_period_name}
+                      </span>
+                    ) : (
+                      <span className="muted">基础</span>
+                    )}
+                  </td>
                   <td>{fmtNum(r.token_input_other)}</td>
                   <td>{fmtNum(r.token_input_cached)}</td>
                   <td>{fmtNum(r.token_output)}</td>
@@ -319,7 +329,7 @@ export function RecordsView({ refreshNonce }: { refreshNonce: number }) {
             </tbody>
             <tfoot>
               <tr className="sum-row">
-                <td colSpan={4}>合计（{rows.length} 条）</td>
+                <td colSpan={5}>合计（{rows.length} 条）</td>
                 <td>{fmtNum(sums.input)}</td>
                 <td>{fmtNum(sums.cached)}</td>
                 <td>{fmtNum(sums.output)}</td>

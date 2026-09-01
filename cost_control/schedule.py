@@ -206,10 +206,15 @@ class ScheduleMixin:
     async def _grouped_cost(self, *, start: datetime) -> float:
         """按 (provider,model) 分组聚合用量并求和成本，换算到主货币（无定价的行计 0）。"""
         try:
-            rows = await self.query_usage_grouped(by="provider_model", start=start)
             cfg = getattr(self, "cfg", None)
             pricing_getter = getattr(self, "get_pricing", None)
             pricing = pricing_getter() if callable(pricing_getter) else get_pricing(cfg)
+            cost_query = getattr(self, "query_usage_cost_rows", None)
+            rows = (
+                await cost_query(pricing, start=start)
+                if callable(cost_query)
+                else await self.query_usage_grouped(by="provider_model", start=start)
+            )
             return compute_cost_grouped_in_main(
                 rows, pricing, get_main_currency(cfg), get_rates(cfg)
             )

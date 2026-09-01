@@ -55,6 +55,9 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # 5 维全局默认花费预算的货币代码（dim -> 代码，空=主货币）。
     "budgets_cost_currency": {},
     "pricing": {},  # 用户自定义定价，key=provider_id，value 按 mode（见 get_pricing）
+    # 分时定价策略（独立叠加层），key=provider_id 或 provider_id|model。
+    # 未命中任何时间段时继续使用 pricing / 价格源 / 内置表解析出的基础定价。
+    "pricing_schedules": {},
     # AstrBot Provider Source 供应商聚类倍率，key=provider_source_id；1 倍无需持久化。
     "pricing_multipliers": {},
     # 局部阈值（每条规则挂自己的 on_exceeded；优先级高于全局 5 维）。
@@ -236,7 +239,7 @@ def get_config(config: dict[str, Any] | None, key: str, default: Any = None) -> 
 
 
 def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
-    """返回生效定价：``{"defaults", "user", "multipliers"}``。
+    """返回生效定价：``{"defaults", "user", "schedules", "multipliers"}``。
 
     两套 key 空间并存、互不合并：
 
@@ -271,7 +274,13 @@ def get_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
             if norm is not None:
                 user[str(pid)] = norm
     multipliers = normalize_pricing_multipliers(get_config(config, "pricing_multipliers", {}) or {})
-    return {"defaults": defaults, "user": user, "multipliers": multipliers}
+    schedules = get_pricing_schedules(config)
+    return {
+        "defaults": defaults,
+        "user": user,
+        "schedules": schedules,
+        "multipliers": multipliers,
+    }
 
 
 def get_currency_symbol(config: dict[str, Any] | None) -> str:
@@ -507,6 +516,19 @@ def _normalize_tiered_expr(entry: dict[str, Any], currency: str) -> dict[str, An
     if validate_tiered_expr(expr) is not None:
         return None  # 非法表达式丢弃
     return {"mode": "tiered_expr", "expr": expr, "currency": currency}
+
+
+def normalize_pricing_schedules(raw: Any, *, strict: bool = False) -> dict[str, dict[str, Any]]:
+    """规范化分时定价策略；严格模式用于保存接口返回明确校验错误。"""
+    from .pricing_schedule import normalize_pricing_schedules as _normalize
+
+    return _normalize(raw, _normalize_user_entry, strict=strict)
+
+
+def get_pricing_schedules(config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """返回合法的分时策略；损坏条目在运行时安全跳过。"""
+    raw = get_config(config, "pricing_schedules", {}) or {}
+    return normalize_pricing_schedules(raw, strict=False)
 
 
 def _to_float_or_zero(v: Any) -> float:

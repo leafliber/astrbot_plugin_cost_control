@@ -11,7 +11,8 @@ def normalize_pricing_multipliers(raw: Any) -> dict[str, float]:
     """规范化 ``{provider_source_id: multiplier}``。
 
     AstrBot 的 Provider Source ID 是用户可配置字符串，不能限制为插件内置白名单。
-    这里只校验 ID 非空、长度合理，以及倍率处于 0.01–100；1 倍无需持久化。
+    这里只校验 ID 非空、长度合理，以及倍率处于 0–100；0 表示该分组计零成本，
+    1 倍无需持久化。
     """
     if not isinstance(raw, Mapping):
         return {}
@@ -24,7 +25,7 @@ def normalize_pricing_multipliers(raw: Any) -> dict[str, float]:
             multiplier = float(value)
         except (TypeError, ValueError):
             continue
-        if not math.isfinite(multiplier) or multiplier < 0.01 or multiplier > 100:
+        if not math.isfinite(multiplier) or multiplier < 0 or multiplier > 100:
             continue
         if abs(multiplier - 1.0) > 1e-12:
             out[source_id] = multiplier

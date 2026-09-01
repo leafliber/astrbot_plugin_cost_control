@@ -1,6 +1,7 @@
 """``UsageQueryMixin`` 单测：验证 ``aggregate_rows`` 聚合逻辑（纯函数）。"""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from cost_control.usage_query import aggregate_rows, bucketize_rows
 
@@ -102,3 +103,74 @@ def test_bucketize_by_hour():
     assert [b["bucket"] for b in result] == ["2026-06-01 01:00", "2026-06-01 02:00"]
     assert result[0]["token_input_other"] == 15
     assert result[1]["token_input_other"] == 7
+
+
+async def test_cost_rows_keep_minute_only_for_scheduled_providers():
+    from astrbot.core.db.po import ProviderStat
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlmodel import SQLModel
+
+    from cost_control.usage_query import UsageQueryMixin
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: SQLModel.metadata.create_all(
+                c, tables=[ProviderStat.__table__], checkfirst=True
+            )
+        )
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as session:
+        session.add_all(
+            [
+                ProviderStat(
+                    umo="u",
+                    provider_id="scheduled",
+                    provider_model="m",
+                    token_input_other=10,
+                    created_at=datetime(2026, 8, 31, 1, 0, tzinfo=UTC),
+                ),
+                ProviderStat(
+                    umo="u",
+                    provider_id="scheduled",
+                    provider_model="m",
+                    token_input_other=20,
+                    created_at=datetime(2026, 8, 31, 2, 0, tzinfo=UTC),
+                ),
+                ProviderStat(
+                    umo="u",
+                    provider_id="plain",
+                    provider_model="m",
+                    token_input_other=30,
+                    created_at=datetime(2026, 8, 31, 1, 0, tzinfo=UTC),
+                ),
+                ProviderStat(
+                    umo="u",
+                    provider_id="plain",
+                    provider_model="m",
+                    token_input_other=40,
+                    created_at=datetime(2026, 8, 31, 2, 0, tzinfo=UTC),
+                ),
+            ]
+        )
+        await session.commit()
+
+    query = UsageQueryMixin()
+    query.context = SimpleNamespace(get_db=lambda: SimpleNamespace(get_db=maker))
+    pricing = {
+        "schedules": {
+            "scheduled": {
+                "enabled": True,
+                "periods": [{"enabled": True}],
+            }
+        }
+    }
+    rows = await query.query_usage_cost_rows(pricing)
+    scheduled = [row for row in rows if row["provider_id"] == "scheduled"]
+    plain = [row for row in rows if row["provider_id"] == "plain"]
+    assert len(scheduled) == 2
+    assert all(row["created_at"] is not None for row in scheduled)
+    assert len(plain) == 1
+    assert plain[0]["token_input_other"] == 70
+    assert plain[0]["created_at"] is None
+    await engine.dispose()

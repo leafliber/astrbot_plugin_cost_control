@@ -153,6 +153,18 @@ def resolve_pricing(
         规范化规则 dict（``per_token``/``per_turn``/``per_request``/``per_tier``/
         ``tiered_expr``），或 ``None``。
     """
+    rule = _resolve_base_pricing(provider_id, model, pricing)
+    if rule is None:
+        return None
+    return _apply_cluster_multiplier(rule, provider_id, pricing)
+
+
+def _resolve_base_pricing(
+    provider_id: str | None,
+    model: str | None,
+    pricing: dict[str, Any],
+) -> dict[str, Any] | None:
+    """解析未套用供应商倍率与分时策略的基础规则。"""
     user = pricing.get("user") if isinstance(pricing, dict) else None
     user = user if isinstance(user, dict) else {}
     rule: dict[str, Any] | None = None
@@ -160,14 +172,12 @@ def resolve_pricing(
         # 1. 模型级手工价（精确 key）
         exact = user.get(f"{provider_id}|{model}")
         if isinstance(exact, dict) and exact.get("mode"):
-            return _apply_cluster_multiplier(
-                _inherit_per_token(exact, provider_id, model, pricing), provider_id, pricing
-            )
+            return _inherit_per_token(exact, provider_id, model, pricing)
     # 2. 持久化的价格选择（用户在定价页确认/保存过的候选，始终视为显式覆盖）
     if provider_id:
         sel = _persisted_selection(provider_id, model, pricing)
         if sel is not None:
-            return _apply_cluster_multiplier(sel, provider_id, pricing)
+            return sel
     # 3. 旧 provider 级手工价（模糊，排除模型级 key）——优先于未确认的自动候选
     if provider_id:
         legacy = {k: v for k, v in user.items() if "|" not in k}
@@ -177,12 +187,12 @@ def resolve_pricing(
             if isinstance(candidate, dict) and candidate.get("mode"):
                 rule = _inherit_per_token(candidate, provider_id, model, pricing)
     if rule is not None:
-        return _apply_cluster_multiplier(rule, provider_id, pricing)
+        return rule
     # 4. 自动匹配的目录候选（唯一高置信、不落盘）——低于一切手工价
     if provider_id:
         auto = _auto_selection(provider_id, model, pricing)
         if auto is not None:
-            return _apply_cluster_multiplier(auto, provider_id, pricing)
+            return auto
     # 5. 内置默认表
     defaults = pricing.get("defaults") if isinstance(pricing, dict) else None
     matched_model: str | None = None
@@ -192,6 +202,71 @@ def resolve_pricing(
             prices = defaults[matched_model]
             if isinstance(prices, dict) and prices:
                 rule = {"mode": "per_token", **prices}
+    if rule is None:
+        return None
+    return rule
+
+
+def resolve_effective_pricing(
+    provider_id: str | None,
+    model: str | None,
+    pricing: dict[str, Any],
+    created_at: Any,
+) -> dict[str, Any] | None:
+    """解析指定计费时刻的最终规则。
+
+    分时策略是基础定价之上的正交层：模型级精确策略优先于 Provider 级精确策略；
+    未命中时间段时原样使用基础规则。最后统一应用 Provider Source 聚类倍率。
+    时间缺失时不会用当前时刻猜测，而是安全回退基础规则。
+    """
+    from .pricing_schedule import match_pricing_period
+
+    base = _resolve_base_pricing(provider_id, model, pricing)
+    schedules = pricing.get("schedules") if isinstance(pricing, dict) else None
+    schedule: dict[str, Any] | None = None
+    if provider_id and isinstance(schedules, dict):
+        if model:
+            exact = schedules.get(f"{provider_id}|{model}")
+            if isinstance(exact, dict):
+                schedule = exact
+        if schedule is None:
+            candidate = schedules.get(provider_id)
+            if isinstance(candidate, dict):
+                schedule = candidate
+    period = None
+    if schedule is not None:
+        period = match_pricing_period(
+            schedule,
+            created_at,
+            default_timezone=str(pricing.get("timezone") or "UTC"),
+        )
+    rule = base
+    if isinstance(period, dict):
+        adjustment = period.get("adjustment")
+        if isinstance(adjustment, dict):
+            kind = str(adjustment.get("type") or "")
+            if kind == "multiplier" and rule is not None:
+                # 0 是合法分时倍率（该时段计零成本），不能用 ``or`` 兜底，否则 0 会被吞成 1。
+                raw_value = adjustment.get("value")
+                value = float(raw_value) if raw_value is not None else 1.0
+                rule = _apply_rule_multiplier(rule, value)
+            elif kind == "override" and isinstance(adjustment.get("rule"), dict):
+                override = dict(adjustment["rule"])
+                if rule is not None and "currency" not in override:
+                    override["currency"] = rule.get("currency", "USD")
+                if (
+                    rule is not None
+                    and override.get("mode") == "per_token"
+                    and rule.get("mode") == "per_token"
+                ):
+                    for field in _PER_TOKEN_FIELDS:
+                        if override.get(field) is None:
+                            override[field] = rule.get(field)
+                rule = override
+        if rule is not None:
+            rule = dict(rule)
+            rule["_pricing_period_id"] = str(period.get("id") or "")
+            rule["_pricing_period_name"] = str(period.get("name") or period.get("id") or "")
     if rule is None:
         return None
     return _apply_cluster_multiplier(rule, provider_id, pricing)
@@ -215,12 +290,18 @@ def _apply_cluster_multiplier(
     if not cluster_id:
         return rule
     try:
-        multiplier = float(multipliers.get(cluster_id, 1.0) or 1.0)
+        # 0 是合法聚类倍率（该分组计零成本），不能用 ``or`` 兜底，否则 0 会被吞成 1。
+        raw = multipliers.get(cluster_id)
+        multiplier = float(raw) if raw is not None else 1.0
     except (TypeError, ValueError):
         return rule
-    if multiplier <= 0 or abs(multiplier - 1.0) <= 1e-12:
+    if multiplier < 0 or abs(multiplier - 1.0) <= 1e-12:
         return rule
+    return _apply_rule_multiplier(rule, multiplier)
 
+
+def _apply_rule_multiplier(rule: dict[str, Any], multiplier: float) -> dict[str, Any]:
+    """对任意现有定价模式应用倍率，返回深度足够的副本。"""
     out = dict(rule)
     mode = str(out.get("mode", "per_token") or "per_token")
     if mode == "per_token":
@@ -247,8 +328,11 @@ def _apply_cluster_multiplier(
         ]
         return out
     if mode == "tiered_expr":
-        # 表达式语义不在单价层套倍率，改为在成本结果层乘回（见 _cost_tiered_expr）。
-        out["cluster_multiplier"] = multiplier
+        # 表达式语义不在单价层套倍率，改为在成本结果层乘回；分时与聚类倍率可叠加。
+        # 0 是合法倍率（计零成本），不能用 ``or`` 兜底，否则 0 会被吞成 1。
+        raw = out.get("cluster_multiplier")
+        current = float(raw) if raw is not None else 1.0
+        out["cluster_multiplier"] = current * multiplier
     return out
 
 
@@ -649,8 +733,18 @@ def _cost_tiered_expr(usage: dict[str, Any], rule: dict[str, Any]) -> float:
     )
     usage["_matched_tier"] = matched  # 供持久化回填
     cost = float(raw) / 1_000_000.0
-    multiplier = float(rule.get("cluster_multiplier", 1.0) or 1.0)
+    # 0 是合法聚类倍率（计零成本），不能用 ``or`` 兜底，否则 0 会被吞成 1。
+    raw_multiplier = rule.get("cluster_multiplier")
+    multiplier = float(raw_multiplier) if raw_multiplier is not None else 1.0
     return cost * multiplier
+
+
+def _mark_pricing_period(usage: dict[str, Any], rule: dict[str, Any]) -> None:
+    """把命中的分时段写回 usage，供补充记录持久化与诊断。"""
+    period_id = rule.get("_pricing_period_id")
+    if period_id:
+        usage["_pricing_period_id"] = str(period_id)
+        usage["_pricing_period_name"] = str(rule.get("_pricing_period_name") or period_id)
 
 
 def compute_cost_value(
@@ -684,9 +778,10 @@ def compute_cost_value(
         实际是该货币金额而非 USD，但历史调用方均按 USD 处理）。新代码应优先使用
         :func:`compute_cost_with_currency` 获取金额 + 货币代码，再按需换算。
     """
-    rule = resolve_pricing(provider_id, model, pricing)
+    rule = resolve_effective_pricing(provider_id, model, pricing, usage.get("created_at"))
     if rule is None:
         return 0.0
+    _mark_pricing_period(usage, rule)
     mode = rule.get("mode", "per_token")
     if mode == "per_token":
         return _cost_per_token(usage, rule)
@@ -721,9 +816,10 @@ def compute_cost_with_currency(
         ``(原始货币金额, 货币代码)``。未匹配定价返回 ``(0.0, "USD")``。
         per_request 单条返回 ``(0.0, 货币代码)``（聚合在调用方处理）。
     """
-    rule = resolve_pricing(provider_id, model, pricing)
+    rule = resolve_effective_pricing(provider_id, model, pricing, usage.get("created_at"))
     if rule is None:
         return 0.0, "USD"
+    _mark_pricing_period(usage, rule)
     cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
     mode = rule.get("mode", "per_token")
     if mode == "per_token":
@@ -783,7 +879,7 @@ def compute_row_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float:
     try:
         provider_id = row.get("provider_id") or None
         model = row.get("provider_model") or row.get("key")
-        rule = resolve_pricing(provider_id, model, pricing)
+        rule = resolve_effective_pricing(provider_id, model, pricing, row.get("created_at"))
         if rule is None:
             return 0.0
         mode = rule.get("mode", "per_token")
@@ -817,7 +913,7 @@ def compute_row_cost_in_main(
     try:
         provider_id = row.get("provider_id") or None
         model = row.get("provider_model") or row.get("key")
-        rule = resolve_pricing(provider_id, model, pricing)
+        rule = resolve_effective_pricing(provider_id, model, pricing, row.get("created_at"))
         if rule is None:
             return 0.0
         cur = str(rule.get("currency", "USD") or "USD").strip().upper() or "USD"
@@ -890,6 +986,7 @@ class CostMixin:
 
         cfg = getattr(self, "cfg", None)
         pricing = get_pricing(cfg)
+        pricing["timezone"] = "Asia/Shanghai"
         pricing["enabled_sources"] = get_enabled_price_sources(cfg)
         try:
             from .config import get_price_selections
@@ -898,6 +995,17 @@ class CostMixin:
 
             pricing["selections"] = get_price_selections(cfg)
             astrbot_config = self.context.get_config() or {}
+            try:
+                from zoneinfo import ZoneInfo
+
+                timezone = str(
+                    astrbot_config.get("timezone", "Asia/Shanghai")
+                    if hasattr(astrbot_config, "get")
+                    else "Asia/Shanghai"
+                )
+                pricing["timezone"] = ZoneInfo(timezone).key
+            except Exception:
+                pricing["timezone"] = "Asia/Shanghai"
             pricing["provider_clusters"] = provider_cluster_map_from_config(astrbot_config)
             data_dir = getattr(self, "_data_dir", None)
             if not data_dir:

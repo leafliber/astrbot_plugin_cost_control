@@ -3,7 +3,7 @@ import type { PricingCluster } from "../lib/types";
 
 function parseMultiplier(raw: string): number {
   const value = Number(raw);
-  return Number.isFinite(value) && value >= 0.01 && value <= 100 ? value : 1;
+  return Number.isFinite(value) && value >= 0 && value <= 100 ? value : 1;
 }
 
 export function PricingCatalog({
@@ -105,13 +105,14 @@ export function PricingCatalog({
                 {selected.name} 供应商倍率
               </span>
               <span className="muted small">
-                对该 AstrBot Provider Source 下的现有模型统一相乘；卡片中仍填写基准价。
+                对该 AstrBot Provider Source 下的现有模型统一相乘；卡片中仍填写基准价。0
+                表示该分组免费。
               </span>
             </div>
             <label className="pricing-multiplier-input-wrap">
               <input
                 type="number"
-                min="0.01"
+                min="0"
                 max="100"
                 step="0.05"
                 className="budget-input pricing-multiplier-input"
@@ -121,7 +122,7 @@ export function PricingCatalog({
                 }
                 onBlur={() => {
                   const value = Number(rawMultiplier);
-                  if (!Number.isFinite(value) || value < 0.01 || value > 100) {
+                  if (!Number.isFinite(value) || value < 0 || value > 100) {
                     onMultiplierChange(selected.id, "1");
                   }
                 }}
