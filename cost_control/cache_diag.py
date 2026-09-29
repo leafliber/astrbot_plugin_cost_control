@@ -137,7 +137,33 @@ def _line_diff(
             return None
         total = len(out)
         if total > max_lines:
-            out = out[:max_lines]
+            # 截断口径：优先保住**非上下文行**（真正的增删），再用上下文行补足。
+            #
+            # 原实现是 out[:max_lines]，即机械保留前 N 行。而插件注入类改动
+            # 绝大多数发生在 system prompt 的**末尾**（插件 on_llm_request 钩子
+            # 跑在核心人格注入之后，append 必然落在尾部），system prompt 又有
+            # 200+ 行 —— 前 max_lines 行全是稳定上下文，真变更整段被丢掉，
+            # 界面上只剩一句"（已截断，共 N 行 diff）"。
+            #
+            # 现实现：变更行全保留（放不下时按出现顺序取前 max_lines 条），
+            # 剩余额度用于取每个变更点前后各 2 行上下文，仍不够则从头部补。
+            # 输出维持原文顺序，不重排。
+            changed_idx = [i for i, d in enumerate(out) if d["op"] != " "]
+            if len(changed_idx) > max_lines:
+                keep = set(changed_idx[:max_lines])
+            else:
+                keep = set(changed_idx)
+                for i in changed_idx:
+                    for j in (i - 2, i - 1, i + 1, i + 2):
+                        if len(keep) >= max_lines:
+                            break
+                        if 0 <= j < total:
+                            keep.add(j)
+                for i in range(total):
+                    if len(keep) >= max_lines:
+                        break
+                    keep.add(i)
+            out = [out[i] for i in sorted(keep)]
             out.append({"op": " ", "text": f"…（已截断，共 {total} 行 diff）"})
         return out
     except Exception:
